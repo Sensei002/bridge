@@ -10,5 +10,10 @@ bridge-core = { path = "../../crates/bridge-core" }
 bridge-protocol = { path = "../../crates/bridge-protocol" }
 eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
 egui = "0.31"
-
+image = { version = "0.25", default-features = false, features = ["png"] }
 qrcode = "0.14"
+
+[build-dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
+ico = "0.4"
+winres = "0.1"
