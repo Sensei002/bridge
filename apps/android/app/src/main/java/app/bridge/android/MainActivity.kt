@@ -249,7 +249,7 @@ private fun FeatureLine(symbol: String, title: String, detail: String, status: S
 @Composable
 private fun HomeScreen(onPair: () -> Unit, onNavigate: (BridgeTab) -> Unit) {
     ScreenContent {
-        ScreenHeading("YOUR ECOSYSTEM", "Everything works\\nbetter together.", "A private space for the devices you use every day.")
+        ScreenHeading("YOUR ECOSYSTEM", "Everything works\nbetter together.", "A private space for the devices you use every day.")
         Panel {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
                 Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(7.dp)) {
