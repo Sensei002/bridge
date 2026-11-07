@@ -122,15 +122,15 @@ fn handle_network_client(mut stream: TcpStream, status: Sender<String>, pairing_
             let valid = parts.len() == 3 && pairing_code.lock().map(|code| !code.is_empty() && code.as_str() == parts[1]).unwrap_or(false);
             if valid {
                 if let Ok(mut code) = pairing_code.lock() { code.clear(); }
-                let _ = stream.write_all(b"BRIDGE_PAIRED/1\\n");
+                let _ = stream.write_all(b"BRIDGE_PAIRED/1\n");
                 let _ = status.send(format!("Android device paired: {}", parts[2]));
             } else {
-                let _ = stream.write_all(b"BRIDGE_REJECTED/1\\n");
+                let _ = stream.write_all(b"BRIDGE_REJECTED/1\n");
                 let _ = status.send("Rejected an invalid or expired pairing code".into());
             }
         }
         Ok(_) if line.trim() == "BRIDGE_PING/1" => {
-            let _ = stream.write_all(b"BRIDGE_PONG/1\\n");
+            let _ = stream.write_all(b"BRIDGE_PONG/1\n");
             let _ = status.send(format!("Bridge network test succeeded with {peer}"));
         }
         Ok(_) => { let _ = status.send(format!("Received an unknown test message from {peer}")); }
@@ -146,7 +146,7 @@ fn connect_to_peer(host: String, status: Sender<String>) {
             Duration::from_secs(4),
         ).and_then(|mut stream| {
             stream.set_read_timeout(Some(Duration::from_secs(4)))?;
-            stream.write_all(b"BRIDGE_PING/1\\n")?;
+            stream.write_all(b"BRIDGE_PING/1\n")?;
             let mut response = String::new();
             BufReader::new(stream).read_line(&mut response)?;
             if response.trim() == "BRIDGE_PONG/1" { Ok(()) }
