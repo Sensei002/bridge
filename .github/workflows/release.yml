@@ -10,24 +10,18 @@ permissions:
 
 jobs:
   windows:
-    name: Windows NSIS installer
+    name: Native Windows desktop release
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install NSIS
-        run: choco install nsis -y
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - working-directory: apps/desktop
-        run: npm install
-      - working-directory: apps/desktop
-        run: npm run tauri -- build
+      - uses: Swatinem/rust-cache@v2
+      - name: Build native Windows executable
+        run: cargo build --release --manifest-path apps/desktop/Cargo.toml
       - uses: actions/upload-artifact@v4
         with:
-          name: windows-installer
-          path: apps/desktop/src-tauri/target/release/bundle/nsis/*.exe
+          name: windows-native
+          path: target/release/bridge-desktop.exe
 
   android:
     name: Android release APK (unsigned)
@@ -48,7 +42,7 @@ jobs:
         run: gradle :app:assembleRelease :app:bundleRelease
       - uses: actions/upload-artifact@v4
         with:
-          name: android-release-apk
+          name: android-release
           path: |
             apps/android/app/build/outputs/apk/release/*.apk
             apps/android/app/build/outputs/bundle/release/*.aab

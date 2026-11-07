@@ -4,36 +4,42 @@
 
 Bridge is an open-source, local-first device interoperability project for Windows, Android, and iOS. The goal is to make nearby devices work together through one secure, permission-based ecosystem.
 
-> **Status: foundation build.** Native client shells and the shared Rust protocol/core foundation are in place. Device discovery, secure pairing, clipboard sync, and file transfer are not implemented yet.
+> **Status: foundation build.** Native client shells and the shared Rust protocol/core foundation are in place. Device discovery, authenticated network pairing, clipboard sync, and file transfer are not implemented yet.
 
 ## Platforms
 
-- **Windows:** Tauri 2 + Rust + React/TypeScript desktop client.
-- **Android:** Kotlin + Jetpack Compose, targeting Android API 37.
-- **iOS:** SwiftUI native app, generated from XcodeGen project configuration.
-- **Shared core:** Rust workspace with versioned protocol types and an in-memory device registry.
+- **Windows:** Native Rust + [egui](https://github.com/emilk/egui) desktop application. No WebView2, Tauri, Electron, Chromium, or embedded browser runtime.
+- **Android:** Kotlin + Jetpack Compose.
+- **iOS:** SwiftUI native app.
+- **Shared core:** Rust workspace with versioned protocol types, device registry, and pairing consent state machine.
 
 ## Repository layout
 
 - `crates/bridge-protocol` — versioned wire types.
 - `crates/bridge-core` — platform-independent domain logic.
-- `apps/desktop` — Windows desktop app.
+- `apps/desktop` — native Rust + egui Windows desktop app.
 - `apps/android` — Android app.
 - `apps/ios` — iOS app.
-- `docs/` — architecture, protocol, and roadmap.
+- `docs/` — architecture, protocol, security model, and roadmap.
 - `.github/workflows/` — CI and tag-based release automation.
 
 ## CI/CD
 
-Every push to `main` and every pull request runs GitHub Actions builds for:
+All compilation, tests, packaging, and releases run in GitHub Actions. No local build is required.
+
+Every push to `main` and every pull request validates Rust and builds:
 1. Rust formatting, Clippy, and unit tests.
-2. Windows desktop installer.
-3. Android API 37 debug APK.
+2. Native Windows desktop executable using egui.
+3. Android debug APK.
 4. iOS Simulator app.
 
-Push a version tag such as `v0.1.0` to build release assets and publish a GitHub Release automatically.
+Push a version tag such as `v0.2.0` to build release assets and publish a GitHub Release automatically.
 
-**Signing note:** Windows output is currently unsigned, Android release APK is unsigned, and iOS archive is unsigned. Store distribution requires signing certificates/provisioning profiles and repository secrets; none are committed to this repository.
+**Signing note:** Windows output is unsigned, Android release artifacts are unsigned, and iOS archive is unsigned. Store distribution requires signing certificates/provisioning profiles and repository secrets; none are committed to this repository.
+
+## Windows desktop technology
+
+The Windows client is a native Rust desktop application rendered by egui. It does not embed a browser engine and does not depend on Microsoft Edge WebView2 Runtime. The desktop build compiles directly from the Rust crate in `apps/desktop`.
 
 ## Security principles
 
@@ -44,15 +50,7 @@ Push a version tag such as `v0.1.0` to build release assets and publish a GitHub
 - No silent cloud upload or background relay.
 - Never commit secrets or signing keys.
 
-## Development roadmap
-
-1. Device identity, secure pairing, and revocation.
-2. Local discovery and authenticated encrypted sessions.
-3. Clipboard text/link sharing.
-4. File transfer with progress, cancellation, and integrity checks.
-5. Platform-specific capabilities where operating-system APIs permit.
-
-See [docs/roadmap.md](docs/roadmap.md), [CONTRIBUTING.md](CONTRIBUTING.md), and [SECURITY.md](SECURITY.md).
+See [docs/roadmap.md](docs/roadmap.md), [docs/protocol.md](docs/protocol.md), [docs/security-model.md](docs/security-model.md), [CONTRIBUTING.md](CONTRIBUTING.md), and [SECURITY.md](SECURITY.md).
 
 ## License
 
