@@ -130,7 +130,7 @@ impl eframe::App for BridgeApp {
             .frame(egui::Frame::new().fill(SIDEBAR).inner_margin(egui::Margin::symmetric(20, 12)))
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("BRIDGE").size(12.0).strong().tracking(2.0).color(TEXT));
+                    ui.label(egui::RichText::new("BRIDGE").size(12.0).strong().color(TEXT));
                     ui.separator();
                     muted(ui, "Private device workspace");
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -152,7 +152,7 @@ impl eframe::App for BridgeApp {
                             ui.label(egui::RichText::new("B").size(22.0).strong().color(BG));
                         });
                     ui.vertical(|ui| {
-                        ui.label(egui::RichText::new("BRIDGE").size(17.0).strong().tracking(2.0));
+                        ui.label(egui::RichText::new("BRIDGE").size(17.0).strong());
                         muted(ui, "EVERY DEVICE. ONE SPACE.");
                     });
                 });
