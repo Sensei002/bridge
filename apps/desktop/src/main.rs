@@ -2,7 +2,10 @@
 
 use eframe::egui;
 use std::io::{BufRead, BufReader, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{TcpListener, TcpStream, UdpSocket};
+use std::sync::{Arc, Mutex};
+use qrcode::QrCode;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::Duration;
@@ -55,12 +58,15 @@ struct BridgeApp {
     network_status: String,
     network_rx: Receiver<String>,
     network_tx: Sender<String>,
+    pairing_code: Arc<Mutex<String>>,
+    pairing_status: String,
 }
 
 impl Default for BridgeApp {
     fn default() -> Self {
         let (network_tx, network_rx) = mpsc::channel();
-        start_network_listener(network_tx.clone());
+        let pairing_code = Arc::new(Mutex::new(String::new()));
+        start_network_listener(network_tx.clone(), pairing_code.clone());
         Self {
             selected: Page::Overview,
             show_pair_dialog: false,
@@ -72,13 +78,15 @@ impl Default for BridgeApp {
             network_status: "Listening for Bridge test connections on port 45821".into(),
             network_rx,
             network_tx,
+            pairing_code,
+            pairing_status: "Waiting for Android to scan the QR code".into(),
         }
     }
 }
 
 const NETWORK_PORT: u16 = 45821;
 
-fn start_network_listener(status: Sender<String>) {
+fn start_network_listener(status: Sender<String>, pairing_code: Arc<Mutex<String>>) {
     thread::spawn(move || {
         let listener = match TcpListener::bind(("0.0.0.0", NETWORK_PORT)) {
             Ok(listener) => listener,
@@ -91,7 +99,8 @@ fn start_network_listener(status: Sender<String>) {
             match stream {
                 Ok(stream) => {
                     let status = status.clone();
-                    thread::spawn(move || handle_network_client(stream, status));
+                    let pairing_code = pairing_code.clone();
+                    thread::spawn(move || handle_network_client(stream, status, pairing_code));
                 }
                 Err(error) => { let _ = status.send(format!("Network listener error: {error}")); }
             }
@@ -99,7 +108,7 @@ fn start_network_listener(status: Sender<String>) {
     });
 }
 
-fn handle_network_client(mut stream: TcpStream, status: Sender<String>) {
+fn handle_network_client(mut stream: TcpStream, status: Sender<String>, pairing_code: Arc<Mutex<String>>) {
     let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_else(|_| "unknown device".into());
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
     let mut line = String::new();
@@ -108,6 +117,18 @@ fn handle_network_client(mut stream: TcpStream, status: Sender<String>) {
         reader.read_line(&mut line)
     };
     match result {
+        Ok(_) if line.trim().starts_with("BRIDGE_PAIR/1|") => {
+            let parts: Vec<&str> = line.trim().split('|').collect();
+            let valid = parts.len() == 3 && pairing_code.lock().map(|code| !code.is_empty() && code.as_str() == parts[1]).unwrap_or(false);
+            if valid {
+                if let Ok(mut code) = pairing_code.lock() { code.clear(); }
+                let _ = stream.write_all(b"BRIDGE_PAIRED/1\\n");
+                let _ = status.send(format!("Android device paired: {}", parts[2]));
+            } else {
+                let _ = stream.write_all(b"BRIDGE_REJECTED/1\\n");
+                let _ = status.send("Rejected an invalid or expired pairing code".into());
+            }
+        }
         Ok(_) if line.trim() == "BRIDGE_PING/1" => {
             let _ = stream.write_all(b"BRIDGE_PONG/1\\n");
             let _ = status.send(format!("Bridge network test succeeded with {peer}"));
@@ -193,7 +214,10 @@ fn feature_row(ui: &mut egui::Ui, symbol: &str, title: &str, detail: &str, statu
 
 impl eframe::App for BridgeApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        for message in self.network_rx.try_iter() { self.network_status = message; }
+        for message in self.network_rx.try_iter() {
+            self.network_status = message.clone();
+            if message.starts_with("Android device paired:") { self.pairing_status = message; }
+        }
         ctx.request_repaint_after(Duration::from_millis(250));
         let mut visuals = egui::Visuals::dark();
         visuals.window_fill = PANEL;
@@ -514,24 +538,59 @@ impl eframe::App for BridgeApp {
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                 .show(ctx, |ui| {
                     ui.set_min_width(330.0);
-                    eyebrow(ui, "Secure device pairing");
+                    eyebrow(ui, "PAIR WITH ANDROID");
                     ui.add_space(8.0);
-                    ui.label(egui::RichText::new("Connect a device you trust").size(19.0).strong());
-                    ui.add_space(8.0);
-                    muted(ui, "The pairing interface is ready for the discovery and QR handshake implementation.");
-                    ui.add_space(14.0);
-                    panel(ui, |ui| {
-                        ui.vertical_centered(|ui| {
-                            ui.label(egui::RichText::new("⌁").size(36.0).color(ACCENT));
-                            ui.label(egui::RichText::new("Waiting for pairing service").strong());
-                            muted(ui, "No QR code or network request is generated yet.");
+                    ui.label(egui::RichText::new("Scan this QR code").size(19.0).strong());
+                    let code = pairing_code_value(&self.pairing_code);
+                    if code.is_empty() {
+                        let fresh = format!("{:06}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() % 1_000_000);
+                        if let Ok(mut current) = self.pairing_code.lock() { *current = fresh; }
+                    }
+                    let code = pairing_code_value(&self.pairing_code);
+                    let host = local_ipv4().unwrap_or_else(|| "127.0.0.1".into());
+                    let payload = format!("bridge://pair?host={host}&port={NETWORK_PORT}&code={code}");
+                    ui.horizontal(|ui| {
+                        if let Ok(qr) = QrCode::new(payload.as_bytes()) {
+                            let side = 220.0;
+                            let (rect, _) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::hover());
+                            ui.painter().rect_filled(rect, 6.0, egui::Color32::WHITE);
+                            let quiet = 10.0;
+                            let modules = qr.width();
+                            let cell = (side - quiet * 2.0) / modules as f32;
+                            for y in 0..modules { for x in 0..modules {
+                                if qr[(x, y)] == qrcode::Color::Dark {
+                                    let r = egui::Rect::from_min_size(
+                                        rect.min + egui::vec2(quiet + x as f32 * cell, quiet + y as f32 * cell),
+                                        egui::vec2(cell.ceil(), cell.ceil()));
+                                    ui.painter().rect_filled(r, 0.0, egui::Color32::BLACK);
+                                }
+                            }}
+                        }
+                        ui.vertical(|ui| {
+                            muted(ui, "PAIR CODE");
+                            ui.label(egui::RichText::new(&code).size(29.0).strong().color(AMBER));
+                            muted(ui, "Expires after one successful scan.");
+                            ui.add_space(8.0);
+                            muted(ui, &format!("Local address: {host}"));
                         });
                     });
+                    ui.add_space(8.0);
+                    ui.label(egui::RichText::new(&self.pairing_status).size(12.0).color(ACCENT));
                     ui.add_space(12.0);
                     if ui.button("Close").clicked() { self.show_pair_dialog = false; }
                 });
         }
     }
+}
+
+fn pairing_code_value(code: &Arc<Mutex<String>>) -> String {
+    code.lock().map(|value| value.clone()).unwrap_or_default()
+}
+
+fn local_ipv4() -> Option<String> {
+    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("192.0.2.1:80").ok()?;
+    socket.local_addr().ok().map(|addr| addr.ip().to_string())
 }
 
 fn main() -> eframe::Result<()> {
