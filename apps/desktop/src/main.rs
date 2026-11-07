@@ -56,7 +56,7 @@ impl eframe::App for BridgeApp {
 
                 egui::Frame::group(ui.style())
                     .fill(egui::Color32::from_rgb(21, 25, 25))
-                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(48, 57, 47)))
+                    .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(48, 57, 47)))
                     .corner_radius(egui::CornerRadius::same(14))
                     .inner_margin(egui::Margin::same(26))
                     .show(ui, |ui| {
