@@ -73,13 +73,14 @@ impl eframe::App for BridgeApp {
                 ui.add_space(26.0);
                 ui.heading("Your workspace");
                 ui.add_space(10.0);
+                let metric_card_style = ui.style().clone();
                 ui.columns(3, |columns| {
                     for (column, (value, label)) in columns.iter_mut().zip([
                         ("0", "Paired devices"),
                         ("0", "Active transfers"),
                         ("Local", "Network mode"),
                     ]) {
-                        egui::Frame::group(ui.style())
+                        egui::Frame::group(&metric_card_style)
                             .fill(egui::Color32::from_rgb(17, 19, 24))
                             .corner_radius(egui::CornerRadius::same(10))
                             .inner_margin(egui::Margin::same(16))
