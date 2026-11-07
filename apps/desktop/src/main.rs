@@ -24,7 +24,7 @@ impl eframe::App for BridgeApp {
                 ui.add_space(22.0);
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("B").size(25.0).strong().color(egui::Color32::from_rgb(217, 255, 98)));
-                    ui.label(egui::RichText::new("BRIDGE").size(17.0).strong().letter_spacing(2.0));
+                    ui.label(egui::RichText::new("BRIDGE").size(17.0).strong());
                 });
                 ui.add_space(38.0);
                 ui.label(egui::RichText::new("WORKSPACE").size(10.0).color(egui::Color32::GRAY));
