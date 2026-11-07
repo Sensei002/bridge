@@ -1,6 +1,7 @@
 import SwiftUI
 
-private let accent = Color(red: 0.85, green: 1.0, blue: 0.38)
+private let accent = Color(red: 0.13, green: 0.83, blue: 0.93)
+private let amber = Color(red: 0.98, green: 0.75, blue: 0.14)
 private let bridgeBackground = Color(red: 0.04, green: 0.045, blue: 0.06)
 
 struct BridgeHomeView: View {
@@ -10,9 +11,13 @@ struct BridgeHomeView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
                     HStack(spacing: 10) {
-                        Text("B").font(.system(size: 20, weight: .bold, design: .rounded))
-                            .foregroundStyle(bridgeBackground).frame(width: 34, height: 34)
-                            .background(accent, in: RoundedRectangle(cornerRadius: 10))
+                        ZStack(alignment: .topTrailing) {
+                            Text("B").font(.system(size: 20, weight: .black, design: .rounded))
+                                .foregroundStyle(.white).frame(width: 36, height: 36)
+                                .background(accent.opacity(0.16), in: RoundedRectangle(cornerRadius: 11))
+                                .overlay(RoundedRectangle(cornerRadius: 11).stroke(accent, lineWidth: 1.2))
+                            Circle().fill(amber).frame(width: 7, height: 7).offset(x: 2, y: -2)
+                        }
                         Text("BRIDGE").font(.system(size: 14, weight: .bold, design: .rounded)).tracking(3)
                     }.padding(.top, 20)
                     VStack(alignment: .leading, spacing: 10) {
@@ -24,7 +29,7 @@ struct BridgeHomeView: View {
                     VStack(alignment: .leading, spacing: 12) {
                         eyebrow("BRIDGE NETWORK")
                         Text("No devices paired").font(.system(size: 20, weight: .semibold))
-                        Text("Secure device pairing is coming in a future update.")
+                        Text("Local-network discovery and secure pairing are being brought online in stages.")
                             .font(.system(size: 13)).foregroundStyle(.white.opacity(0.58))
                         Text("PAIRING NOT AVAILABLE YET").font(.system(size: 9, weight: .bold))
                             .tracking(1.4).foregroundStyle(accent).padding(.top, 8)

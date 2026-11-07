@@ -1,13 +1,19 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use eframe::egui;
+use std::io::{BufRead, BufReader, Write};
+use std::net::{TcpListener, TcpStream};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::thread;
+use std::time::Duration;
 
 const BG: egui::Color32 = egui::Color32::from_rgb(10, 11, 15);
 const SIDEBAR: egui::Color32 = egui::Color32::from_rgb(13, 15, 19);
 const PANEL: egui::Color32 = egui::Color32::from_rgb(20, 24, 29);
 const PANEL_ALT: egui::Color32 = egui::Color32::from_rgb(25, 30, 35);
 const BORDER: egui::Color32 = egui::Color32::from_rgb(43, 50, 56);
-const ACCENT: egui::Color32 = egui::Color32::from_rgb(217, 255, 98);
+const ACCENT: egui::Color32 = egui::Color32::from_rgb(34, 211, 238);
+const AMBER: egui::Color32 = egui::Color32::from_rgb(251, 191, 36);
 const TEXT: egui::Color32 = egui::Color32::from_rgb(239, 242, 235);
 const MUTED: egui::Color32 = egui::Color32::from_rgb(145, 154, 160);
 const GREEN: egui::Color32 = egui::Color32::from_rgb(119, 211, 151);
@@ -45,10 +51,16 @@ struct BridgeApp {
     launch_at_login: bool,
     notifications: bool,
     auto_accept: bool,
+    network_ip: String,
+    network_status: String,
+    network_rx: Receiver<String>,
+    network_tx: Sender<String>,
 }
 
 impl Default for BridgeApp {
     fn default() -> Self {
+        let (network_tx, network_rx) = mpsc::channel();
+        start_network_listener(network_tx.clone());
         Self {
             selected: Page::Overview,
             show_pair_dialog: false,
@@ -56,8 +68,75 @@ impl Default for BridgeApp {
             launch_at_login: false,
             notifications: true,
             auto_accept: false,
+            network_ip: String::new(),
+            network_status: "Listening for Bridge test connections on port 45821".into(),
+            network_rx,
+            network_tx,
         }
     }
+}
+
+const NETWORK_PORT: u16 = 45821;
+
+fn start_network_listener(status: Sender<String>) {
+    thread::spawn(move || {
+        let listener = match TcpListener::bind(("0.0.0.0", NETWORK_PORT)) {
+            Ok(listener) => listener,
+            Err(error) => {
+                let _ = status.send(format!("Could not listen on port {NETWORK_PORT}: {error}"));
+                return;
+            }
+        };
+        for stream in listener.incoming() {
+            match stream {
+                Ok(stream) => {
+                    let status = status.clone();
+                    thread::spawn(move || handle_network_client(stream, status));
+                }
+                Err(error) => { let _ = status.send(format!("Network listener error: {error}")); }
+            }
+        }
+    });
+}
+
+fn handle_network_client(mut stream: TcpStream, status: Sender<String>) {
+    let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_else(|_| "unknown device".into());
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let mut line = String::new();
+    let result = {
+        let mut reader = BufReader::new(&mut stream);
+        reader.read_line(&mut line)
+    };
+    match result {
+        Ok(_) if line.trim() == "BRIDGE_PING/1" => {
+            let _ = stream.write_all(b"BRIDGE_PONG/1\\n");
+            let _ = status.send(format!("Bridge network test succeeded with {peer}"));
+        }
+        Ok(_) => { let _ = status.send(format!("Received an unknown test message from {peer}")); }
+        Err(error) => { let _ = status.send(format!("Connection from {peer} failed: {error}")); }
+    }
+}
+
+fn connect_to_peer(host: String, status: Sender<String>) {
+    thread::spawn(move || {
+        let address = format!("{host}:{NETWORK_PORT}");
+        let result = TcpStream::connect_timeout(
+            &address.parse().unwrap_or_else(|_| "127.0.0.1:0".parse().unwrap()),
+            Duration::from_secs(4),
+        ).and_then(|mut stream| {
+            stream.set_read_timeout(Some(Duration::from_secs(4)))?;
+            stream.write_all(b"BRIDGE_PING/1\\n")?;
+            let mut response = String::new();
+            BufReader::new(stream).read_line(&mut response)?;
+            if response.trim() == "BRIDGE_PONG/1" { Ok(()) }
+            else { Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "unexpected Bridge response")) }
+        });
+        let message = match result {
+            Ok(()) => format!("Connection test succeeded with {host}"),
+            Err(error) => format!("Could not connect to {host}:{NETWORK_PORT}: {error}"),
+        };
+        let _ = status.send(message);
+    });
 }
 
 fn panel<R>(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui) -> R) -> egui::InnerResponse<R> {
@@ -114,15 +193,17 @@ fn feature_row(ui: &mut egui::Ui, symbol: &str, title: &str, detail: &str, statu
 
 impl eframe::App for BridgeApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        for message in self.network_rx.try_iter() { self.network_status = message; }
+        ctx.request_repaint_after(Duration::from_millis(250));
         let mut visuals = egui::Visuals::dark();
         visuals.window_fill = PANEL;
         visuals.panel_fill = BG;
         visuals.override_text_color = Some(TEXT);
         visuals.widgets.noninteractive.bg_fill = PANEL;
         visuals.widgets.inactive.bg_fill = PANEL_ALT;
-        visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(39, 47, 42);
-        visuals.widgets.active.bg_fill = egui::Color32::from_rgb(55, 67, 48);
-        visuals.selection.bg_fill = egui::Color32::from_rgb(58, 75, 43);
+        visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(16, 45, 53);
+        visuals.widgets.active.bg_fill = egui::Color32::from_rgb(18, 70, 82);
+        visuals.selection.bg_fill = egui::Color32::from_rgb(16, 65, 78);
         visuals.selection.stroke = egui::Stroke::new(1.0_f32, ACCENT);
         ctx.set_visuals(visuals);
 
@@ -149,7 +230,8 @@ impl eframe::App for BridgeApp {
                 ui.horizontal(|ui| {
                     egui::Frame::new().fill(ACCENT).corner_radius(egui::CornerRadius::same(9))
                         .inner_margin(egui::Margin::symmetric(10, 5)).show(ui, |ui| {
-                            ui.label(egui::RichText::new("B").size(22.0).strong().color(BG));
+                            ui.label(egui::RichText::new("B").size(22.0).strong().color(egui::Color32::WHITE));
+                            ui.label(egui::RichText::new("•").size(11.0).strong().color(AMBER));
                         });
                     ui.vertical(|ui| {
                         ui.label(egui::RichText::new("BRIDGE").size(17.0).strong());
@@ -175,7 +257,7 @@ impl eframe::App for BridgeApp {
                                 .color(if selected { ACCENT } else { TEXT }),
                         )
                         .fill(if selected {
-                            egui::Color32::from_rgb(39, 47, 42)
+                            egui::Color32::from_rgb(16, 45, 53)
                         } else {
                             PANEL_ALT
                         })
@@ -296,7 +378,27 @@ impl eframe::App for BridgeApp {
                             });
                         });
                         ui.add_space(16.0);
-                        muted(ui, "Discovery and pairing transport are not connected in this UI milestone.");
+                        panel(ui, |ui| {
+                            eyebrow(ui, "NETWORK TEST · TCP");
+                            ui.add_space(6.0);
+                            ui.label(egui::RichText::new("Test a direct local connection").strong().size(17.0));
+                            muted(ui, "Both devices must be on the same Wi-Fi/LAN and Bridge must be open on both.");
+                            ui.horizontal(|ui| {
+                                ui.label("Peer IP");
+                                ui.add(egui::TextEdit::singleline(&mut self.network_ip)
+                                    .hint_text("e.g. 192.168.1.25").desired_width(190.0));
+                                if primary_button(ui, "Test connection") {
+                                    let host = self.network_ip.trim().to_string();
+                                    if !host.is_empty() { connect_to_peer(host, self.network_tx.clone()); }
+                                    else { self.network_status = "Enter the other device's local IP address.".into(); }
+                                }
+                            });
+                            ui.add_space(6.0);
+                            ui.label(egui::RichText::new(&self.network_status).size(12.0).color(AMBER));
+                            muted(ui, "Bridge test port: TCP 45821 · This test exchanges a harmless ping/pong only.");
+                        });
+                        ui.add_space(12.0);
+                        muted(ui, "Automatic discovery and encrypted pairing are the next networking milestones.");
                     }
                     Page::Transfers => {
                         ui.horizontal(|ui| {

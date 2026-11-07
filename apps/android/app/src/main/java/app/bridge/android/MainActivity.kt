@@ -1,6 +1,14 @@
 package app.bridge.android
 
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import java.net.ServerSocket
+import java.net.Socket
+import java.net.InetSocketAddress
+import java.io.BufferedReader
+import java.io.InputStreamReader
+import java.io.PrintWriter
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
@@ -32,7 +40,8 @@ private val Sidebar = Color(0xFF0D0F13)
 private val Panel = Color(0xFF14181D)
 private val PanelAlt = Color(0xFF1A2025)
 private val Border = Color(0xFF2B3238)
-private val Accent = Color(0xFFD9FF62)
+private val Accent = Color(0xFF22D3EE)
+private val Amber = Color(0xFFFBBF24)
 private val Muted = Color(0xFF929AA1)
 private val Good = Color(0xFF77D397)
 private val Ink = Color(0xFF11150D)
@@ -53,6 +62,60 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+private const val BRIDGE_PORT = 45821
+private val mainHandler = Handler(Looper.getMainLooper())
+
+private fun startBridgeListener(onStatus: (String) -> Unit) {
+    Thread {
+        try {
+            ServerSocket(BRIDGE_PORT).use { server ->
+                mainHandler.post { onStatus("Listening for Bridge tests on TCP $BRIDGE_PORT") }
+                while (!server.isClosed) {
+                    val socket = server.accept()
+                    Thread {
+                        socket.use { peer ->
+                            try {
+                                peer.soTimeout = 5000
+                                val request = BufferedReader(InputStreamReader(peer.getInputStream())).readLine()
+                                if (request == "BRIDGE_PING/1") {
+                                    PrintWriter(peer.getOutputStream(), true).println("BRIDGE_PONG/1")
+                                    mainHandler.post { onStatus("Network test succeeded with ${peer.inetAddress.hostAddress}") }
+                                } else {
+                                    mainHandler.post { onStatus("Received an unknown test message") }
+                                }
+                            } catch (error: Exception) {
+                                mainHandler.post { onStatus("Connection test error: ${error.message}") }
+                            }
+                        }
+                    }.start()
+                }
+            }
+        } catch (error: Exception) {
+            mainHandler.post { onStatus("Network listener unavailable: ${error.message}") }
+        }
+    }.apply { isDaemon = true; name = "BridgeNetworkListener" }.start()
+}
+
+private fun testBridgeConnection(host: String, onStatus: (String) -> Unit) {
+    Thread {
+        try {
+            Socket().use { socket ->
+                socket.connect(InetSocketAddress(host, BRIDGE_PORT), 4000)
+                socket.soTimeout = 4000
+                PrintWriter(socket.getOutputStream(), true).println("BRIDGE_PING/1")
+                val response = BufferedReader(InputStreamReader(socket.getInputStream())).readLine()
+                if (response == "BRIDGE_PONG/1") {
+                    mainHandler.post { onStatus("Connection test succeeded with $host") }
+                } else {
+                    mainHandler.post { onStatus("Unexpected response from $host") }
+                }
+            }
+        } catch (error: Exception) {
+            mainHandler.post { onStatus("Could not connect to $host:$BRIDGE_PORT — ${error.message}") }
+        }
+    }.apply { isDaemon = true; name = "BridgeNetworkTest" }.start()
+}
+
 @Composable
 private fun BridgeApp() {
     var selected by remember { mutableStateOf(BridgeTab.Home) }
@@ -60,6 +123,10 @@ private fun BridgeApp() {
     var clipboardSync by remember { mutableStateOf(true) }
     var notifications by remember { mutableStateOf(true) }
     var autoAccept by remember { mutableStateOf(false) }
+    var networkHost by remember { mutableStateOf("") }
+    var networkStatus by remember { mutableStateOf("Starting local network listener…") }
+
+    LaunchedEffect(Unit) { startBridgeListener { networkStatus = it } }
 
     MaterialTheme(colorScheme = darkColorScheme(
         primary = Accent,
@@ -77,7 +144,13 @@ private fun BridgeApp() {
                             onPair = { showPairDialog = true },
                             onNavigate = { selected = it }
                         )
-                        BridgeTab.Devices -> DevicesScreen(onPair = { showPairDialog = true })
+                        BridgeTab.Devices -> DevicesScreen(
+                            onPair = { showPairDialog = true },
+                            networkHost = networkHost,
+                            onNetworkHostChange = { networkHost = it },
+                            networkStatus = networkStatus,
+                            onTestConnection = { host -> testBridgeConnection(host) { networkStatus = it } }
+                        )
                         BridgeTab.Transfers -> TransfersScreen(onPair = { showPairDialog = true })
                         BridgeTab.Clipboard -> ClipboardScreen(
                             enabled = clipboardSync,
@@ -107,7 +180,7 @@ private fun BridgeApp() {
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text("Connect a device you trust.", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                    Text("The pairing interface is ready for the discovery and QR handshake implementation.", fontSize = 13.sp, lineHeight = 19.sp)
+                    Text("Use Devices → Network test to verify a direct connection between Bridge installations on the same local network.", fontSize = 13.sp, lineHeight = 19.sp)
                     Surface(color = Panel, shape = RoundedCornerShape(14.dp), modifier = Modifier.fillMaxWidth()) {
                         Column(
                             modifier = Modifier.padding(18.dp),
@@ -115,7 +188,7 @@ private fun BridgeApp() {
                         ) {
                             Text("⌁", color = Accent, fontSize = 34.sp)
                             Text("Waiting for pairing service", color = Color.White, fontWeight = FontWeight.SemiBold)
-                            Text("No QR code or network request is generated yet.", color = Muted, fontSize = 11.sp)
+                            Text("No pairing request is sent from this preview dialog.", color = Muted, fontSize = 11.sp)
                         }
                     }
                 }
@@ -298,7 +371,13 @@ private fun MiniMetric(value: String, label: String, modifier: Modifier = Modifi
 }
 
 @Composable
-private fun DevicesScreen(onPair: () -> Unit) {
+private fun DevicesScreen(
+    onPair: () -> Unit,
+    networkHost: String,
+    onNetworkHostChange: (String) -> Unit,
+    networkStatus: String,
+    onTestConnection: (String) -> Unit
+) {
     ScreenContent {
         ScreenHeading("YOUR ECOSYSTEM", "Devices", "Find and manage the devices you choose to trust.")
         Panel {
@@ -316,7 +395,22 @@ private fun DevicesScreen(onPair: () -> Unit) {
                 }
             }
         }
-        Text("Discovery and pairing transport are not connected in this UI milestone.", color = Muted, fontSize = 10.sp, lineHeight = 15.sp)
+        Panel {
+            Eyebrow("NETWORK TEST · TCP")
+            Text("Test a direct local connection", color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+            Text("Both devices must be on the same Wi-Fi/LAN with Bridge open.", color = Muted, fontSize = 11.sp, lineHeight = 16.sp)
+            androidx.compose.material3.OutlinedTextField(
+                value = networkHost,
+                onValueChange = onNetworkHostChange,
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                label = { Text("Other device local IP") },
+                placeholder = { Text("192.168.1.25") }
+            )
+            PrimaryAction("Test connection", { if (networkHost.isNotBlank()) onTestConnection(networkHost.trim()) }, Modifier.fillMaxWidth())
+            Text(networkStatus, color = Amber, fontSize = 11.sp, lineHeight = 16.sp)
+            Text("TCP port 45821 · ping/pong test only; this is not encrypted pairing yet.", color = Muted, fontSize = 9.sp, lineHeight = 14.sp)
+        }
     }
 }
 
