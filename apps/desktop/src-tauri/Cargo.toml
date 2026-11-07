@@ -3,9 +3,13 @@ name = "bridge-desktop"
 version = "0.1.0"
 description = "Bridge desktop client"
 edition = "2021"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+
 [dependencies]
 tauri = { version = "2", features = [] }
 bridge-core = { path = "../../../crates/bridge-core" }
 bridge-protocol = { path = "../../../crates/bridge-protocol" }
+
+[workspace]
