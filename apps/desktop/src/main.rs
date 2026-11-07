@@ -170,8 +170,20 @@ impl eframe::App for BridgeApp {
                     let selected = self.selected == page;
                     let response = ui.add_sized(
                         [ui.available_width(), 39.0],
-                        egui::Button::selectable(selected, format!("   {symbol}     {}", page.title()))
-                            .corner_radius(egui::CornerRadius::same(8)),
+                        egui::Button::new(
+                            egui::RichText::new(format!("   {symbol}     {}", page.title()))
+                                .color(if selected { ACCENT } else { TEXT }),
+                        )
+                        .fill(if selected {
+                            egui::Color32::from_rgb(39, 47, 42)
+                        } else {
+                            PANEL_ALT
+                        })
+                        .stroke(egui::Stroke::new(
+                            1.0_f32,
+                            if selected { ACCENT } else { BORDER },
+                        ))
+                        .corner_radius(egui::CornerRadius::same(8)),
                     );
                     if response.clicked() { self.selected = page; }
                     ui.add_space(4.0);
