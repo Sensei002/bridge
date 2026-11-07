@@ -1,21 +1,20 @@
-# Bridge Security Model (planned)
+# Bridge Security Model
 
-Bridge must be designed around explicit trust, least privilege, and local-first operation.
+Bridge is local-first and permission-first. Discovery is never proof of identity, and pairing must never silently grant access to every capability.
 
-## Device identity
-Each installation will create a unique device identity. Private keys must be generated and stored using platform secure storage (Windows credential/DPAPI facilities, Android Keystore, and Apple Keychain/Secure Enclave where available). Private keys must never leave their device.
+## Current implementation
 
-## Pairing
-Pairing must be approved by both devices. A QR code or short authentication string should bind the exchange to the intended nearby peer and reduce accidental or malicious pairing. Users must be able to inspect and revoke trusted devices.
+- Device descriptors are version-validated.
+- Pairing requests expire after at most two minutes.
+- Pairing requires explicit local approval before a device enters the in-memory trusted registry.
+- The current pairing state machine does not authenticate remote peers, persist trust, or encrypt traffic. Do not treat it as production-secure.
 
-## Sessions and transport
-Discovery is not authentication. Every session must authenticate the peer and use modern authenticated encryption. The protocol must reject unsupported versions, malformed messages, oversized payloads, and replayed control messages.
+## Required before network pairing ships
 
-## Capabilities
-Clipboard, file access, notifications, camera, microphone, input control, and other capabilities must be independently permissioned. A device pairing must not grant every capability automatically.
+1. Per-installation cryptographic identity stored in Windows DPAPI/Credential Manager, Android Keystore, or Apple Keychain/Secure Enclave where available.
+2. Authenticated key agreement and transcript-bound QR / short-authentication-string verification.
+3. An authenticated encrypted session with replay protection and strict message-size limits.
+4. Persistent trust storage with user-visible revocation.
+5. Independent capability grants for clipboard, files, notifications, camera, microphone, and input control.
 
-## Privacy
-Local network is the default transport. Any future internet relay must be opt-in, disclosed, and designed to avoid storing user content. No analytics or cloud upload should be added without clear user-facing disclosure and controls.
-
-## Current implementation status
-These are design requirements, not claims about current functionality. The foundation currently contains protocol data types and an in-memory registry only; secure identity, pairing, encryption, and transport remain unimplemented.
+Private keys must never leave their device. Any relay must be opt-in and must not store user content by default.

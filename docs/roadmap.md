@@ -1,24 +1,29 @@
-# Roadmap
+# Bridge Roadmap
 
 ## Foundation
-- [x] Repository and shared Rust workspace
-- [x] Initial protocol types and registry
-- [ ] Native app shells for Windows, Android, and iOS
-- [ ] CI builds validated on GitHub-hosted runners
+- [x] Rust workspace and shared protocol crate
+- [x] Windows, Android, and iOS application shells
+- [x] CI workflows for platform build validation
+- [x] Device registry
+- [x] Pairing consent and expiry state machine
 
-## Connectivity
-- [ ] Device identity and secure key storage
-- [ ] Mutual pairing with QR code / short authentication string
-- [ ] mDNS discovery and authenticated encrypted transport
-- [ ] Device revocation and capability permissions
+## Next: authenticated local connectivity
+- [ ] Persistent per-device cryptographic identity
+- [ ] QR-based peer verification and authenticated key agreement
+- [ ] mDNS/DNS-SD discovery with spoofing-safe UI
+- [ ] Encrypted local sessions and replay protection
+- [ ] Persistent trusted-device management and revocation
 
-## Features
-- [ ] Clipboard text/link sharing
-- [ ] File transfer with progress, cancellation, integrity checks
-- [ ] Notification mirroring where OS APIs permit
-- [ ] Media, input, camera and microphone capabilities where OS APIs permit
+## Device capabilities
+- [ ] Capability permission model
+- [ ] Universal clipboard (text first)
+- [ ] Local file transfer with explicit destination approval
+- [ ] Presence and device status
+- [ ] Android notification bridge (subject to platform permissions)
+- [ ] iOS-compatible feature set using public platform APIs
 
-## Distribution
-- [ ] Windows code signing
-- [ ] Android signing and Play Store configuration
-- [ ] Apple signing, provisioning, and App Store configuration
+## Release quality
+- [ ] Signed Windows installer
+- [ ] Signed Android release bundle
+- [ ] Apple signing and TestFlight distribution
+- [ ] End-to-end tests across physical devices
