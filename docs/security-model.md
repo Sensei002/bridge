@@ -7,13 +7,16 @@ Bridge is local-first and permission-first. Discovery is never proof of identity
 - Device descriptors are version-validated.
 - Pairing requests expire after at most two minutes.
 - Pairing requires explicit local approval before a device enters the in-memory trusted registry.
-- The current pairing state machine does not authenticate remote peers, persist trust, or encrypt traffic. Do not treat it as production-secure.
+- The Rust security crate implements a Noise XX handshake using Curve25519, ChaChaPoly, and SHA-256, plus authenticated encrypted transport sessions and tamper-detection tests.
+- The handshake exposes the remote static public key so the pairing layer can compare it with a key or fingerprint the user explicitly approved.
+
+The security crate is a cryptographic foundation, not yet a complete production network stack. It does not open sockets, persist private keys, bind fingerprints to the existing pairing coordinator, or provide platform secure-storage adapters. The current pairing registry remains in-memory and must not mark a peer trusted until the integration performs explicit user approval and remote-key verification.
 
 ## Required before network pairing ships
 
 1. Per-installation cryptographic identity stored in Windows DPAPI/Credential Manager, Android Keystore, or Apple Keychain/Secure Enclave where available.
-2. Authenticated key agreement and transcript-bound QR / short-authentication-string verification.
-3. An authenticated encrypted session with replay protection and strict message-size limits.
+2. Transcript-bound QR / short-authentication-string verification integrated with the Noise XX handshake.
+3. A network transport with bounded framing, timeouts, replay protection, and connection limits.
 4. Persistent trust storage with user-visible revocation.
 5. Independent capability grants for clipboard, files, notifications, camera, microphone, and input control.
 
