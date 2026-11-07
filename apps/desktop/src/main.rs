@@ -60,6 +60,7 @@ struct BridgeApp {
     network_tx: Sender<String>,
     pairing_code: Arc<Mutex<String>>,
     pairing_status: String,
+    brand_texture: Option<egui::TextureHandle>,
 }
 
 impl Default for BridgeApp {
@@ -80,6 +81,7 @@ impl Default for BridgeApp {
             network_tx,
             pairing_code,
             pairing_status: "Waiting for Android to scan the QR code".into(),
+            brand_texture: None,
         }
     }
 }
@@ -219,6 +221,14 @@ impl eframe::App for BridgeApp {
             if message.starts_with("Android device paired:") { self.pairing_status = message; }
         }
         ctx.request_repaint_after(Duration::from_millis(250));
+        if self.brand_texture.is_none() {
+            let logo = image::load_from_memory(include_bytes!("../../../assets/bridge-app-icon.png"))
+                .expect("Bridge brand icon must be a valid PNG").to_rgba8();
+            let size = [logo.width() as usize, logo.height() as usize];
+            let pixels = egui::ColorImage::from_rgba_unmultiplied(size, logo.as_raw());
+            self.brand_texture = Some(ctx.load_texture("bridge-brand", pixels, egui::TextureOptions::LINEAR));
+        }
+        let brand_texture = self.brand_texture.clone();
         let mut visuals = egui::Visuals::dark();
         visuals.window_fill = PANEL;
         visuals.panel_fill = BG;
@@ -235,6 +245,9 @@ impl eframe::App for BridgeApp {
             .frame(egui::Frame::new().fill(SIDEBAR).inner_margin(egui::Margin::symmetric(20, 12)))
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
+                    if let Some(texture) = &brand_texture {
+                        ui.image((texture.id(), egui::vec2(28.0, 28.0)));
+                    }
                     ui.label(egui::RichText::new("BRIDGE").size(12.0).strong().color(TEXT));
                     ui.separator();
                     muted(ui, "Private device workspace");
@@ -252,11 +265,9 @@ impl eframe::App for BridgeApp {
             .show(ctx, |ui| {
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
-                    egui::Frame::new().fill(ACCENT).corner_radius(egui::CornerRadius::same(9))
-                        .inner_margin(egui::Margin::symmetric(10, 5)).show(ui, |ui| {
-                            ui.label(egui::RichText::new("B").size(22.0).strong().color(egui::Color32::WHITE));
-                            ui.label(egui::RichText::new("•").size(11.0).strong().color(AMBER));
-                        });
+                    if let Some(texture) = &brand_texture {
+                        ui.image((texture.id(), egui::vec2(46.0, 46.0)));
+                    }
                     ui.vertical(|ui| {
                         ui.label(egui::RichText::new("BRIDGE").size(17.0).strong());
                         muted(ui, "EVERY DEVICE. ONE SPACE.");
@@ -594,9 +605,14 @@ fn local_ipv4() -> Option<String> {
 }
 
 fn main() -> eframe::Result<()> {
+    let icon = image::load_from_memory(include_bytes!("../../../assets/bridge-app-icon.png"))
+        .expect("Bridge app icon must be a valid PNG").to_rgba8();
+    let (icon_width, icon_height) = icon.dimensions();
+    let icon_data = egui::IconData { rgba: icon.into_raw(), width: icon_width, height: icon_height };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Bridge")
+            .with_icon(Arc::new(icon_data))
             .with_inner_size([1280.0, 840.0])
             .with_min_inner_size([900.0, 650.0]),
         ..Default::default()

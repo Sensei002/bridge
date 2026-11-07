@@ -11,13 +11,10 @@ struct BridgeHomeView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
                     HStack(spacing: 10) {
-                        ZStack(alignment: .topTrailing) {
-                            Text("B").font(.system(size: 20, weight: .black, design: .rounded))
-                                .foregroundStyle(.white).frame(width: 36, height: 36)
-                                .background(accent.opacity(0.16), in: RoundedRectangle(cornerRadius: 11))
-                                .overlay(RoundedRectangle(cornerRadius: 11).stroke(accent, lineWidth: 1.2))
-                            Circle().fill(amber).frame(width: 7, height: 7).offset(x: 2, y: -2)
-                        }
+                        Image("BridgeBrand")
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: 42, height: 42)
                         Text("BRIDGE").font(.system(size: 14, weight: .bold, design: .rounded)).tracking(3)
                     }.padding(.top, 20)
                     VStack(alignment: .leading, spacing: 10) {

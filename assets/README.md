@@ -1,8 +1,10 @@
 # Bridge brand assets
 
-The Bridge identity uses a near-black base (#0A0A0A), cyan (#22D3EE), amber (#FBBF24), and white (#F8FAFC). Cyan is the primary interaction/accent color; amber is reserved for secondary emphasis and status highlights.
+The official Bridge logo supplied for this project is used as the app mark across native clients.
+Brand colors: near-black #0A0A0A, cyan #22D3EE, amber #FBBF24, and white #F8FAFC.
 
-- `bridge-mark.svg`: scalable master app mark.
-- App headers use a compact native mark; no WebView or browser rendering is involved.
-
-The logo is intentionally flat and high-contrast for small-size legibility.
+- bridge-mark.svg: scalable vector reference mark.
+- bridge-app-icon.png: square launcher/window icon artwork.
+- Android uses a native adaptive launcher icon and the same artwork in its Compose header.
+- Windows embeds the artwork in the executable resource and sets the native window/taskbar icon.
+- iOS uses the AppIcon asset catalog and the same image in the SwiftUI header.

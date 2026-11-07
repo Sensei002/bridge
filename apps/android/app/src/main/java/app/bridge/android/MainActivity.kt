@@ -14,6 +14,9 @@ import java.io.InputStreamReader
 import java.io.PrintWriter
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.Image
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -246,11 +249,12 @@ private fun HeaderBar() {
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            Surface(color = Accent, shape = RoundedCornerShape(9.dp), modifier = Modifier.size(34.dp)) {
-                Box(contentAlignment = Alignment.Center) {
-                    Text("B", color = Ink, fontSize = 21.sp, fontWeight = FontWeight.Black)
-                }
-            }
+            Image(
+                painter = painterResource(id = R.drawable.bridge_app_icon),
+                contentDescription = "Bridge logo",
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.size(40.dp)
+            )
             Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
                 Text("BRIDGE", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Black, letterSpacing = 2.sp)
                 Text("EVERY DEVICE. ONE SPACE.", color = Muted, fontSize = 8.sp, letterSpacing = 1.sp)
