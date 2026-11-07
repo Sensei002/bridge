@@ -4,7 +4,7 @@
 //! network peers or establish encryption; callers must not expose it over an
 //! unauthenticated transport.
 use std::collections::HashMap;
-use bridge_protocol::{DeviceDescriptor, DeviceId, PairingRequest, ProtocolValidationError, MAX_PAIRING_WINDOW_MS, PROTOCOL_VERSION};
+use bridge_protocol::{DeviceDescriptor, DeviceId, PairingRequest, ProtocolValidationError, MAX_PAIRING_WINDOW_MS};
 use thiserror::Error;
 use uuid::Uuid;
 
