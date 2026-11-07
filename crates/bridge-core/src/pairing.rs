@@ -86,7 +86,7 @@ pub fn create_pairing_request(initiator: DeviceDescriptor, now_ms: u64) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bridge_protocol::Platform;
+    use bridge_protocol::{Platform, PROTOCOL_VERSION};
 
     fn device() -> DeviceDescriptor {
         DeviceDescriptor { id: DeviceId::new(), display_name: "Phone".into(), platform: Platform::Android, protocol_version: PROTOCOL_VERSION }
