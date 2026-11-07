@@ -1,0 +1,13 @@
+/target
+**/target
+node_modules/
+dist/
+.gradle/
+**/build/
+local.properties
+*.jks
+*.keystore
+.DS_Store
+DerivedData/
+*.xcuserstate
+xcuserdata/
