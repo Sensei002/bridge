@@ -1,0 +1,9 @@
+[package]
+name = "bridge-security"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+snow = "0.9.6"
+thiserror.workspace = true

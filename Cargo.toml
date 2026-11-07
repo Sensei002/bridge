@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/bridge-protocol", "crates/bridge-core", "apps/desktop"]
+members = ["crates/bridge-protocol", "crates/bridge-core", "crates/bridge-security", "apps/desktop"]
 
 [workspace.package]
 version = "0.2.0"

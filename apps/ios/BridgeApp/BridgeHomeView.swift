@@ -1,17 +1,17 @@
 import SwiftUI
 
 private let accent = Color(red: 0.85, green: 1.0, blue: 0.38)
-private let background = Color(red: 0.04, green: 0.045, blue: 0.06)
+private let bridgeBackground = Color(red: 0.04, green: 0.045, blue: 0.06)
 
 struct BridgeHomeView: View {
     var body: some View {
         ZStack {
-            background.ignoresSafeArea()
+            bridgeBackground.ignoresSafeArea()
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
                     HStack(spacing: 10) {
                         Text("B").font(.system(size: 20, weight: .bold, design: .rounded))
-                            .foregroundStyle(background).frame(width: 34, height: 34)
+                            .foregroundStyle(bridgeBackground).frame(width: 34, height: 34)
                             .background(accent, in: RoundedRectangle(cornerRadius: 10))
                         Text("BRIDGE").font(.system(size: 14, weight: .bold, design: .rounded)).tracking(3)
                     }.padding(.top, 20)

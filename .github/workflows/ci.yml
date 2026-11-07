@@ -23,7 +23,8 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --all -- --check
+      - name: Format Rust workspace
+        run: cargo fmt --all
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
 
@@ -51,6 +52,8 @@ jobs:
           distribution: temurin
           java-version: "17"
       - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
       - name: Install Android API 37 SDK
         run: sdkmanager "platforms;android-37"
       - uses: gradle/actions/setup-gradle@v4
