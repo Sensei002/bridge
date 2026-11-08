@@ -29,9 +29,9 @@
 - [x] Scanned invitation endpoint and expected Noise fingerprint are passed into the mobile pairing controllers
 
 ### Remaining completion gates
-- [ ] Native QR code rendering and invitation display in Windows, Android, and iOS pairing UI
-- [ ] Native camera scanning wired to invitation consumption on Android and iOS (and Windows if supported by the final UX)
-- [ ] Complete scanned-invitation pairing path verified from UI to Noise XX handshake on every platform
+- [x] Native QR code rendering and invitation display in Windows egui, Android Compose, and iOS SwiftUI pairing UI
+- [x] Native camera scanning on Android (Google Code Scanner) and iOS (VisionKit), wired to the shared Rust one-time invitation consumer
+- [ ] Complete scanned-invitation pairing path physically verified from UI to Noise XX handshake on every platform
 - [ ] Physical Windows ↔ Android end-to-end pairing and reconnection tests
 - [ ] Physical Windows ↔ iOS end-to-end pairing and reconnection tests
 - [ ] Physical Android ↔ iOS end-to-end pairing and reconnection tests
