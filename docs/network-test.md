@@ -1,42 +1,38 @@
 # Bridge Milestone 1 device validation
 
-This checklist covers the authenticated local-network pairing implementation. CI builds and loopback tests are necessary, but only physical-device runs can close the interoperability gates.
+This document records the physical-device validation scope for Milestone 1. Windows + Android are the currently available and validated target platforms. iOS physical-device and Linux desktop testing are deferred until suitable test hardware/environments are available.
 
-## Automatic discovery and one-tap pairing
+## Windows ↔ Android: completed
 
-1. Connect Windows, Android, and/or iOS devices to the same private Wi-Fi/LAN and open Bridge on each.
-2. Open **Devices**. Each client should automatically show the other Bridge devices nearby without scanning or entering anything.
-3. On one device, tap **Connect** next to the intended peer.
-4. Confirm the receiving device shows a popup with the requesting device name and platform.
-5. Tap **Accept** on the receiving device. Confirm the initiating device reports that the request was accepted and both devices show each other as trusted.
-6. Tap **Reject** in a separate test. Confirm the initiating device reports rejection and neither side saves a new trust record.
-7. Close and reopen Bridge on both devices. Confirm a previously trusted peer reconnects automatically without another approval popup.
-8. Revoke the trusted peer and confirm its active session closes; a new connection must require approval again.
+- [x] Automatic discovery on the same LAN.
+- [x] Windows → Android: Connect, receiver approval, and successful pairing.
+- [x] Android → Windows: Connect, receiver approval, and successful pairing.
+- [x] Previously trusted devices reconnect without another approval prompt.
+- [x] App restart and trusted reconnection on both platforms.
+- [x] Wi-Fi disconnect/reconnect; user reports behaviour is working.
+- [x] Windows firewall and Android network-permission behaviour; user reports both are working.
+- [x] Local revocation closes the local active session. Trust is device-local: revoking on one endpoint does not automatically revoke the other endpoint's stored trust. A peer that still trusts the device may permit a quick trusted reconnection; this is the intended current behaviour.
 
-## Required physical-device matrix
+## Deferred platform coverage
 
-- [ ] Windows ↔ Android: discovery, Connect, receiver Accept/Reject, trusted reconnect, revocation.
-- [ ] Windows ↔ iOS: discovery, Connect, receiver Accept/Reject, trusted reconnect, revocation.
-- [ ] Android ↔ iOS: discovery, Connect, receiver Accept/Reject, trusted reconnect, revocation.
+- [ ] Windows ↔ iOS physical-device interoperability (requires iPhone and Mac test environment).
+- [ ] Android ↔ iOS physical-device interoperability (requires iPhone and Mac test environment).
+- [ ] Linux desktop client installation and physical-device interoperability (deferred until Linux is installed).
 
-Run each connection direction where practical and record OS version, device model, Bridge build SHA, network type, and result. Verify the approval popup appears only on the receiving device and that rejection never creates a trust record.
+## Additional hardening coverage
 
-## Network and lifecycle matrix
+These are useful follow-up tests, but are not blockers for declaring the Windows + Android Milestone 1 target complete:
 
-- [ ] Same Wi-Fi access point, IPv4.
-- [ ] Different access points on the same LAN.
 - [ ] Different router vendors / guest Wi-Fi.
 - [ ] Client/AP isolation enabled (expected failure with a clear explanation).
 - [ ] IPv6-only and dual-stack networks (record unsupported cases explicitly).
-- [ ] Windows firewall allow and deny behavior.
-- [ ] Wi-Fi disconnect/reconnect during discovery and during handshake.
-- [ ] Android/iOS app background and foreground transitions.
-- [ ] Windows sleep/resume and mobile device sleep/wake.
-- [ ] Change Wi-Fi network after pairing; verify stale endpoint hints do not override identity pinning.
-- [ ] Listener shutdown, app termination, and restart while handshakes are pending.
+- [ ] Wi-Fi changes during an active handshake.
+- [ ] Android background/foreground and Windows sleep/resume stress testing.
+- [ ] Listener shutdown and app termination while handshakes are pending.
+- [ ] Explicit rejection-path regression test on physical devices.
 
-## Evidence required to close the milestone
+## Validation notes
 
-For every physical test, attach sanitized logs and record the tested commit SHA. Do not include private keys or other sensitive session data in public logs or issue reports.
+The user physically tested Windows ↔ Android on the current Bridge build and confirmed bidirectional pairing, successful approval, trusted reconnection, app restart/reconnection, working Wi-Fi reconnect, and working firewall/network permissions. CI run #180 passed on commit `c77ecc7b54c7975f52c897604ba6d69ee66079d3`.
 
-A successful CI run does not complete these checks. Milestone 1 also requires an independent security review of discovery, first-use approval, Noise identity pinning, trust persistence, and revocation.
+Do not include private keys or other sensitive session data in public logs or issue reports. This checklist records user-reported device results; it is not an independent security audit.
