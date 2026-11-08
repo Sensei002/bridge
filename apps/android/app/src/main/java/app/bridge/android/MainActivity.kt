@@ -224,7 +224,7 @@ private fun BridgeApp(
     trustedDevices: List<BridgeTrustedDevice>,
     pairingStatus: String,
     onPair: (BridgePeer) -> Unit,
-    onApprove: (BridgePendingPairing, String) -> Unit,
+    onApprove: (BridgePendingPairing) -> Unit,
     onReject: (BridgePendingPairing) -> Unit,
     onRevoke: (String) -> Unit
 ) {
