@@ -113,7 +113,13 @@ class MainActivity : ComponentActivity() {
                 val controller = BridgePairingController(
                     this, privateKey, fingerprint, deviceId,
                     onPending = { pendingPairings.add(it) },
-                    onStatus = { pairingStatus = it }
+                    onStatus = { message ->
+                        pairingStatus = message
+                        if (message.endsWith("Device connected.")) {
+                            trustedDevices.clear()
+                            trustedDevices.addAll(pairingController?.trustedDevices().orEmpty())
+                        }
+                    }
                 )
                 val restoredDevices = controller.trustedDevices()
                 if (destroyed) {
@@ -253,7 +259,6 @@ private fun BridgeApp(
                         )
                         BridgeTab.Devices -> DevicesScreen(
                             peers = discoveredPeers,
-                            pending = pendingPairings,
                             trusted = trustedDevices,
                             pairingStatus = pairingStatus,
                             onPair = onPair,
@@ -278,6 +283,32 @@ private fun BridgeApp(
                 BottomNavigation(selected = selected, onSelect = { selected = it })
             }
         }
+    }
+
+    if (pendingPairings.isNotEmpty()) {
+        val request = pendingPairings.first()
+        AlertDialog(
+            onDismissRequest = {},
+            containerColor = PanelAlt,
+            title = { Text("Pairing request", color = Color.White, fontWeight = FontWeight.Bold) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("${request.name} wants to connect to this device.", color = Color.White, fontSize = 14.sp)
+                    Text("${request.platform} · authenticated encrypted connection", color = Muted, fontSize = 11.sp)
+                    Text("Only accept if you recognize this device.", color = Amber, fontSize = 11.sp)
+                }
+            },
+            confirmButton = {
+                Button(onClick = { onApprove(request) }, colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Ink)) {
+                    Text("Accept", fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                Button(onClick = { onReject(request) }, colors = ButtonDefaults.buttonColors(containerColor = Panel, contentColor = Amber)) {
+                    Text("Reject")
+                }
+            }
+        )
     }
 
     if (showPairDialog) {
@@ -481,7 +512,6 @@ private fun MiniMetric(value: String, label: String, modifier: Modifier = Modifi
 @Composable
 private fun DevicesScreen(
     peers: List<BridgePeer>,
-    pending: List<BridgePendingPairing>,
     trusted: List<BridgeTrustedDevice>,
     pairingStatus: String,
     onPair: (BridgePeer) -> Unit,
@@ -510,9 +540,7 @@ private fun DevicesScreen(
                 }
             }
         }
-        if (pending.isNotEmpty()) {
-            pending.forEach { request ->
-                Panel {
+        Panel {
                     Eyebrow("PAIRING REQUEST")
                     Text("Allow this device to connect?", color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.Bold)
                     Text("${request.name} wants to pair with this device.", color = Muted, fontSize = 12.sp)
