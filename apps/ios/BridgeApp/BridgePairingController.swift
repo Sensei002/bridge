@@ -32,7 +32,6 @@ final class BridgePairingController: ObservableObject {
     private var localDescriptor: [String: Any] = [:]
     private var acceptTask: Task<Void, Never>?
     private var activeSessions: [String: UInt64] = [:]
-    private let storeKey = "bridge.trusted.devices.v1"
 
     func configure(privateKey: Data, deviceId: String, displayName: String) {
         privateKeyHex = privateKey.map { String(format: "%02x", $0) }.joined()
@@ -202,9 +201,3 @@ struct StoredDevice: Codable {
     let pairedAt: Double
 }
 
-    let deviceId: String
-    let name: String
-    let platform: String
-    let fingerprint: String
-    let pairedAt: Double
-}
