@@ -6,7 +6,7 @@
 - [x] CI workflows for platform build validation
 - [x] Device registry and pairing consent/expiry state machine
 
-## Milestone 1: authenticated local connectivity
+## Milestone 1: authenticated local connectivity — complete for Windows + Android
 
 ### Implemented foundations
 - [x] Shared Rust mDNS/DNS-SD discovery and versioned device metadata
@@ -27,15 +27,21 @@
 - [x] Encrypted pairing-decision message: the receiver accepts or rejects, and the initiator waits for the authenticated response before saving trust
 - [x] Mobile pending sessions are closed on rejection, persistence failure, app shutdown, and late completion after shutdown
 
-### Remaining completion gates
-- [ ] Physical Windows ↔ Android end-to-end pairing and reconnection tests (see docs/network-test.md)
-- [ ] Physical Windows ↔ iOS end-to-end pairing and reconnection tests (see docs/network-test.md)
-- [ ] Physical Android ↔ iOS end-to-end pairing and reconnection tests (see docs/network-test.md)
-- [ ] Validate on different Wi-Fi routers, client isolation settings, IPv4/IPv6 environments, sleep/resume, and network changes (see docs/network-test.md)
-- [ ] Connection lifecycle/resource-limit hardening, graceful shutdown, and platform permission/error handling
-- [ ] Independent security review of discovery, first-use trust approval, Noise identity pinning, trust persistence, and revocation
+### Validation outcome
+- [x] Physical Windows ↔ Android discovery and pairing in both directions.
+- [x] Receiver-side approval and trusted reconnection.
+- [x] App restart/reconnection on Windows and Android.
+- [x] Wi-Fi disconnect/reconnect; user reports working.
+- [x] Windows firewall and Android network-permission behaviour; user reports working.
+- [x] CI: Rust checks, native Windows build, Android APK, and iOS Simulator build.
 
-**Milestone 1 is not complete until every remaining completion gate above is closed.** CI and simulator/loopback tests are necessary but do not replace physical-device interoperability tests or an independent security review.
+### Deferred / follow-up validation
+- [ ] Physical Windows ↔ iOS and Android ↔ iOS tests (requires iPhone and Mac).
+- [ ] Linux desktop installation and interoperability tests (deferred until Linux is installed).
+- [ ] Broader router/AP-isolation, IPv6-only, and lifecycle/resource-limit stress testing.
+- [ ] Independent security review before broad public release.
+
+**Milestone 1 is complete for the currently available Windows + Android target.** iOS and Linux physical-device/platform validation remain explicitly deferred; the completed milestone does not claim those platforms have passed real-device testing. See [docs/network-test.md](network-test.md) for the detailed record.
 
 ## Device capabilities
 - [ ] Capability permission model
