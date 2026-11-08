@@ -486,10 +486,17 @@ impl eframe::App for BridgeApp {
                 // mDNS may resolve one physical device over both IPv4 and IPv6.
                 // Device identity, not socket address, defines one discovered row.
                 if let Some(existing) = self.discovered_peers.iter_mut()
-                    .find(|known| known.record.device_id == peer.record.device_id)
+                    .find(|known| {
+                        known.record.device_id == peer.record.device_id
+                            || known.record.public_key_fingerprint.eq_ignore_ascii_case(
+                                &peer.record.public_key_fingerprint,
+                            )
+                    })
                 {
-                    // Prefer IPv4 for the Windows Connect action when both routes
-                    // are available; otherwise retain whichever usable route arrived.
+                    // A single authenticated device may be resolved through both
+                    // IPv4 and IPv6. Device ID is the primary key; the advertised
+                    // public-key fingerprint is a stable fallback if a client has
+                    // inconsistent discovery IDs. Prefer IPv4 for Windows Connect.
                     if peer.address.is_ipv4() || !existing.address.is_ipv4() {
                         *existing = peer;
                     }
