@@ -34,7 +34,7 @@ pub enum TrustStoreError {
     IdentityMismatch,
 }
 
-/// Created only after the user confirms that both devices display the same SAS.
+/// Represents an explicit first-use trust decision for an authenticated peer.
 #[derive(Clone, Debug)]
 pub struct SasConfirmation {
     fingerprint: String,
