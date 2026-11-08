@@ -82,7 +82,7 @@ fn pair_connect(request: PairRequest) -> Result<PairResult, String> {
     let stream = TcpStream::connect_timeout(&address, Duration::from_secs(5))
         .map_err(|e| e.to_string())?;
     let connection = connect_noise_xx(stream, &key, request.expected_fingerprint.as_deref())
-        .map_err(|e| e.to_string())?;
+        .map_err(|e: bridge_network::NetworkError| e.to_string())?;
     register(connection, &request.local_device)
 }
 

@@ -15,7 +15,10 @@ use std::net::TcpListener;
 #[cfg(windows)]
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver};
+#[cfg(windows)]
+use std::sync::mpsc::Sender;
+#[cfg(windows)]
 use std::thread;
 use std::time::Duration;
 
@@ -70,7 +73,6 @@ struct BridgeApp {
     launch_at_login: bool,
     notifications: bool,
     auto_accept: bool,
-    network_ip: String,
     network_status: String,
     #[cfg(windows)]
     discovered_peers: Vec<DiscoveredPeer>,
@@ -87,6 +89,7 @@ struct BridgeApp {
     #[cfg(windows)]
     trust_store: TrustStore,
     network_rx: Receiver<String>,
+    #[cfg(windows)]
     network_tx: Sender<String>,
     brand_texture: Option<egui::TextureHandle>,
 }
@@ -111,7 +114,6 @@ impl Default for BridgeApp {
             launch_at_login: false,
             notifications: true,
             auto_accept: false,
-            network_ip: String::new(),
             network_status: identity_status,
             #[cfg(windows)]
             discovered_peers: Vec::new(),
@@ -128,7 +130,10 @@ impl Default for BridgeApp {
             #[cfg(windows)]
             trust_store: TrustStore::load(trust_store_path()).unwrap_or_default(),
             network_rx,
+            #[cfg(windows)]
             network_tx,
+            #[cfg(not(windows))]
+            { let _ = network_tx; }
             brand_texture: None,
         }
     }
