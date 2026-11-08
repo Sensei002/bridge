@@ -97,6 +97,20 @@ fn pair_accept(request: PairRequest) -> Result<PairResult, String> {
     register(connection, &request.local_device)
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn bridge_identity_fingerprint(private_key_hex: *const c_char) -> *mut c_char {
+    if private_key_hex.is_null() { return CString::new("{\"ok\":false,\"error\":\"null key\"}").unwrap().into_raw(); }
+    let result = CStr::from_ptr(private_key_hex).to_str()
+        .map_err(|e| e.to_string())
+        .and_then(decode_hex)
+        .and_then(|key| bridge_network::local_key_fingerprint(&key).map_err(|e| e.to_string()));
+    let json = match result {
+        Ok(fingerprint) => serde_json::json!({"ok": true, "fingerprint": fingerprint}),
+        Err(error) => serde_json::json!({"ok": false, "error": error}),
+    };
+    CString::new(json.to_string()).unwrap().into_raw()
+}
+
 fn to_json(result: Result<PairResult, String>) -> CString {
     let value = result.unwrap_or_else(result_error);
     CString::new(serde_json::to_string(&value).unwrap_or_else(|_| "{\"ok\":false,\"error\":\"serialization failed\"}".into()))
@@ -190,6 +204,18 @@ mod android_jni {
         let output = unsafe {
             if accept { bridge_pair_accept(input.as_ptr()) } else { bridge_pair_connect(input.as_ptr()) }
         };
+        let response = unsafe { CStr::from_ptr(output).to_string_lossy().into_owned() };
+        unsafe { bridge_string_free(output); }
+        env.new_string(response).map(|value| value.into_raw()).unwrap_or(std::ptr::null_mut())
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_app_bridge_android_BridgeNative_identityFingerprint(
+        mut env: JNIEnv, _class: JClass, private_key_hex: JString
+    ) -> jstring {
+        let text: String = env.get_string(&private_key_hex).map(|v| v.into()).unwrap_or_default();
+        let input = CString::new(text).unwrap_or_default();
+        let output = unsafe { bridge_identity_fingerprint(input.as_ptr()) };
         let response = unsafe { CStr::from_ptr(output).to_string_lossy().into_owned() };
         unsafe { bridge_string_free(output); }
         env.new_string(response).map(|value| value.into_raw()).unwrap_or(std::ptr::null_mut())
