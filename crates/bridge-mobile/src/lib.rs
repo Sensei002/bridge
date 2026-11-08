@@ -244,6 +244,16 @@ mod android_jni {
     }
 
     #[no_mangle]
+    pub extern "system" fn Java_app_bridge_android_BridgeNative_sessionReceive(
+        env: JNIEnv, _class: JClass, handle: jni::sys::jlong
+    ) -> jstring {
+        let output = unsafe { bridge_session_receive(handle as u64) };
+        let response = unsafe { CStr::from_ptr(output).to_string_lossy().into_owned() };
+        unsafe { bridge_string_free(output); }
+        env.new_string(response).map(|value| value.into_raw()).unwrap_or(std::ptr::null_mut())
+    }
+
+    #[no_mangle]
     pub extern "system" fn Java_app_bridge_android_BridgeNative_sessionClose(
         _env: JNIEnv, _class: JClass, handle: jni::sys::jlong
     ) { bridge_session_close(handle as u64); }

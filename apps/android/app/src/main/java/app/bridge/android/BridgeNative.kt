@@ -9,8 +9,10 @@ internal object BridgeNative {
         System.loadLibrary("bridge_mobile")
     }
 
+    external fun identityFingerprint(privateKeyHex: String): String
     external fun pairConnect(requestJson: String): String
     external fun pairAccept(requestJson: String): String
     external fun sessionSend(handle: Long, message: String): String
+    external fun sessionReceive(handle: Long): String
     external fun sessionClose(handle: Long)
 }

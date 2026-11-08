@@ -4,6 +4,7 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+char *bridge_identity_fingerprint(const char *private_key_hex);
 char *bridge_pair_connect(const char *request_json);
 char *bridge_pair_accept(const char *request_json);
 char *bridge_session_send(uint64_t handle, const char *message);
