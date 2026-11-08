@@ -79,7 +79,7 @@ internal class BridgePairingController(
                 val trusted = trustedDevices().firstOrNull { it.deviceId == peer.deviceId }
                 val expected = expectedFingerprint ?: trusted?.fingerprint
                 val response = JSONObject(
-                    BridgeNative.pairConnect(request(host = peer.host, expectedFingerprint = expected))
+                    BridgeNative.pairConnect(request(host = peer.host, expectedFingerprint = expected, port = peer.port))
                 )
                 handleResult(response)
             } catch (error: Exception) {
@@ -219,10 +219,11 @@ internal class BridgePairingController(
     private fun request(
         host: String? = null,
         bindIp: String? = null,
-        expectedFingerprint: String? = null
+        expectedFingerprint: String? = null,
+        port: Int = 45821
     ): String {
         val json = JSONObject()
-            .put("port", 45821)
+            .put("port", port)
             .put("timeout_ms", 1_000)
             .put("private_key_hex", keyHex)
             .put("local_device", localDescriptor)
