@@ -116,7 +116,7 @@ fn handle_network_client(mut stream: TcpStream, status: Sender<String>) {
     };
     match result {
         Ok(_) if line.trim() == "BRIDGE_PING/1" => {
-            let _ = stream.write_all(b"BRIDGE_PONG/1\\n");
+            let _ = stream.write_all(b"BRIDGE_PONG/1\n");
             let _ = status.send(format!("Bridge network test succeeded with {peer}"));
         }
         Ok(_) if line.trim().starts_with("BRIDGE_PAIR/1|") => {

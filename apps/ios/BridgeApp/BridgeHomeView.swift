@@ -53,7 +53,7 @@ struct BridgeHomeView: View {
                 _ = try BridgeIdentityStore.loadOrCreate()
                 identityStatus = "Device identity protected by iOS Keychain"
             } catch {
-                identityStatus = "Secure identity unavailable: \\(error.localizedDescription)"
+                identityStatus = "Secure identity unavailable: \(error.localizedDescription)"
             }
         }
     }
