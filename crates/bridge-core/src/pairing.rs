@@ -3,7 +3,7 @@
 //! This module manages user approval and expiry only. It does not authenticate
 //! network peers or establish encryption; callers must not expose it over an
 //! unauthenticated transport.
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use bridge_protocol::{DeviceDescriptor, DeviceId, PairingRequest, ProtocolValidationError, MAX_PAIRING_WINDOW_MS};
 use thiserror::Error;
 use uuid::Uuid;
@@ -107,6 +107,10 @@ pub enum QrInvitationError {
     InvalidEndpoint,
     #[error("QR invitation fingerprint is invalid")]
     InvalidFingerprint,
+    #[error("QR invitation has already been consumed")]
+    Replayed,
+    #[error("QR invitation replay cache is full")]
+    ReplayCacheFull,
 }
 
 impl QrInvitation {
@@ -168,6 +172,37 @@ impl QrInvitation {
             return Err(QrInvitationError::Expired);
         }
         Ok(())
+    }
+}
+
+/// Process-local, bounded one-time nonce guard for invitations accepted by a client.
+/// Call only after decoding and validating the invitation, immediately before connecting.
+#[derive(Debug, Default)]
+pub struct QrInvitationReplayGuard {
+    consumed: HashSet<Uuid>,
+    expirations: HashMap<Uuid, u64>,
+}
+
+impl QrInvitationReplayGuard {
+    pub const MAX_TRACKED_NONCES: usize = 4_096;
+
+    pub fn consume(&mut self, invitation: &QrInvitation, now_ms: u64) -> Result<(), QrInvitationError> {
+        invitation.validate(now_ms)?;
+        self.expirations.retain(|_, expires_at| *expires_at > now_ms);
+        self.consumed.retain(|nonce| self.expirations.contains_key(nonce));
+        if self.consumed.contains(&invitation.nonce) {
+            return Err(QrInvitationError::Replayed);
+        }
+        if self.consumed.len() >= Self::MAX_TRACKED_NONCES {
+            return Err(QrInvitationError::ReplayCacheFull);
+        }
+        self.consumed.insert(invitation.nonce);
+        self.expirations.insert(invitation.nonce, invitation.expires_at_ms);
+        Ok(())
+    }
+
+    pub fn tracked_nonces(&self) -> usize {
+        self.consumed.len()
     }
 }
 
@@ -235,6 +270,37 @@ mod tests {
             QrInvitation::decode(&format!("bridge://pair/{}", "x".repeat(QR_INVITATION_MAX_BYTES + 1)), 100_000),
             Err(QrInvitationError::TooLarge)
         );
+    }
+
+    #[test]
+    fn qr_invitation_nonce_is_one_time_and_expires_from_replay_guard() {
+        let device = device();
+        let invitation = QrInvitation::create(
+            &device, "192.168.1.25", 45821, &"ab".repeat(32), 10_000
+        ).unwrap();
+        let mut guard = QrInvitationReplayGuard::default();
+        assert_eq!(guard.consume(&invitation, 10_001), Ok(()));
+        assert_eq!(guard.consume(&invitation, 10_002), Err(QrInvitationError::Replayed));
+        assert_eq!(guard.tracked_nonces(), 1);
+        assert_eq!(guard.consume(&invitation, invitation.expires_at_ms), Err(QrInvitationError::Expired));
+        assert_eq!(guard.tracked_nonces(), 0);
+    }
+
+    #[test]
+    fn qr_invitation_replay_guard_is_bounded() {
+        let device = device();
+        let mut guard = QrInvitationReplayGuard::default();
+        for index in 0..QrInvitationReplayGuard::MAX_TRACKED_NONCES {
+            let invitation = QrInvitation::create(
+                &device, "192.168.1.25", 45821, &"ab".repeat(32), 10_000
+            ).unwrap();
+            // Each invitation has a cryptographically random nonce.
+            assert_eq!(guard.consume(&invitation, 10_001 + index as u64), Ok(()));
+        }
+        let final_invitation = QrInvitation::create(
+            &device, "192.168.1.25", 45821, &"ab".repeat(32), 10_000
+        ).unwrap();
+        assert_eq!(guard.consume(&final_invitation, 10_002), Err(QrInvitationError::ReplayCacheFull));
     }
 
     #[test]
