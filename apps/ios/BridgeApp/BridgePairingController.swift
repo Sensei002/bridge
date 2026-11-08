@@ -4,7 +4,6 @@ import Darwin
 
 struct BridgePendingPairing: Identifiable {
     let handle: UInt64
-    let sas: String
     let fingerprint: String
     let deviceId: String
     let name: String
@@ -236,7 +235,7 @@ final class BridgePairingController: ObservableObject {
             return
         }
         pending.append(BridgePendingPairing(
-            handle: handle, sas: result["sas"] as? String ?? "", fingerprint: fingerprint,
+            handle: handle, fingerprint: fingerprint,
             deviceId: deviceId, name: name, platform: platform
         ))
         status = "Pairing request from \(name). Review the request to allow this device."
