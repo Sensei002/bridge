@@ -263,7 +263,7 @@ fn start_secure_listener(status: Sender<String>, pending: Sender<PendingApproval
                                 let message = if already_trusted {
                                     format!("Secure session re-established with {}", descriptor.display_name)
                                 } else {
-                                    format!("Authenticated handshake from {} · awaiting matching code and approval", descriptor.display_name)
+                                    format!("Pairing request from {} · awaiting approval on this device", descriptor.display_name)
                                 };
                                 let _ = status.send(message);
                                 if pending.send(PendingApproval {
@@ -308,14 +308,25 @@ fn start_pairing(peer: DiscoveredPeer, expected: Option<String>, status: Sender<
                 Ok(PendingApproval { connection, descriptor, incoming: false, already_trusted })
             });
         match result {
-            Ok(approval) => {
+            Ok(mut approval) => {
                 if !approval.already_trusted {
-                    let mut approval = approval;
-                    let accepted = receive_pairing_decision(&mut approval.connection);
-                    if let Err(error) = accepted {
+                    if let Err(error) = receive_pairing_decision(&mut approval.connection) {
                         let _ = status.send(format!("Pairing was not approved: {error}"));
                         return;
                     }
+                    let confirmation = match SasConfirmation::user_approved(&approval.connection.remote_fingerprint) {
+                        Ok(value) => value,
+                        Err(error) => { let _ = status.send(format!("Could not verify approved device: {error}")); return; }
+                    };
+                    let mut store = match TrustStore::load(trust_store_path()) {
+                        Ok(value) => value,
+                        Err(error) => { let _ = status.send(format!("Trust registry unavailable: {error}")); return; }
+                    };
+                    if let Err(error) = store.trust_and_save(approval.descriptor.clone(), confirmation, now_ms(), trust_store_path()) {
+                        let _ = status.send(format!("Could not save approved device: {error}"));
+                        return;
+                    }
+                    approval.already_trusted = true;
                 }
                 if pending.send(approval).is_err() {
                     let _ = status.send("Pairing window closed; session discarded".into());
@@ -477,7 +488,7 @@ impl eframe::App for BridgeApp {
             }
             for pairing in self.pairing_rx.try_iter() {
                 if pairing.already_trusted {
-                    self.network_status = format!("Secure session re-established with {}.", pairing.descriptor.display_name);
+                    self.network_status = format!("Secure session established with {}.", pairing.descriptor.display_name);
                     self.active_sessions.push(pairing.connection);
                 } else {
                     self.pending_pairings.push(pairing);
@@ -894,8 +905,9 @@ impl eframe::App for BridgeApp {
                     }
                 });
             if let Some(index) = reject_index {
-                self.pending_pairings.remove(index);
-                self.network_status = "Pairing rejected. No trust record was created.".into();
+                let mut pending = self.pending_pairings.remove(index);
+                let _ = send_pairing_decision(&mut pending.connection, "rejected");
+                self.network_status = "Pairing request rejected.".into();
             }
             if let Some(index) = approve_index {
                 let pending = self.pending_pairings.remove(index);
@@ -903,21 +915,22 @@ impl eframe::App for BridgeApp {
                     self.network_status = format!("Pairing approval blocked because the trust registry is unreadable: {error}");
                     return;
                 }
-                match SasConfirmation::user_confirmed(
-                    &pending.connection.sas,
-                    &pending.connection.sas,
-                    pending.remote_code.trim(),
-                    &pending.connection.remote_fingerprint,
-                ).and_then(|confirmation| {
-                    self.trust_store.trust_and_save(
+                let result = SasConfirmation::user_approved(&pending.connection.remote_fingerprint)
+                    .and_then(|confirmation| self.trust_store.trust_and_save(
                         pending.descriptor.clone(), confirmation, now_ms(), trust_store_path()
-                    )
-                }) {
+                    ));
+                match result {
                     Ok(()) => {
-                        self.active_sessions.push(pending.connection);
-                        self.network_status = format!("{} is now trusted. Encrypted Noise session established.", pending.descriptor.display_name);
+                        if let Err(error) = send_pairing_decision(&mut pending.connection, "accepted") {
+                            let _ = self.trust_store.revoke_and_save(&pending.descriptor.id, trust_store_path());
+                            self.network_status = format!("Could not confirm pairing: {error}");
+                        } else {
+                            self.active_sessions.push(pending.connection);
+                            self.network_status = format!("{} is now connected and trusted.", pending.descriptor.display_name);
+                        }
                     }
                     Err(error) => {
+                        let _ = send_pairing_decision(&mut pending.connection, "rejected");
                         self.network_status = format!("Pairing was not trusted: {error}");
                     }
                 }
