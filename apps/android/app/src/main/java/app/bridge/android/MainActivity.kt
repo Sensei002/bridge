@@ -130,9 +130,12 @@ class MainActivity : ComponentActivity() {
                 controller.start()
 
                 val networkDiscovery = BridgeDiscovery(this, { peer ->
-                    if (peer.deviceId != deviceId && discoveredPeers.none { it.deviceId == peer.deviceId }) {
-                        discoveredPeers.add(peer)
+                    if (peer.deviceId != deviceId) {
+                        val existing = discoveredPeers.indexOfFirst { it.deviceId == peer.deviceId }
+                        if (existing >= 0) discoveredPeers[existing] = peer else discoveredPeers.add(peer)
                     }
+                }, { serviceName ->
+                    discoveredPeers.removeAll { it.serviceName == serviceName }
                 }, { message -> pairingStatus = message })
                 if (destroyed) {
                     controller.stop()
