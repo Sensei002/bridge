@@ -767,7 +767,7 @@ impl eframe::App for BridgeApp {
                         panel(ui, |ui| {
                             eyebrow(ui, "SECURE TRANSPORT");
                             ui.label(egui::RichText::new("Authenticated local sessions").strong().size(17.0));
-                            muted(ui, "Bridge accepts Noise XX sessions on TCP 45821. A connection is retained only after both devices compare the same six-digit code and explicitly approve the peer.");
+                            muted(ui, "New devices must be accepted on the receiving device. Previously trusted devices reconnect automatically.");
                             ui.label(egui::RichText::new(&self.network_status).size(12.0).color(AMBER));
                         });
                     }
@@ -890,15 +890,12 @@ impl eframe::App for BridgeApp {
                     ui.set_min_width(380.0);
                     for (index, pending) in self.pending_pairings.iter_mut().enumerate() {
                         eyebrow(ui, "NOISE XX · AUTHENTICATED PEER");
-                        ui.label(egui::RichText::new(&pending.descriptor.display_name).size(19.0).strong());
-                        muted(ui, &format!("{:?} · fingerprint {}", pending.descriptor.platform, &pending.connection.remote_fingerprint[..16]));
-                        ui.add_space(8.0);
-                        ui.label(egui::RichText::new(&pending.connection.sas).size(34.0).strong().color(ACCENT));
-                        muted(ui, "Compare this six-digit code with the other device. Only continue if both screens show exactly the same code.");
-                        ui.label("Enter the code shown on the other device:");
-                        ui.add(egui::TextEdit::singleline(&mut pending.remote_code).desired_width(180.0).hint_text("000000"));
+                        ui.label(egui::RichText::new("Allow this device to connect?").size(18.0).strong());
+                        ui.label(egui::RichText::new(&pending.descriptor.display_name).size(20.0).strong());
+                        muted(ui, &format!("{:?} · authenticated identity · {}", pending.descriptor.platform, &pending.connection.remote_fingerprint[..16]));
+                        muted(ui, "Only accept if you recognize this device. Its connection is encrypted and its identity will be saved on this PC.");
                         ui.horizontal(|ui| {
-                            if primary_button(ui, "Confirm and trust") { approve_index = Some(index); }
+                            if primary_button(ui, "Accept") { approve_index = Some(index); }
                             if ui.button("Reject").clicked() { reject_index = Some(index); }
                         });
                         ui.separator();
@@ -946,73 +943,14 @@ impl eframe::App for BridgeApp {
                     eyebrow(ui, "AUTHENTICATED DEVICE PAIRING");
                     ui.add_space(8.0);
                     ui.label(egui::RichText::new("Secure pairing is active").size(19.0).strong());
-                    muted(ui, "Choose a discovered Bridge device. Both devices must complete Noise XX, compare the same six-digit code, and approve the peer.");
+                    muted(ui, "Bridge automatically discovers nearby devices. Choose one and press Connect; the other device will show an approval popup.");
                     ui.add_space(10.0);
-                    muted(ui, "Create a two-minute QR invitation for a phone to scan. The QR only supplies the local endpoint; Noise XX fingerprint pinning and matching-code approval remain mandatory.");
-                    ui.add_space(10.0);
-                    #[cfg(windows)]
-                    if primary_button(ui, "Generate pairing QR") {
-                        match create_local_invitation() {
-                            Ok((_uri, pixels)) => {
-                                self.invitation_texture = Some(ctx.load_texture("bridge-pairing-qr", pixels, egui::TextureOptions::NEAREST));
-                                self.network_status = "Short-lived QR invitation created. It expires in two minutes.".into();
-                            }
-                            Err(error) => self.network_status = format!("Could not create QR invitation: {error}"),
-                        }
-                    }
-                    #[cfg(windows)]
-                    {
-                        let invitation_texture = self.invitation_texture.clone();
-                        if let Some(texture) = invitation_texture {
-                            ui.add_space(8.0);
-                            ui.vertical_centered(|ui| {
-                                ui.image((texture.id(), egui::vec2(220.0, 220.0)));
-                                muted(ui, "Scan with Bridge on Android or iOS. Expires after two minutes.");
-                                if ui.button("Hide QR").clicked() {
-                                    self.invitation_texture = None;
-                                }
-                            });
-                        }
-                    }
+                    muted(ui, "Previously trusted devices reconnect automatically. New devices are never trusted without approval on the receiving device.");
                     ui.add_space(12.0);
                     if ui.button("Close").clicked() { self.show_pair_dialog = false; }
                 });
         }
     }
-}
-
-#[cfg(windows)]
-fn create_local_invitation() -> Result<(String, egui::ColorImage), String> {
-    let socket = UdpSocket::bind(("0.0.0.0", 0)).map_err(|error| error.to_string())?;
-    socket.connect(("192.0.2.1", 80)).map_err(|error| error.to_string())?;
-    let host = match socket.local_addr().map_err(|error| error.to_string())?.ip() {
-        std::net::IpAddr::V4(address) if address.is_private() => address,
-        _ => return Err("No private IPv4 Wi-Fi address was found. Connect to your local network and retry.".into()),
-    };
-    let key = identity_store::load_or_create().map_err(|error| error.to_string())?;
-    let fingerprint = local_key_fingerprint(&key).map_err(|error| error.to_string())?;
-    let device = DeviceDescriptor {
-        id: local_device_id(),
-        display_name: "Bridge Windows".into(),
-        platform: Platform::Windows,
-        protocol_version: PROTOCOL_VERSION,
-    };
-    let invitation = QrInvitation::create(&device, &host.to_string(), NETWORK_PORT, &fingerprint, now_ms())
-        .map_err(|error| error.to_string())?
-        .encode().map_err(|error| error.to_string())?;
-    let code = qrcode::QrCode::new(invitation.as_bytes()).map_err(|error| error.to_string())?;
-    let modules = code.width();
-    let quiet = 4usize;
-    let side = modules + quiet * 2;
-    let mut pixels = vec![255u8; side * side];
-    for y in 0..modules {
-        for x in 0..modules {
-            if code[(x, y)] == qrcode::Color::Dark {
-                pixels[(y + quiet) * side + x + quiet] = 0;
-            }
-        }
-    }
-    Ok((invitation, egui::ColorImage::from_gray([side, side], &pixels)))
 }
 
 #[cfg(windows)]
