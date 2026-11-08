@@ -692,11 +692,15 @@ impl eframe::App for BridgeApp {
                             panel(ui, |ui| {
                                 eyebrow(ui, "DISCOVERED ON YOUR NETWORK");
                                 ui.add_space(8.0);
-                                if self.discovered_peers.is_empty() {
-                                    muted(ui, "Searching for Bridge devices… Discovery results are unverified until Noise authentication completes.");
+                                let trusted_devices = self.trust_store.list();
+                                let visible_peers = self.discovered_peers.iter().enumerate()
+                                    .filter(|(_, peer)| !trusted_devices.iter().any(|device| device.descriptor.id == peer.record.id))
+                                    .collect::<Vec<_>>();
+                                if visible_peers.is_empty() {
+                                    muted(ui, "No new devices found. Trusted devices are listed below.");
                                 } else {
                                     let mut pair_target = None;
-                                    for (index, peer) in self.discovered_peers.iter().enumerate() {
+                                    for (index, peer) in visible_peers {
                                         ui.horizontal(|ui| {
                                             ui.vertical(|ui| {
                                                 ui.label(egui::RichText::new(&peer.record.display_name).color(TEXT).strong());
