@@ -8,20 +8,22 @@
 
 Bridge is an open-source, local-first device interoperability project for Windows, Android, and iOS. The goal is to make nearby devices work together through one secure, permission-based ecosystem.
 
-> **Status: early foundation.** Native client shells, a shared Rust protocol/core, explicit-consent pairing state, and a tested Noise XX encrypted-session foundation are in place. Device discovery, network pairing integration, clipboard sync, and file transfer are not implemented yet.
+> **Status: Milestone 1 foundation implemented; not yet complete.** Native client shells, local-network discovery, authenticated Noise XX pairing, platform-backed device identities, explicit-consent trust, trusted-device persistence/revocation, and secure QR invitation primitives are implemented. The QR invitation APIs are not yet connected to complete native QR display and camera-scanning experiences. Physical-device interoperability testing and final lifecycle/security review remain outstanding.
 
 ## Platforms
 
 - **Windows:** Native Rust + [egui](https://github.com/emilk/egui) desktop application. No WebView2, Tauri, Electron, Chromium, or embedded browser runtime.
 - **Android:** Kotlin + Jetpack Compose.
 - **iOS:** SwiftUI native app.
-- **Shared engine:** Rust workspace with versioned protocol types, device registry, pairing consent state machine, and encrypted-session primitives.
+- **Shared engine:** Rust workspace with versioned protocol types, device registry, pairing consent state machine, discovery, QR invitation validation/replay protection, and encrypted-session primitives.
 
 ## Repository layout
 
 - `crates/bridge-protocol` — versioned wire types.
-- `crates/bridge-core` — device registry and pairing lifecycle.
+- `crates/bridge-core` — device registry, pairing lifecycle, and QR invitation validation.
 - `crates/bridge-security` — Noise XX handshake and authenticated encrypted sessions.
+- `crates/bridge-network` — mDNS/DNS-SD discovery, bounded TCP framing, and Noise transport.
+- `crates/bridge-mobile` — C ABI/JNI FFI for native mobile clients.
 - `apps/desktop` — native Rust + egui Windows desktop app.
 - `apps/android` — Android app.
 - `apps/ios` — iOS app.
@@ -29,6 +31,27 @@ Bridge is an open-source, local-first device interoperability project for Window
 - `scripts/generate_brand_assets.py` — deterministic platform icon generation from the master artwork.
 - `docs/` — architecture, protocol, security model, and roadmap.
 - `.github/workflows/` — CI and tag-based release automation.
+
+## Milestone 1: authenticated local connectivity
+
+Implemented foundations:
+
+- mDNS/DNS-SD discovery on Windows, Android NSD, and iOS Bonjour.
+- Versioned, validated discovery metadata treated as untrusted until authentication.
+- Bounded length-prefixed TCP framing, socket timeouts, and Noise XX sessions.
+- SHA-256 static-key fingerprints, symmetric six-digit short authentication strings, and pinned-identity checks.
+- Device identity persistence using Windows Credential Manager, Android Keystore-backed storage, and iOS Keychain.
+- Explicit matching-code confirmation before first-time trust; persistent trusted-device records and revocation.
+- Authenticated descriptor exchange, replay-resistant transport counters, QR invitation encoding/validation, one-time nonce consumption, and Rust mobile FFI entry points for invitation creation/consumption.
+
+Still required before Milestone 1 is complete:
+
+- Native QR code rendering/display and camera scanning wired into Windows, Android, and iOS pairing screens.
+- End-to-end pairing tests on physical devices for Windows ↔ Android, Windows ↔ iOS, and Android ↔ iOS, including different Wi-Fi/router configurations.
+- Final connection lifecycle, resource-limit, reconnection, and platform network-permission hardening.
+- Independent security review of the complete pairing flow.
+
+See [docs/roadmap.md](docs/roadmap.md), [docs/protocol.md](docs/protocol.md), [docs/security-model.md](docs/security-model.md), [CONTRIBUTING.md](CONTRIBUTING.md), and [SECURITY.md](SECURITY.md).
 
 ## CI/CD
 
@@ -51,17 +74,15 @@ The Windows client is a native Rust desktop application rendered by egui. It doe
 ## Security principles
 
 - Pairing must require user approval on both devices.
-- Noise XX provides an authenticated key exchange and encrypted transport once the peer's static key has been verified.
-- The remote static-key fingerprint must be confirmed/pinned by the pairing layer before a peer is trusted; the security crate does not silently trust first contact.
+- Noise XX provides an authenticated key exchange and encrypted transport; the remote static-key fingerprint must be checked before a peer is trusted.
+- QR invitations are short-lived endpoint hints, never authentication credentials. A scanned invitation pins the expected Noise identity but still requires matching SAS verification and explicit approval.
 - Device identities must be revocable.
 - Capabilities are independently permissioned.
 - Network messages must be versioned, validated, and size-bounded.
 - No silent cloud upload or background relay.
 - Never commit secrets or signing keys.
 
-The Noise security crate currently provides the cryptographic session primitive; it is not yet wired to network sockets, persistent platform key storage, or the pairing UI.
-
-See [docs/roadmap.md](docs/roadmap.md), [docs/protocol.md](docs/protocol.md), [docs/security-model.md](docs/security-model.md), [CONTRIBUTING.md](CONTRIBUTING.md), and [SECURITY.md](SECURITY.md).
+The current secure pairing foundation is implemented, but QR UI integration, physical-device validation, and independent review are still release gates. Do not treat a successful CI build or loopback test as proof of real-device interoperability.
 
 ## License
 
