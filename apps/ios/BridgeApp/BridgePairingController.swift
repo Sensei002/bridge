@@ -63,7 +63,7 @@ final class BridgePairingController: ObservableObject {
     func pair(_ peer: BridgePeer, expectedFingerprint: String? = nil) {
         let known = trusted.first(where: { $0.deviceId == peer.deviceId })
         let pinnedFingerprint = expectedFingerprint ?? known?.fingerprint
-        let request = makeRequest(host: peer.host, expectedFingerprint: pinnedFingerprint, port: peer.port)
+        let request = makeRequest(host: peer.host, expectedFingerprint: pinnedFingerprint, expectedDeviceId: peer.deviceId, port: peer.port)
         Task {
             let response = await Task.detached(priority: .userInitiated) {
                 BridgeNativeClient.pairConnect(request: request)
@@ -205,13 +205,14 @@ final class BridgePairingController: ObservableObject {
         pending.removeAll()
     }
 
-    private func makeRequest(host: String? = nil, bindIp: String? = nil, expectedFingerprint: String? = nil, port: Int = 45821) -> String {
+    private func makeRequest(host: String? = nil, bindIp: String? = nil, expectedFingerprint: String? = nil, expectedDeviceId: String? = nil, port: Int = 45821) -> String {
         var request: [String: Any] = [
             "port": port,
             "timeout_ms": 1_000,
             "private_key_hex": privateKeyHex,
             "local_device": localDescriptor,
-            "expected_fingerprint": expectedFingerprint as Any? ?? NSNull()
+            "expected_fingerprint": expectedFingerprint as Any? ?? NSNull(),
+            "expected_device_id": expectedDeviceId as Any? ?? NSNull()
         ]
         if let host { request["host"] = host }
         if let bindIp { request["bind_ip"] = bindIp }
