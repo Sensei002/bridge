@@ -13,7 +13,8 @@ internal data class BridgePeer(
     val port: Int,
     val deviceId: String,
     val fingerprint: String,
-    val platform: String
+    val platform: String,
+    val serviceName: String
 )
 
 internal data class BridgePendingPairing(
