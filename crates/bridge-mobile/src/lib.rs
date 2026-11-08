@@ -390,11 +390,22 @@ mod tests {
 
         assert_eq!(initiator["ok"], true);
         assert_eq!(responder["ok"], true);
+        assert_eq!(initiator["role"], "initiator");
+        assert_eq!(responder["role"], "responder");
         assert_eq!(initiator["remote_device"]["platform"], "android");
         assert_eq!(responder["remote_device"]["platform"], "ios");
 
         let initiator_handle = initiator["handle"].as_u64().unwrap();
         let responder_handle = responder["handle"].as_u64().unwrap();
+        let decision = CString::new(r#"{"type":"pairing_decision","decision":"accepted"}"#).unwrap();
+        let sent_decision = unsafe { take_json(bridge_session_send(responder_handle, decision.as_ptr())) };
+        assert_eq!(sent_decision["ok"], true);
+        let received_decision = unsafe { take_json(bridge_session_receive(initiator_handle)) };
+        assert_eq!(received_decision["ok"], true);
+        let parsed_decision: serde_json::Value = serde_json::from_str(received_decision["message"].as_str().unwrap()).unwrap();
+        assert_eq!(parsed_decision["type"], "pairing_decision");
+        assert_eq!(parsed_decision["decision"], "accepted");
+
         let message = CString::new("encrypted native bridge payload").unwrap();
         let sent = unsafe { take_json(bridge_session_send(initiator_handle, message.as_ptr())) };
         assert_eq!(sent["ok"], true);
