@@ -396,19 +396,21 @@ mod tests {
         let b = Builder::new(params).generate_keypair().unwrap();
         let a_public = a.public.clone();
         let b_public = b.public.clone();
+        let expected_a_fingerprint = fingerprint(&a_public);
+        let expected_for_server = expected_a_fingerprint.clone();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let b_private = b.private.clone();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
-            accept_noise_xx(stream, &b_private, Some(&fingerprint(&a_public)))
+            accept_noise_xx(stream, &b_private, Some(&expected_for_server))
         });
         let stream = TcpStream::connect(address).unwrap();
         let mut client = connect_noise_xx(stream, &a.private, Some(&fingerprint(&b_public))).unwrap();
         let mut server = server.join().unwrap().unwrap();
         assert_eq!(client.sas, server.sas);
         assert_eq!(client.remote_fingerprint, fingerprint(&b_public));
-        assert_eq!(server.remote_fingerprint, fingerprint(&a_public));
+        assert_eq!(server.remote_fingerprint, expected_a_fingerprint);
         let mut encrypted = vec![0_u8; 128];
         let length = client.transport.write_message(b"private hello", &mut encrypted).unwrap();
         write_frame(&mut client.stream, &encrypted[..length]).unwrap();
