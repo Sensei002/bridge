@@ -60,33 +60,78 @@ private enum class BridgeTab(val label: String, val symbol: String) {
 
 class MainActivity : ComponentActivity() {
     private var discovery: BridgeDiscovery? = null
+    private var pairingController: BridgePairingController? = null
+    private val discoveredPeers = mutableStateListOf<BridgePeer>()
+    private val pendingPairings = mutableStateListOf<BridgePendingPairing>()
+    private val trustedDevices = mutableStateListOf<BridgeTrustedDevice>()
+    private var pairingStatus by mutableStateOf("Preparing secure device identity…")
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         try {
-            BridgeIdentityStore.loadOrCreate(this)
-            pairingMessage = "Device identity protected by Android Keystore. Secure pairing is not enabled yet."
+            val privateKey = BridgeIdentityStore.loadOrCreate(this)
+            val keyHex = privateKey.joinToString("") { "%02x".format(it) }
+            val fingerprintResult = org.json.JSONObject(BridgeNative.identityFingerprint(keyHex))
+            check(fingerprintResult.optBoolean("ok")) { fingerprintResult.optString("error") }
+            val fingerprint = fingerprintResult.getString("fingerprint")
+            val identityPreferences = getSharedPreferences("bridge_secure_identity", MODE_PRIVATE)
+            val deviceId = identityPreferences.getString("device_id", null) ?: java.util.UUID.randomUUID().toString().also {
+                check(identityPreferences.edit().putString("device_id", it).commit())
+            }
+            pairingController = BridgePairingController(
+                this, privateKey, fingerprint, deviceId,
+                onPending = { pendingPairings.add(it) },
+                onStatus = { pairingStatus = it }
+            ).also {
+                trustedDevices.addAll(it.trustedDevices())
+                it.start()
+            }
+            discovery = BridgeDiscovery(this, { peer ->
+                if (peer.deviceId != deviceId && discoveredPeers.none { it.deviceId == peer.deviceId }) {
+                    discoveredPeers.add(peer)
+                }
+            }, { message -> pairingStatus = message }).also {
+                it.start(deviceId, android.os.Build.MODEL ?: "Bridge Android", fingerprint)
+            }
+            pairingStatus = "Identity protected by Android Keystore · Noise XX ready."
         } catch (error: Exception) {
-            pairingMessage = "Secure device identity unavailable: ${error.message}"
+            pairingStatus = "Secure pairing unavailable: ${error.message}"
         }
-        discovery = BridgeDiscovery(this) { name, host, port ->
-            pairingMessage = "Found $name at $host:$port — discovery is unverified; secure pairing is not enabled."
-        }.also { it.start() }
         setContent {
-            BridgeApp(onScanQr = {
-                pairingMessage = "QR pairing is temporarily disabled until authenticated Noise verification is connected."
-            })
+            BridgeApp(
+                discoveredPeers = discoveredPeers,
+                pendingPairings = pendingPairings,
+                trustedDevices = trustedDevices,
+                pairingStatus = pairingStatus,
+                onPair = { peer -> pairingController?.pair(peer) },
+                onApprove = { pending, code ->
+                    if (pairingController?.approve(pending, code) == true) {
+                        pendingPairings.remove(pending)
+                        trustedDevices.clear()
+                        trustedDevices.addAll(pairingController?.trustedDevices().orEmpty())
+                    }
+                },
+                onReject = { pending ->
+                    pairingController?.reject(pending)
+                    pendingPairings.remove(pending)
+                },
+                onRevoke = { deviceId ->
+                    pairingController?.revoke(deviceId)
+                    trustedDevices.clear()
+                    trustedDevices.addAll(pairingController?.trustedDevices().orEmpty())
+                }
+            )
         }
     }
 
     override fun onDestroy() {
+        pairingController?.stop()
         discovery?.stop()
         discovery = null
         super.onDestroy()
     }
 }
 
-private var pairingMessage by mutableStateOf("Scan the QR code displayed by Bridge on your PC.")
 private const val BRIDGE_PORT = 45821
 
 
@@ -144,17 +189,22 @@ private fun testBridgeConnection(host: String, onStatus: (String) -> Unit) {
 }
 
 @Composable
-private fun BridgeApp(onScanQr: () -> Unit) {
+private fun BridgeApp(
+    discoveredPeers: List<BridgePeer>,
+    pendingPairings: List<BridgePendingPairing>,
+    trustedDevices: List<BridgeTrustedDevice>,
+    pairingStatus: String,
+    onPair: (BridgePeer) -> Unit,
+    onApprove: (BridgePendingPairing, String) -> Unit,
+    onReject: (BridgePendingPairing) -> Unit,
+    onRevoke: (String) -> Unit
+) {
     var selected by remember { mutableStateOf(BridgeTab.Home) }
     var showPairDialog by remember { mutableStateOf(false) }
     var clipboardSync by remember { mutableStateOf(true) }
     var notifications by remember { mutableStateOf(true) }
     var autoAccept by remember { mutableStateOf(false) }
-    var networkHost by remember { mutableStateOf("") }
-    var networkStatus by remember { mutableStateOf("Starting local network listener…") }
-    val currentPairingMessage = pairingMessage
-
-    LaunchedEffect(Unit) { startBridgeListener { networkStatus = it } }
+    var networkStatus by remember { mutableStateOf("Secure local pairing is ready.") }
 
     MaterialTheme(colorScheme = darkColorScheme(
         primary = Accent,
@@ -173,11 +223,14 @@ private fun BridgeApp(onScanQr: () -> Unit) {
                             onNavigate = { selected = it }
                         )
                         BridgeTab.Devices -> DevicesScreen(
-                            onPair = onScanQr,
-                            networkHost = networkHost,
-                            onNetworkHostChange = { networkHost = it },
-                            networkStatus = networkStatus,
-                            onTestConnection = { host -> testBridgeConnection(host) { networkStatus = it } }
+                            peers = discoveredPeers,
+                            pending = pendingPairings,
+                            trusted = trustedDevices,
+                            pairingStatus = pairingStatus,
+                            onPair = onPair,
+                            onApprove = onApprove,
+                            onReject = onReject,
+                            onRevoke = onRevoke
                         )
                         BridgeTab.Transfers -> TransfersScreen(onPair = { showPairDialog = true })
                         BridgeTab.Clipboard -> ClipboardScreen(
@@ -207,15 +260,15 @@ private fun BridgeApp(onScanQr: () -> Unit) {
             title = { Text("Pair a device", fontWeight = FontWeight.Bold) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text("Secure pairing is not available yet. Bridge will only trust a device after an authenticated Noise handshake, matching verification codes, and explicit approval.", color = Color.White, fontSize = 13.sp, lineHeight = 19.sp)
+                    Text("Select a discovered device from the Devices tab. Bridge authenticates it with Noise XX, then asks you to compare the six-digit code on both screens before trusting it.", color = Color.White, fontSize = 13.sp, lineHeight = 19.sp)
                     Surface(color = Panel, shape = RoundedCornerShape(14.dp), modifier = Modifier.fillMaxWidth()) {
                         Column(modifier = Modifier.padding(18.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                             Text("▦", color = Accent, fontSize = 34.sp)
                             Text("Authenticated pairing", color = Color.White, fontWeight = FontWeight.SemiBold)
-                            Text(currentPairingMessage, color = Amber, fontSize = 11.sp)
+                            Text(pairingStatus, color = Amber, fontSize = 11.sp)
                         }
                     }
-                    PrimaryAction("Why is pairing disabled?", onScanQr, Modifier.fillMaxWidth())
+                    PrimaryAction("Open Devices", { showPairDialog = false; selected = BridgeTab.Devices }, Modifier.fillMaxWidth())
                 }
             },
             confirmButton = {
@@ -398,45 +451,90 @@ private fun MiniMetric(value: String, label: String, modifier: Modifier = Modifi
 
 @Composable
 private fun DevicesScreen(
-    onPair: () -> Unit,
-    networkHost: String,
-    onNetworkHostChange: (String) -> Unit,
-    networkStatus: String,
-    onTestConnection: (String) -> Unit
+    peers: List<BridgePeer>,
+    pending: List<BridgePendingPairing>,
+    trusted: List<BridgeTrustedDevice>,
+    pairingStatus: String,
+    onPair: (BridgePeer) -> Unit,
+    onApprove: (BridgePendingPairing, String) -> Unit,
+    onReject: (BridgePendingPairing) -> Unit,
+    onRevoke: (String) -> Unit
 ) {
     ScreenContent {
         ScreenHeading("YOUR ECOSYSTEM", "Devices", "Find and manage the devices you choose to trust.")
         Panel {
             Eyebrow("DEVICE DISCOVERY")
-            Text("Bring your devices together.", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-            Text("Local discovery is being integrated with authenticated pairing. Unverified discovery results will never be treated as trusted devices.", color = Muted, fontSize = 12.sp, lineHeight = 18.sp)
-            PrimaryAction("▦   Secure pairing unavailable", onPair, Modifier.fillMaxWidth())
+            Text("Nearby Bridge devices", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+            Text("Discovery metadata is unverified. A device becomes trusted only after Noise XX authentication, matching codes, and explicit approval.", color = Muted, fontSize = 12.sp, lineHeight = 18.sp)
+            if (peers.isEmpty()) {
+                Text("Searching for Bridge devices on this network…", color = Muted, fontSize = 11.sp)
+            } else {
+                peers.forEach { peer ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                            Text(peer.name, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                            Text("${peer.host}:${peer.port} · ${peer.platform}", color = Muted, fontSize = 10.sp)
+                            Text("UNVERIFIED · ${peer.fingerprint.take(16)}", color = Amber, fontSize = 9.sp)
+                        }
+                        PrimaryAction("Pair", { onPair(peer) })
+                    }
+                }
+            }
         }
-        Panel {
-            Box(modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp), contentAlignment = Alignment.Center) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("⌁", color = Accent, fontSize = 42.sp)
-                    Text("No devices paired", color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.Bold)
-                    Text("Your trusted devices will appear here.", color = Muted, fontSize = 11.sp)
+        if (pending.isNotEmpty()) {
+            pending.forEach { request ->
+                var remoteCode by remember(request.handle) { mutableStateOf("") }
+                Panel {
+                    Eyebrow("VERIFY IDENTITY · NOISE XX")
+                    Text(request.name, color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                    Text("${request.platform} · fingerprint ${request.fingerprint.take(24)}", color = Muted, fontSize = 10.sp)
+                    Text(request.sas, color = Accent, fontSize = 34.sp, fontWeight = FontWeight.Black, letterSpacing = 4.sp)
+                    Text("Compare this code with the other device. Enter the code shown there; do not approve if the codes differ.", color = Muted, fontSize = 11.sp, lineHeight = 16.sp)
+                    androidx.compose.material3.OutlinedTextField(
+                        value = remoteCode,
+                        onValueChange = { if (it.length <= 6 && it.all(Char::isDigit)) remoteCode = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        label = { Text("Code on the other device") },
+                        placeholder = { Text("000000") }
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        PrimaryAction("Confirm and trust", { onApprove(request, remoteCode) }, Modifier.weight(1f))
+                        Button(onClick = { onReject(request) }, colors = ButtonDefaults.buttonColors(containerColor = PanelAlt, contentColor = Amber)) {
+                            Text("Reject")
+                        }
+                    }
                 }
             }
         }
         Panel {
-            Eyebrow("NETWORK TEST · TCP")
-            Text("Test a direct local connection", color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.Bold)
-            Text("Both devices must be on the same Wi-Fi/LAN with Bridge open.", color = Muted, fontSize = 11.sp, lineHeight = 16.sp)
-            androidx.compose.material3.OutlinedTextField(
-                value = networkHost,
-                onValueChange = onNetworkHostChange,
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-                label = { Text("Other device local IP") },
-                placeholder = { Text("192.168.1.25") }
-            )
-            PrimaryAction("Test connection", { if (networkHost.isNotBlank()) onTestConnection(networkHost.trim()) }, Modifier.fillMaxWidth())
-            Text(networkStatus, color = Amber, fontSize = 11.sp, lineHeight = 16.sp)
-            Text("TCP port 45821 · ping/pong test only; this is not encrypted pairing yet.", color = Muted, fontSize = 9.sp, lineHeight = 14.sp)
+            Eyebrow("TRUSTED DEVICES")
+            if (trusted.isEmpty()) {
+                Text("No trusted devices yet.", color = Muted, fontSize = 12.sp)
+            } else {
+                trusted.forEach { device ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                            Text(device.name, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                            Text("${device.platform} · ${device.fingerprint.take(16)}", color = Muted, fontSize = 10.sp)
+                        }
+                        Button(onClick = { onRevoke(device.deviceId) }, colors = ButtonDefaults.buttonColors(containerColor = PanelAlt, contentColor = Amber)) {
+                            Text("Revoke")
+                        }
+                    }
+                }
+            }
         }
+        Text(pairingStatus, color = Amber, fontSize = 11.sp, lineHeight = 16.sp)
+        Text("Pairing uses the shared Rust Noise XX engine. The local session is encrypted; QR bootstrap is being added separately.", color = Muted, fontSize = 10.sp, lineHeight = 15.sp)
     }
 }
 
