@@ -8,7 +8,7 @@
 
 Bridge is an open-source, local-first device interoperability project for Windows, Android, and iOS. The goal is to make nearby devices work together through one secure, permission-based ecosystem.
 
-> **Status: Milestone 1 foundation implemented; not yet complete.** Native client shells, local-network discovery, authenticated Noise XX pairing, platform-backed device identities, explicit-consent trust, trusted-device persistence/revocation, and secure QR invitation primitives are implemented. The QR invitation APIs are not yet connected to complete native QR display and camera-scanning experiences. Physical-device interoperability testing and final lifecycle/security review remain outstanding.
+> **Status: Milestone 1 foundation implemented; not yet complete.** Native client shells, local-network discovery, authenticated Noise XX pairing, platform-backed device identities, explicit-consent trust, trusted-device persistence/revocation, and secure QR invitation primitives are implemented. Native QR display is now wired into all three clients, with camera scanning on Android and iOS feeding the one-time Rust invitation consumer and pinned Noise XX pairing path. Physical-device interoperability testing, final lifecycle hardening, and independent security review remain outstanding.
 
 ## Platforms
 
