@@ -1,28 +1,26 @@
 # Bridge Security Model
 
-Bridge is local-first and permission-first. Discovery is never proof of identity, and pairing must never silently grant access to every capability.
+Bridge is local-first and permission-first. Discovery is never proof of identity, and pairing never silently grants access to every capability.
 
-## Current implementation
+## Implemented security foundations
 
-- Device descriptors are version-validated.
-- Pairing requests expire after at most two minutes.
-- Pairing requires explicit local approval before a device enters the in-memory trusted registry.
-- The Rust security crate implements a Noise XX handshake using Curve25519, ChaChaPoly, and SHA-256, plus authenticated encrypted transport sessions and tamper-detection tests.
-- The handshake exposes the remote static public key so the pairing layer can compare it with a key or fingerprint the user explicitly approved.
+- Device descriptors are version-validated and exchanged only inside an authenticated encrypted session.
+- The shared Rust network layer uses Noise XX with Curve25519, ChaChaPoly, SHA-256 fingerprints, bounded length-prefixed TCP frames, socket timeouts, and replay-resistant transport counters.
+- Windows, Android, and iOS persist per-installation static identity keys in Windows Credential Manager, Android Keystore-wrapped storage, and iOS Keychain respectively.
+- Windows advertises DNS-SD; Android publishes/browses through NSD; iOS publishes/browses through Bonjour. Discovery metadata remains untrusted.
+- All three native clients can initiate or accept the shared Rust Noise XX handshake, exchange authenticated device descriptors, display a six-digit SAS, and require explicit matching-code approval before trusting a new device.
+- Reconnection to an existing trusted device pins its stored fingerprint. A changed fingerprint is rejected.
+- Trusted-device records and revocation persist on each platform: Windows stores public fingerprints in an app-local trust registry; Android encrypts the registry with an Android Keystore AES-GCM key; iOS stores it in Keychain with device-only accessibility. Revocation closes active sessions.
+- The Rust mobile FFI has loopback integration tests covering pairing, SAS agreement, and encrypted message exchange. CI builds the native Windows app, Android APK, iOS Simulator app, and shared Rust workspace.
 
-The security crate is a cryptographic foundation, not yet a complete production network stack. It does not yet bind the platform identity adapters, socket handshake, fingerprint pinning, and persistent trust registry into one end-to-end pairing flow. Windows Credential Manager, Android Keystore-wrapped storage, and iOS Keychain adapters now persist device identity material, but their presence alone does not establish an authenticated peer session. The current in-memory pairing registry must not mark a peer trusted until the integration performs explicit user approval and remote-key verification.
+## Remaining before Milestone 1 can be called complete
 
-## Required before network pairing ships
+1. A new, secure QR invitation/bootstrap flow. The old QR prototype remains disabled because it used unauthenticated TCP. Direct local-network discovery pairing is active.
+2. Cross-platform end-to-end testing on physical Windows, Android, and iOS devices and different Wi-Fi/router configurations. CI loopback tests and simulator builds do not replace this.
+3. Operational hardening and review on connection limits, lifecycle handling, and platform-specific network permission behavior.
 
-1. Per-installation cryptographic identity stored in Windows DPAPI/Credential Manager, Android Keystore, or Apple Keychain/Secure Enclave where available.
-2. Transcript-bound QR / short-authentication-string verification integrated with the Noise XX handshake. The trust-store confirmation API now requires the handshake-derived SAS as well as both user-visible codes to match.
-3. A network transport with bounded framing, timeouts, replay protection, and connection limits.
-4. Persistent trust storage with user-visible revocation.
-5. Independent capability grants for clipboard, files, notifications, camera, microphone, and input control.
-
-Private keys must never leave their device. Any relay must be opt-in and must not store user content by default.
-
+Private keys must never leave their device. Discovery names, addresses, TXT records, and advertised fingerprints are attacker-controlled until verified by Noise. A matching SAS and explicit user approval are required for first-time trust.
 
 ## Legacy prototype pairing disabled
 
-The former `BRIDGE_PAIR/1` QR exchange only compared a short code over an unauthenticated TCP connection. It did not run Noise, pin a peer identity, or provide cryptographic authentication. It has been disabled in both native clients and must never be used to establish trust. The TCP ping/pong endpoint remains a connectivity diagnostic only and is not an authenticated session.
+The former BRIDGE_PAIR/1 exchange compared a short code over an unauthenticated TCP connection. It did not run Noise or pin a peer identity. It remains disabled. The TCP ping/pong endpoint is a connectivity diagnostic only and is not an authenticated session.

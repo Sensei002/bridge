@@ -1,32 +1,15 @@
 # Secure pairing status
 
-QR pairing is currently disabled in the native clients. The previous QR exchange
-was an unauthenticated prototype: it accepted a short code over a plain TCP
-connection and did not bind the remote device to a cryptographic identity. It
-must not be used to establish trust.
+## Direct local-network pairing
 
-The local-network discovery layer is now active:
-- Windows advertises a Bridge DNS-SD service.
-- Android browses with Android NSD.
-- iOS browses with Bonjour.
-- Every discovered result is an unverified candidate only. Names, addresses,
-  TXT records, and advertised fingerprints are attacker-controlled until
-  authenticated by the Noise handshake.
+Direct pairing from the discovered-device list is implemented on Windows, Android, and iOS. It uses the shared Rust Noise XX handshake, authenticated descriptor exchange, six-digit SAS comparison, explicit approval, fingerprint pinning for known devices, and persistent trust/revocation.
 
-The secure pairing flow still required before QR pairing can be re-enabled:
+Discovery is only a bootstrap mechanism. Service names, addresses, TXT records, and advertised fingerprints are untrusted until the handshake authenticates the peer.
 
-1. Exchange a versioned, short-lived QR payload containing only the candidate
-   endpoint and a random pairing nonce. The QR payload is not an authentication
-   credential.
-2. Complete the three-message Noise XX handshake using each device's
-   OS-protected static identity key.
-3. Derive the same six-digit short authentication string from the authenticated
-   Noise static keys and display it on both devices.
-4. Require the user to compare both displays and explicitly approve the exact
-   peer fingerprint. A mismatch or timeout aborts the attempt.
-5. Persist the approved public fingerprint in the local trust store. Future
-   sessions must pin that fingerprint; revocation must persist immediately.
+## QR invitation
 
-Until the native handshake and approval screens are connected end to end, the
-clients must continue to show pairing as unavailable. A successful TCP ping,
-mDNS result, or matching device name is never proof of identity.
+QR pairing remains disabled. The previous BRIDGE_PAIR/1 QR exchange was an unauthenticated prototype and must never be restored.
+
+A replacement QR flow remains a Milestone 1 task. Its payload must be a short-lived connection invitation only—not a trust credential. The scanned endpoint and fingerprint must still be checked by Noise XX, both screens must display the same SAS, and both users must explicitly approve before a trust record is written.
+
+The TCP ping/pong endpoint remains a connectivity diagnostic only; it is not an authenticated session.

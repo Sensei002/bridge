@@ -2,31 +2,29 @@
 
 ## Foundation
 - [x] Rust workspace and shared protocol crate
-- [x] Windows, Android, and iOS application shells
+- [x] Windows, Android, and iOS native application shells
 - [x] CI workflows for platform build validation
-- [x] Device registry
-- [x] Pairing consent and expiry state machine
+- [x] Device registry and pairing consent/expiry state machine
 
 ## Milestone 1: authenticated local connectivity
-- [x] Shared Rust local-network discovery module using mDNS/DNS-SD
-- [x] Versioned discovery records with device IDs, platform, endpoint and public-key fingerprint
-- [x] Bounded length-prefixed TCP framing
-- [x] Noise XX initiator/responder transport primitives
-- [x] SHA-256 public-key fingerprints and symmetric six-digit short authentication strings
-- [x] Expected-fingerprint verification before a session is returned
-- [x] Initial OS-backed identity storage adapters (Windows Credential Manager, Android Keystore-wrapped storage, Apple Keychain)
-- [x] Windows desktop mDNS/DNS-SD service advertisement and unverified candidate reporting
-- [x] Android NSD and iOS Bonjour browsing for Bridge service candidates
-- [x] Durable trust/revocation transaction APIs with rollback on storage failure
-- [x] Replay rejection and pinned-fingerprint negative-path tests
-- [x] Windows UI integration for live mDNS discovery and unverified candidate display
-- [x] Android NSD browsing for Bridge service candidates
-- [x] iOS Bonjour browsing for Bridge service candidates
-- [ ] Windows UI integration for Noise handshake, matching SAS display, and user-confirmed trust
-- [ ] Android NSD candidate selection + Keystore-backed Noise client integration
-- [ ] iOS Bonjour candidate selection + Keychain-backed Noise client integration
-- [ ] Persist trusted peers and revocation on each platform
-- [ ] Cross-platform end-to-end tests on physical devices
+- [x] Shared Rust mDNS/DNS-SD discovery and versioned device metadata
+- [x] Windows DNS-SD advertisement and live unverified candidate UI
+- [x] Android NSD publish/browse and candidate selection
+- [x] iOS Bonjour publish/browse and candidate selection
+- [x] Bounded length-prefixed TCP framing and socket timeouts
+- [x] Noise XX initiator/responder handshake and encrypted transport
+- [x] SHA-256 static-key fingerprints, symmetric six-digit SAS, and pinned-fingerprint checks
+- [x] Authenticated device descriptor exchange inside Noise transport
+- [x] Windows Credential Manager, Android Keystore, and iOS Keychain identity persistence
+- [x] Native Windows, Android, and iOS Noise pairing flows
+- [x] Matching SAS comparison and explicit first-time trust approval on all three clients
+- [x] Persistent trusted-device lists and revocation on all three clients
+- [x] Existing trusted-device fingerprint pinning and changed-identity rejection
+- [x] Replay rejection, wrong-fingerprint tests, and mobile FFI encrypted loopback integration tests
+- [x] CI builds for Windows native app, Android APK, iOS Simulator app, and Rust workspace
+- [ ] Secure QR invitation/bootstrap flow (old unauthenticated prototype remains disabled)
+- [ ] Physical-device end-to-end testing across Windows, Android, and iOS
+- [ ] Network lifecycle/connection-limit hardening and independent security review
 
 ## Device capabilities
 - [ ] Capability permission model

@@ -16,7 +16,18 @@ enum BridgeTrustedDeviceStore {
         ]
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
-        if status == errSecItemNotFound { return [] }
+        if status == errSecItemNotFound {
+            let legacyKey = "bridge.trusted.devices.v1"
+            guard let legacyData = UserDefaults.standard.data(forKey: legacyKey) else { return [] }
+            let legacyValues = try JSONDecoder().decode([StoredDevice].self, from: legacyData)
+            let migrated = legacyValues.map {
+                BridgeTrustedDevice(deviceId: $0.deviceId, name: $0.name, platform: $0.platform,
+                                    fingerprint: $0.fingerprint, pairedAt: $0.pairedAt)
+            }
+            try save(migrated)
+            UserDefaults.standard.removeObject(forKey: legacyKey)
+            return migrated
+        }
         guard status == errSecSuccess, let data = result as? Data else {
             throw NSError(domain: "BridgeTrustStore", code: Int(status),
                           userInfo: [NSLocalizedDescriptionKey: "Could not read trusted devices from Keychain"])

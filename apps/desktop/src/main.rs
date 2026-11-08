@@ -89,6 +89,8 @@ struct BridgeApp {
     active_sessions: Vec<NoiseConnection>,
     #[cfg(windows)]
     trust_store: TrustStore,
+    #[cfg(windows)]
+    trust_store_error: Option<String>,
     network_rx: Receiver<String>,
     #[cfg(windows)]
     network_tx: Sender<String>,
@@ -104,6 +106,17 @@ impl Default for BridgeApp {
         #[cfg(windows)]
         let (pairing_tx, pairing_rx) = mpsc::channel();
         #[cfg(windows)]
+        let (trust_store, trust_store_error) = match TrustStore::load(trust_store_path()) {
+            Ok(store) => (store, None),
+            Err(error) => (TrustStore::new(), Some(error.to_string())),
+        };
+        #[cfg(windows)]
+        let initial_status = trust_store_error.as_ref()
+            .map(|error| format!("Trusted-device registry unavailable: {error}. Pairing approvals are disabled."))
+            .unwrap_or(identity_status);
+        #[cfg(not(windows))]
+        let initial_status = identity_status;
+        #[cfg(windows)]
         {
             start_secure_listener(network_tx.clone(), pairing_tx.clone());
             start_local_discovery(network_tx.clone(), peer_tx);
@@ -117,7 +130,7 @@ impl Default for BridgeApp {
             launch_at_login: false,
             notifications: true,
             auto_accept: false,
-            network_status: identity_status,
+            network_status: initial_status,
             #[cfg(windows)]
             discovered_peers: Vec::new(),
             #[cfg(windows)]
@@ -131,7 +144,9 @@ impl Default for BridgeApp {
             #[cfg(windows)]
             active_sessions: Vec::new(),
             #[cfg(windows)]
-            trust_store: TrustStore::load(trust_store_path()).unwrap_or_default(),
+            trust_store,
+            #[cfg(windows)]
+            trust_store_error,
             network_rx,
             #[cfg(windows)]
             network_tx,
@@ -640,6 +655,10 @@ impl eframe::App for BridgeApp {
                             let mut revoke_device = None;
                             panel(ui, |ui| {
                                 eyebrow(ui, "TRUSTED DEVICES");
+                                if let Some(error) = &self.trust_store_error {
+                                    ui.label(egui::RichText::new(format!("Registry is unreadable; approvals and revocations are disabled: {error}"))
+                                        .size(11.0).color(egui::Color32::from_rgb(239, 68, 68)));
+                                }
                                 let devices = self.trust_store.list();
                                 if devices.is_empty() {
                                     muted(ui, "No trusted devices yet. Pairing requires matching verification codes and approval on both devices.");
@@ -818,6 +837,10 @@ impl eframe::App for BridgeApp {
             }
             if let Some(index) = approve_index {
                 let pending = self.pending_pairings.remove(index);
+                if let Some(error) = &self.trust_store_error {
+                    self.network_status = format!("Pairing approval blocked because the trust registry is unreadable: {error}");
+                    return;
+                }
                 match SasConfirmation::user_confirmed(
                     &pending.connection.sas,
                     &pending.connection.sas,

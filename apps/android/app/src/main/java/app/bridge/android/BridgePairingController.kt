@@ -127,19 +127,34 @@ internal class BridgePairingController(
     }
 
     fun trustedDevices(): List<BridgeTrustedDevice> {
-        val encoded = preferences.getString("devices_encrypted_v1", null) ?: return emptyList()
+        val encoded = preferences.getString("devices_encrypted_v1", null)
+        if (encoded == null) {
+            val legacy = preferences.getString("devices", null) ?: return emptyList()
+            val migrated = parseTrustedDevices(JSONArray(legacy))
+            check(saveTrusted(migrated)) { "Could not migrate trusted devices into Android Keystore-backed storage" }
+            return migrated
+        }
         val plaintext = BridgeIdentityStore.decryptLocalData(
             appContext, TRUST_STORE_PURPOSE, android.util.Base64.decode(encoded, android.util.Base64.NO_WRAP)
         )
-        val array = JSONArray(String(plaintext, Charsets.UTF_8))
-        return (0 until array.length()).mapNotNull { index ->
-            val item = array.optJSONObject(index) ?: return@mapNotNull null
-            BridgeTrustedDevice(
-                item.optString("id"), item.optString("name"), item.optString("platform"),
-                item.optString("fingerprint"), item.optLong("paired_at")
-            )
-        }
+        return parseTrustedDevices(JSONArray(String(plaintext, Charsets.UTF_8)))
     }
+
+    private fun parseTrustedDevices(array: JSONArray): List<BridgeTrustedDevice> =
+        (0 until array.length()).map { index ->
+            val item = requireNotNull(array.optJSONObject(index)) { "Trusted-device record $index is invalid" }
+            val deviceId = item.optString("id")
+            val name = item.optString("name")
+            val platform = item.optString("platform")
+            val fingerprint = item.optString("fingerprint")
+            require(deviceId.isNotBlank() && name.isNotBlank() && platform.isNotBlank()) {
+                "Trusted-device record $index is incomplete"
+            }
+            require(fingerprint.matches(Regex("[0-9a-fA-F]{64}"))) {
+                "Trusted-device record $index has an invalid fingerprint"
+            }
+            BridgeTrustedDevice(deviceId, name, platform, fingerprint, item.optLong("paired_at"))
+        }
 
     fun stop() {
         stopped = true
