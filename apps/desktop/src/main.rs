@@ -942,10 +942,10 @@ impl eframe::App for BridgeApp {
 fn create_local_invitation() -> Result<(String, egui::ColorImage), String> {
     let socket = UdpSocket::bind(("0.0.0.0", 0)).map_err(|error| error.to_string())?;
     socket.connect(("192.0.2.1", 80)).map_err(|error| error.to_string())?;
-    let host = socket.local_addr().map_err(|error| error.to_string())?.ip();
-    if !host.is_ipv4() || !host.is_private() {
-        return Err("No private IPv4 Wi-Fi address was found. Connect to your local network and retry.".into());
-    }
+    let host = match socket.local_addr().map_err(|error| error.to_string())?.ip() {
+        std::net::IpAddr::V4(address) if address.is_private() => address,
+        _ => return Err("No private IPv4 Wi-Fi address was found. Connect to your local network and retry.".into()),
+    };
     let key = identity_store::load_or_create().map_err(|error| error.to_string())?;
     let fingerprint = local_key_fingerprint(&key).map_err(|error| error.to_string())?;
     let device = DeviceDescriptor {
