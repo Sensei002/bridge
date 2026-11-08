@@ -1,6 +1,10 @@
 package app.bridge.android
 
 import android.os.Bundle
+import android.graphics.Bitmap
+import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
+import com.google.zxing.BarcodeFormat
+import com.google.zxing.qrcode.QRCodeWriter
 import android.os.Handler
 import android.os.Looper
 import java.net.ServerSocket
@@ -33,6 +37,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -65,6 +70,7 @@ class MainActivity : ComponentActivity() {
     private val pendingPairings = mutableStateListOf<BridgePendingPairing>()
     private val trustedDevices = mutableStateListOf<BridgeTrustedDevice>()
     private var pairingStatus by mutableStateOf("Preparing secure device identity…")
+    private var invitation by mutableStateOf<String?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -103,6 +109,13 @@ class MainActivity : ComponentActivity() {
                 pendingPairings = pendingPairings,
                 trustedDevices = trustedDevices,
                 pairingStatus = pairingStatus,
+                invitation = invitation,
+                onCreateInvitation = {
+                    try { invitation = pairingController?.createInvitation() }
+                    catch (error: Exception) { pairingStatus = "Could not create QR invitation: ${error.message}" }
+                },
+                onDismissInvitation = { invitation = null },
+                onScanInvitation = { scanInvitation() },
                 onPair = { peer -> pairingController?.pair(peer) },
                 onApprove = { pending, code ->
                     if (pairingController?.approve(pending, code) == true) {
@@ -122,6 +135,17 @@ class MainActivity : ComponentActivity() {
                 }
             )
         }
+    }
+
+    private fun scanInvitation() {
+        GmsBarcodeScanning.getClient(this).startScan()
+            .addOnSuccessListener { barcode ->
+                val value = barcode.rawValue
+                if (value != null) pairingController?.pairFromInvitation(value)
+                else pairingStatus = "No QR content was found."
+            }
+            .addOnCanceledListener { pairingStatus = "QR scanning cancelled." }
+            .addOnFailureListener { error -> pairingStatus = "QR scanner unavailable: ${error.message}" }
     }
 
     override fun onDestroy() {
@@ -194,6 +218,10 @@ private fun BridgeApp(
     pendingPairings: List<BridgePendingPairing>,
     trustedDevices: List<BridgeTrustedDevice>,
     pairingStatus: String,
+    invitation: String?,
+    onCreateInvitation: () -> Unit,
+    onDismissInvitation: () -> Unit,
+    onScanInvitation: () -> Unit,
     onPair: (BridgePeer) -> Unit,
     onApprove: (BridgePendingPairing, String) -> Unit,
     onReject: (BridgePendingPairing) -> Unit,
@@ -227,6 +255,8 @@ private fun BridgeApp(
                             pending = pendingPairings,
                             trusted = trustedDevices,
                             pairingStatus = pairingStatus,
+                            onCreateInvitation = onCreateInvitation,
+                            onScanInvitation = onScanInvitation,
                             onPair = onPair,
                             onApprove = onApprove,
                             onReject = onReject,
@@ -249,6 +279,28 @@ private fun BridgeApp(
                 BottomNavigation(selected = selected, onSelect = { selected = it })
             }
         }
+    }
+
+    if (invitation != null) {
+        AlertDialog(
+            onDismissRequest = onDismissInvitation,
+            containerColor = PanelAlt,
+            title = { Text("Pair with this device", color = Color.White, fontWeight = FontWeight.Bold) },
+            text = {
+                Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    val qrBitmap = remember(invitation) {
+                        val matrix = QRCodeWriter().encode(invitation, BarcodeFormat.QR_CODE, 720, 720)
+                        Bitmap.createBitmap(720, 720, Bitmap.Config.ARGB_8888).also { bitmap ->
+                            for (x in 0 until 720) for (y in 0 until 720) bitmap.setPixel(x, y, if (matrix[x, y]) android.graphics.Color.BLACK else android.graphics.Color.WHITE)
+                        }
+                    }
+                    Image(bitmap = qrBitmap.asImageBitmap(), contentDescription = "Short-lived Bridge pairing QR code", modifier = Modifier.size(240.dp))
+                    Text("Scan this code on the other device. It expires after two minutes and still requires matching Noise verification codes on both screens.", color = Muted, fontSize = 12.sp)
+                    Text("Do not share this code publicly.", color = Amber, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                }
+            },
+            confirmButton = { Button(onClick = onDismissInvitation) { Text("Close") } }
+        )
     }
 
     if (showPairDialog) {
@@ -455,6 +507,8 @@ private fun DevicesScreen(
     pending: List<BridgePendingPairing>,
     trusted: List<BridgeTrustedDevice>,
     pairingStatus: String,
+    onCreateInvitation: () -> Unit,
+    onScanInvitation: () -> Unit,
     onPair: (BridgePeer) -> Unit,
     onApprove: (BridgePendingPairing, String) -> Unit,
     onReject: (BridgePendingPairing) -> Unit,
@@ -462,6 +516,15 @@ private fun DevicesScreen(
 ) {
     ScreenContent {
         ScreenHeading("YOUR ECOSYSTEM", "Devices", "Find and manage the devices you choose to trust.")
+        Panel {
+            Eyebrow("SECURE QR PAIRING")
+            Text("Connect without browsing the device list", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            Text("Create a short-lived invitation on this device, or scan one from another Bridge device. QR data only bootstraps the connection; Noise XX and matching codes still authenticate both peers.", color = Muted, fontSize = 11.sp, lineHeight = 16.sp)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                PrimaryAction("Show my QR", onCreateInvitation, Modifier.weight(1f))
+                Button(onClick = onScanInvitation, modifier = Modifier.weight(1f).height(46.dp), colors = ButtonDefaults.buttonColors(containerColor = PanelAlt, contentColor = Accent)) { Text("Scan QR", fontWeight = FontWeight.Bold) }
+            }
+        }
         Panel {
             Eyebrow("DEVICE DISCOVERY")
             Text("Nearby Bridge devices", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
@@ -534,7 +597,7 @@ private fun DevicesScreen(
             }
         }
         Text(pairingStatus, color = Amber, fontSize = 11.sp, lineHeight = 16.sp)
-        Text("Pairing uses the shared Rust Noise XX engine. The local session is encrypted; QR bootstrap is being added separately.", color = Muted, fontSize = 10.sp, lineHeight = 15.sp)
+        Text("QR invitations are short-lived endpoint hints. Every scanned invitation is consumed once and its fingerprint is pinned in the shared Rust Noise XX handshake.", color = Muted, fontSize = 10.sp, lineHeight = 15.sp)
     }
 }
 
