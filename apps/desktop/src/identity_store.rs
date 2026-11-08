@@ -5,7 +5,7 @@ use keyring::Entry;
 const SERVICE: &str = "app.bridge.desktop";
 const ACCOUNT: &str = "noise-static-private-key.v1";
 
-pub fn load_or_create() -> Result<(), String> {
+pub fn load_or_create() -> Result<Vec<u8>, String> {
     let entry = Entry::new(SERVICE, ACCOUNT).map_err(|error| error.to_string())?;
     match entry.get_password() {
         Ok(encoded) => {
@@ -13,11 +13,12 @@ pub fn load_or_create() -> Result<(), String> {
             if key.len() != 32 {
                 return Err("stored Noise private key has an invalid length".into());
             }
-            Ok(())
+            Ok(key)
         }
         Err(keyring::Error::NoEntry) => {
             let keypair = generate_static_keypair().map_err(|error| error.to_string())?;
             entry.set_password(&encode_hex(&keypair.private))
+                .map(|()| keypair.private)
                 .map_err(|error| error.to_string())
         }
         Err(error) => Err(error.to_string()),

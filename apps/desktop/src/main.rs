@@ -569,7 +569,7 @@ fn secure_identity_status() -> String {
     #[cfg(windows)]
     {
         return match identity_store::load_or_create() {
-            Ok(()) => "Device identity protected by Windows Credential Manager".into(),
+            Ok(_private_key) => "Device identity protected by Windows Credential Manager".into(),
             Err(error) => format!("Secure device identity unavailable: {error}"),
         };
     }

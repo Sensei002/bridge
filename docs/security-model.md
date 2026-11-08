@@ -10,7 +10,7 @@ Bridge is local-first and permission-first. Discovery is never proof of identity
 - The Rust security crate implements a Noise XX handshake using Curve25519, ChaChaPoly, and SHA-256, plus authenticated encrypted transport sessions and tamper-detection tests.
 - The handshake exposes the remote static public key so the pairing layer can compare it with a key or fingerprint the user explicitly approved.
 
-The security crate is a cryptographic foundation, not yet a complete production network stack. It does not open sockets, persist private keys, bind fingerprints to the existing pairing coordinator, or provide platform secure-storage adapters. The current pairing registry remains in-memory and must not mark a peer trusted until the integration performs explicit user approval and remote-key verification.
+The security crate is a cryptographic foundation, not yet a complete production network stack. It does not yet bind the platform identity adapters, socket handshake, fingerprint pinning, and persistent trust registry into one end-to-end pairing flow. Windows Credential Manager, Android Keystore-wrapped storage, and iOS Keychain adapters now persist device identity material, but their presence alone does not establish an authenticated peer session. The current in-memory pairing registry must not mark a peer trusted until the integration performs explicit user approval and remote-key verification.
 
 ## Required before network pairing ships
 

@@ -14,7 +14,7 @@
 - [x] Noise XX initiator/responder transport primitives
 - [x] SHA-256 public-key fingerprints and symmetric six-digit short authentication strings
 - [x] Expected-fingerprint verification before a session is returned
-- [ ] OS-backed persistent identity adapters (Windows DPAPI/Credential Manager, Android Keystore, Apple Keychain)
+- [x] Initial OS-backed identity storage adapters (Windows Credential Manager, Android Keystore-wrapped storage, Apple Keychain)
 - [ ] Windows UI integration for live discovery and user-confirmed SAS
 - [ ] Android NSD discovery + Keystore-backed Noise client integration
 - [ ] iOS Bonjour discovery + Keychain-backed Noise client integration
