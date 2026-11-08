@@ -42,13 +42,19 @@ pub struct SasConfirmation {
 
 impl SasConfirmation {
     pub fn user_confirmed(
+        handshake_code: &str,
         local_code: &str,
         remote_code: &str,
         remote_fingerprint: &str,
     ) -> Result<Self, TrustStoreError> {
-        if local_code.len() != 6
-            || !local_code.bytes().all(|byte| byte.is_ascii_digit())
-            || local_code != remote_code
+        let valid_code = |code: &str| {
+            code.len() == 6 && code.bytes().all(|byte| byte.is_ascii_digit())
+        };
+        if !valid_code(handshake_code)
+            || !valid_code(local_code)
+            || !valid_code(remote_code)
+            || handshake_code != local_code
+            || handshake_code != remote_code
         {
             return Err(TrustStoreError::AuthenticationCodeMismatch);
         }
@@ -209,16 +215,16 @@ mod tests {
     }
 
     fn confirmation() -> SasConfirmation {
-        SasConfirmation::user_confirmed("042681", "042681", &"ab".repeat(32)).unwrap()
+        SasConfirmation::user_confirmed("042681", "042681", "042681", &"ab".repeat(32)).unwrap()
     }
 
     #[test]
     fn trust_requires_matching_user_confirmed_sas() {
         assert!(matches!(
-            SasConfirmation::user_confirmed("123456", "123457", &"ab".repeat(32)),
+            SasConfirmation::user_confirmed("123456", "123456", "123457", &"ab".repeat(32)),
             Err(TrustStoreError::AuthenticationCodeMismatch)
         ));
-        assert!(SasConfirmation::user_confirmed("123456", "123456", &"ab".repeat(32)).is_ok());
+        assert!(SasConfirmation::user_confirmed("654321", "123456", "123456", &"ab".repeat(32)).is_ok());
     }
 
     #[test]

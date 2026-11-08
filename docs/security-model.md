@@ -15,7 +15,7 @@ The security crate is a cryptographic foundation, not yet a complete production 
 ## Required before network pairing ships
 
 1. Per-installation cryptographic identity stored in Windows DPAPI/Credential Manager, Android Keystore, or Apple Keychain/Secure Enclave where available.
-2. Transcript-bound QR / short-authentication-string verification integrated with the Noise XX handshake.
+2. Transcript-bound QR / short-authentication-string verification integrated with the Noise XX handshake. The trust-store confirmation API now requires the handshake-derived SAS as well as both user-visible codes to match.
 3. A network transport with bounded framing, timeouts, replay protection, and connection limits.
 4. Persistent trust storage with user-visible revocation.
 5. Independent capability grants for clipboard, files, notifications, camera, microphone, and input control.
