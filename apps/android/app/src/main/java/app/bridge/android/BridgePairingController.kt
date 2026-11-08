@@ -223,6 +223,20 @@ internal class BridgePairingController(
         }
         if (trusted != null) {
             if (trusted.fingerprint == remoteFingerprint) {
+                // A trusted responder must acknowledge the initiator. Without this
+                // encrypted decision, a peer that has revoked its local trust waits
+                // forever for approval even though this device auto-accepted it.
+                if (response.optString("role") == "responder") {
+                    val sent = JSONObject(BridgeNative.sessionSend(
+                        handle,
+                        """{"type":"pairing_decision","decision":"accepted"}"""
+                    ))
+                    if (!sent.optBoolean("ok")) {
+                        BridgeNative.sessionClose(handle)
+                        postStatus("Could not confirm the trusted session: ${sent.optString("error")}")
+                        return
+                    }
+                }
                 activeSessions.put(peerId, handle)?.let(BridgeNative::sessionClose)
                 postStatus("Secure session re-established with ${trusted.name}.")
             } else {
