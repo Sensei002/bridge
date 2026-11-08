@@ -137,6 +137,25 @@ impl Default for BridgeApp {
 const NETWORK_PORT: u16 = 45821;
 
 #[cfg(windows)]
+fn local_device_id() -> DeviceId {
+    let path = std::env::var_os("APPDATA").map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("Bridge")
+        .join("device-id");
+    if let Ok(value) = std::fs::read_to_string(&path) {
+        if let Ok(id) = uuid::Uuid::parse_str(value.trim()) {
+            return DeviceId(id);
+        }
+    }
+    let id = DeviceId::new();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, id.0.to_string());
+    id
+}
+
+#[cfg(windows)]
 fn trust_store_path() -> PathBuf {
     std::env::var_os("APPDATA").map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir)
@@ -156,7 +175,7 @@ fn start_secure_listener(status: Sender<String>, pending: Sender<PendingApproval
             Err(error) => { let _ = status.send(format!("Secure listener unavailable: {error}")); return; }
         };
         let local = DeviceDescriptor {
-            id: DeviceId::new(),
+            id: local_device_id(),
             display_name: "Bridge Windows".into(),
             platform: Platform::Windows,
             protocol_version: PROTOCOL_VERSION,
@@ -266,7 +285,7 @@ fn start_local_discovery(status: Sender<String>, peers: Sender<DiscoveredPeer>) 
         };
         let suffix = &fingerprint[..8];
         let record = DiscoveryRecord {
-            device_id: fingerprint.clone(),
+            device_id: local_device_id().0.to_string(),
             display_name: "Bridge Windows".into(),
             platform: Platform::Windows,
             protocol_version: PROTOCOL_VERSION,

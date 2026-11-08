@@ -13,6 +13,7 @@ bridge-security = { path = "../../crates/bridge-security" }
 eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
 egui = "0.31"
 image = { version = "0.25", default-features = false, features = ["png"] }
+uuid.workspace = true
 
 [build-dependencies]
 image = { version = "0.25", default-features = false, features = ["png"] }
