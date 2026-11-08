@@ -906,7 +906,7 @@ impl eframe::App for BridgeApp {
                 self.network_status = "Pairing request rejected.".into();
             }
             if let Some(index) = approve_index {
-                let pending = self.pending_pairings.remove(index);
+                let mut pending = self.pending_pairings.remove(index);
                 if let Some(error) = &self.trust_store_error {
                     self.network_status = format!("Pairing approval blocked because the trust registry is unreadable: {error}");
                     return;
