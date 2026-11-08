@@ -18,7 +18,6 @@ internal data class BridgePeer(
 
 internal data class BridgePendingPairing(
     val handle: Long,
-    val sas: String,
     val fingerprint: String,
     val deviceId: String,
     val name: String,
@@ -240,7 +239,6 @@ internal class BridgePairingController(
         pendingSessions[handle] = true
         val pending = BridgePendingPairing(
             handle = handle,
-            sas = response.optString("sas"),
             fingerprint = remoteFingerprint,
             deviceId = peerId,
             name = remote.getString("display_name"),
