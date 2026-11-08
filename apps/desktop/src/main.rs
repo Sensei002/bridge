@@ -66,6 +66,8 @@ struct PendingApproval {
     connection: NoiseConnection,
     descriptor: DeviceDescriptor,
     already_trusted: bool,
+    /// Incoming sessions need an approval acknowledgement when trust already exists.
+    incoming: bool,
 }
 
 #[cfg(windows)]
@@ -266,7 +268,7 @@ fn start_secure_listener(status: Sender<String>, pending: Sender<PendingApproval
                                 };
                                 let _ = status.send(message);
                                 if pending.send(PendingApproval {
-                                    connection, descriptor, already_trusted
+                                    connection, descriptor, already_trusted, incoming: true
                                 }).is_err() {
                                     let _ = status.send("Pairing window closed; pending session discarded".into());
                                 }
@@ -304,7 +306,7 @@ fn start_pairing(peer: DiscoveredPeer, expected: Option<String>, status: Sender<
                     }
                     true
                 } else { false };
-                Ok(PendingApproval { connection, descriptor, already_trusted })
+                Ok(PendingApproval { connection, descriptor, already_trusted, incoming: false })
             });
         match result {
             Ok(mut approval) => {
@@ -485,8 +487,28 @@ impl eframe::App for BridgeApp {
                     self.discovered_peers.push(peer);
                 }
             }
-            for pairing in self.pairing_rx.try_iter() {
+            for mut pairing in self.pairing_rx.try_iter() {
+                // Pairing workers persist trust independently. Refresh the UI's snapshot
+                // before rendering so a successful connection is reflected immediately.
+                match TrustStore::load(trust_store_path()) {
+                    Ok(store) => {
+                        self.trust_store = store;
+                        self.trust_store_error = None;
+                    }
+                    Err(error) => {
+                        self.trust_store_error = Some(error.to_string());
+                        self.network_status = format!("Could not refresh trusted devices: {error}");
+                    }
+                }
                 if pairing.already_trusted {
+                    // A trusted inbound peer is auto-approved, but the initiator still
+                    // waits for this encrypted acknowledgement before marking the session ready.
+                    if pairing.incoming {
+                        if let Err(error) = send_pairing_decision(&mut pairing.connection, "accepted") {
+                            self.network_status = format!("Could not confirm trusted session: {error}");
+                            continue;
+                        }
+                    }
                     self.network_status = format!("Secure session established with {}.", pairing.descriptor.display_name);
                     self.active_sessions.push(pairing.connection);
                 } else {
