@@ -6,7 +6,9 @@ use bridge_protocol::{DeviceDescriptor, DeviceId};
 use thiserror::Error;
 
 pub mod pairing;
+pub mod trust;
 pub use pairing::{create_pairing_request, PairingCoordinator, PairingError};
+pub use trust::{SasConfirmation, TrustStore, TrustStoreError, TrustedDevice};
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum RegistryError {
