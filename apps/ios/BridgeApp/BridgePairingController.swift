@@ -33,8 +33,10 @@ final class BridgePairingController: ObservableObject {
     private var localDescriptor: [String: Any] = [:]
     private var acceptTask: Task<Void, Never>?
     private var activeSessions: [String: UInt64] = [:]
+    private var stopped = false
 
     func configure(privateKey: Data, deviceId: String, displayName: String) {
+        stopped = false
         privateKeyHex = privateKey.map { String(format: "%02x", $0) }.joined()
         localDescriptor = [
             "id": deviceId,
@@ -197,6 +199,7 @@ final class BridgePairingController: ObservableObject {
     }
 
     func stop() {
+        stopped = true
         acceptTask?.cancel()
         acceptTask = nil
         activeSessions.values.forEach(BridgeNativeClient.sessionClose)
@@ -238,6 +241,10 @@ final class BridgePairingController: ObservableObject {
             return
         }
         let handle = handleNumber.uint64Value
+        if stopped {
+            BridgeNativeClient.sessionClose(handle)
+            return
+        }
         let deviceId = remote["id"] as? String ?? ""
         let name = remote["display_name"] as? String ?? "Bridge device"
         let platform = remote["platform"] as? String ?? "unknown"
