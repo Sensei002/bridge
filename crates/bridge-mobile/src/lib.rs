@@ -37,7 +37,6 @@ struct PairRequest {
 struct PairResult {
     ok: bool,
     handle: Option<u64>,
-    sas: Option<String>,
     remote_fingerprint: Option<String>,
     remote_device: Option<DeviceDescriptor>,
     error: Option<String>,
@@ -46,7 +45,7 @@ struct PairResult {
 
 fn result_error(error: impl ToString) -> PairResult {
     PairResult {
-        ok: false, handle: None, sas: None, remote_fingerprint: None,
+        ok: false, handle: None, remote_fingerprint: None,
         remote_device: None, error: Some(error.to_string()), role: None,
     }
 }
@@ -78,7 +77,6 @@ fn register(
     let result = PairResult {
         ok: true,
         handle: Some(handle),
-        sas: Some(connection.sas.clone()),
         remote_fingerprint: Some(connection.remote_fingerprint.clone()),
         remote_device: Some(remote),
         error: None,
@@ -218,7 +216,7 @@ pub unsafe extern "C" fn bridge_session_send(handle: u64, message: *const c_char
                 .map_err(|e: bridge_network::NetworkError| e.to_string())
         });
     let response = result.map(|()| PairResult {
-        ok: true, handle: Some(handle), sas: None, remote_fingerprint: None,
+        ok: true, handle: Some(handle), remote_fingerprint: None,
         remote_device: None, error: None, role: None,
     });
     to_json(response).into_raw()
@@ -392,7 +390,6 @@ mod tests {
 
         assert_eq!(initiator["ok"], true);
         assert_eq!(responder["ok"], true);
-        assert_eq!(initiator["sas"], responder["sas"]);
         assert_eq!(initiator["remote_device"]["platform"], "android");
         assert_eq!(responder["remote_device"]["platform"], "ios");
 
