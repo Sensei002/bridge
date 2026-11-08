@@ -235,7 +235,7 @@ pub fn accept_noise_xx(
     mut stream: TcpStream,
     private_key: &[u8],
     expected_remote_fingerprint: Option<&str>,
-) -> Result<(TcpStream, TransportState, String), NetworkError> {
+) -> Result<NoiseConnection, NetworkError> {
     configure_stream(&stream)?;
     let mut state = responder_handshake(private_key)?;
     let first = read_frame(&mut stream)?;
@@ -258,7 +258,7 @@ fn finish_handshake(
     state: HandshakeState,
     private_key: &[u8],
     expected_remote_fingerprint: Option<&str>,
-) -> Result<(TcpStream, TransportState, String), NetworkError> {
+) -> Result<NoiseConnection, NetworkError> {
     if !state.is_handshake_finished() { return Err(NetworkError::HandshakeIncomplete); }
     let remote = state.get_remote_static().ok_or(NetworkError::HandshakeIncomplete)?;
     let actual = fingerprint(remote);
