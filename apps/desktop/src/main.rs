@@ -120,7 +120,7 @@ fn handle_network_client(mut stream: TcpStream, status: Sender<String>) {
             let _ = status.send(format!("Bridge network test succeeded with {peer}"));
         }
         Ok(_) if line.trim().starts_with("BRIDGE_PAIR/1|") => {
-            let _ = stream.write_all(b"BRIDGE_PAIRING_DISABLED/1\\n");
+            let _ = stream.write_all(b"BRIDGE_PAIRING_DISABLED/1\n");
             let _ = status.send(format!("Rejected legacy unauthenticated pairing attempt from {peer}"));
         }
         Ok(_) => { let _ = status.send(format!("Received an unknown test message from {peer}")); }
