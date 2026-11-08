@@ -420,6 +420,7 @@ mod tests {
         port: u16,
         private_key: &[u8],
         device: DeviceDescriptor,
+        expected_device_id: Option<DeviceId>,
     ) -> String {
         let value = serde_json::json!({
             "host": host,
@@ -429,7 +430,7 @@ mod tests {
             "private_key_hex": private_key.iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
             "local_device": device,
             "expected_fingerprint": null,
-            "expected_device_id": null
+            "expected_device_id": expected_device_id
         });
         value.to_string()
     }
@@ -453,14 +454,15 @@ mod tests {
             platform: Platform::Android, protocol_version: PROTOCOL_VERSION,
         };
         let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-        let accept_request = request(None, Some("127.0.0.1"), port, &responder_key.private, responder_device);
+        let responder_device_id = responder_device.id;
+        let accept_request = request(None, Some("127.0.0.1"), port, &responder_key.private, responder_device, None);
         let responder = thread::spawn(move || {
             let input = CString::new(accept_request).unwrap();
             unsafe { take_json(bridge_pair_accept(input.as_ptr())) }
         });
         thread::sleep(Duration::from_millis(150));
 
-        let connect_request = request(Some("127.0.0.1"), None, port, &initiator_key.private, initiator_device);
+        let connect_request = request(Some("127.0.0.1"), None, port, &initiator_key.private, initiator_device, Some(responder_device_id));
         let input = CString::new(connect_request).unwrap();
         let initiator = unsafe { take_json(bridge_pair_connect(input.as_ptr())) };
         let responder = responder.join().unwrap();
@@ -483,4 +485,58 @@ mod tests {
         bridge_session_close(initiator_handle);
         bridge_session_close(responder_handle);
     }
+
+    #[test]
+    fn qr_invitation_ffi_preserves_platform_and_rejects_replay() {
+        let device = DeviceDescriptor {
+            id: DeviceId::new(), display_name: "Bridge Windows".into(),
+            platform: Platform::Windows, protocol_version: PROTOCOL_VERSION,
+        };
+        let request = serde_json::json!({
+            "device": device, "host": "192.168.1.25", "port": 45821,
+            "fingerprint": "ab".repeat(32), "now_ms": 50_000
+        }).to_string();
+        let input = CString::new(request).unwrap();
+        let created = unsafe { take_json(bridge_qr_invitation_create(input.as_ptr())) };
+        assert_eq!(created["ok"], true);
+        let uri = created["uri"].as_str().unwrap();
+        let uri_input = CString::new(uri).unwrap();
+        let consumed = unsafe { take_json(bridge_qr_invitation_consume(uri_input.as_ptr(), 50_001)) };
+        assert_eq!(consumed["ok"], true);
+        assert_eq!(consumed["invitation"]["platform"], "windows");
+        let replayed = unsafe { take_json(bridge_qr_invitation_consume(uri_input.as_ptr(), 50_002)) };
+        assert_eq!(replayed["ok"], false);
+        assert!(replayed["error"].as_str().unwrap().contains("already been consumed"));
+    }
+
+    #[test]
+    fn qr_pairing_rejects_authenticated_device_id_mismatch() {
+        let initiator_key = generate_static_keypair().unwrap();
+        let responder_key = generate_static_keypair().unwrap();
+        let initiator_device = DeviceDescriptor {
+            id: DeviceId::new(), display_name: "Bridge iOS".into(),
+            platform: Platform::Ios, protocol_version: PROTOCOL_VERSION,
+        };
+        let responder_device = DeviceDescriptor {
+            id: DeviceId::new(), display_name: "Bridge Windows".into(),
+            platform: Platform::Windows, protocol_version: PROTOCOL_VERSION,
+        };
+        let wrong_expected_id = DeviceId::new();
+        let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let accept_request = request(None, Some("127.0.0.1"), port, &responder_key.private, responder_device, None);
+        let responder = thread::spawn(move || {
+            let input = CString::new(accept_request).unwrap();
+            unsafe { take_json(bridge_pair_accept(input.as_ptr())) }
+        });
+        thread::sleep(Duration::from_millis(150));
+        let connect_request = request(Some("127.0.0.1"), None, port, &initiator_key.private, initiator_device, Some(wrong_expected_id));
+        let input = CString::new(connect_request).unwrap();
+        let initiator = unsafe { take_json(bridge_pair_connect(input.as_ptr())) };
+        let responder = responder.join().unwrap();
+        assert_eq!(responder["ok"], true);
+        assert_eq!(initiator["ok"], false);
+        assert!(initiator["error"].as_str().unwrap().contains("device ID does not match"));
+        bridge_session_close(responder["handle"].as_u64().unwrap());
+    }
+
 }
