@@ -143,14 +143,20 @@ internal class BridgePairingController(
             postStatus("Verification code mismatch. Device was not trusted.")
             return false
         }
-        val existing = trustedDevices().firstOrNull { it.deviceId == pending.deviceId }
+        val currentTrusted = try { trustedDevices() } catch (error: Exception) {
+            pendingSessions.remove(pending.handle)
+            BridgeNative.sessionClose(pending.handle)
+            postStatus("Could not read trusted-device registry: ${error.message}")
+            return false
+        }
+        val existing = currentTrusted.firstOrNull { it.deviceId == pending.deviceId }
         if (existing != null && existing.fingerprint != pending.fingerprint) {
             pendingSessions.remove(pending.handle)
             BridgeNative.sessionClose(pending.handle)
             postStatus("Identity changed for a previously trusted device. Pairing blocked.")
             return false
         }
-        val all = trustedDevices().filterNot { it.deviceId == pending.deviceId }.toMutableList()
+        val all = currentTrusted.filterNot { it.deviceId == pending.deviceId }.toMutableList()
         all += BridgeTrustedDevice(pending.deviceId, pending.name, pending.platform, pending.fingerprint, System.currentTimeMillis())
         if (!saveTrusted(all)) {
             pendingSessions.remove(pending.handle)
@@ -226,9 +232,17 @@ internal class BridgePairingController(
         }
         val remote = response.getJSONObject("remote_device")
         val handle = response.getLong("handle")
+        if (stopped) {
+            BridgeNative.sessionClose(handle)
+            return
+        }
         val peerId = remote.getString("id")
         val remoteFingerprint = response.getString("remote_fingerprint")
-        val trusted = trustedDevices().firstOrNull { it.deviceId == peerId }
+        val trusted = try { trustedDevices().firstOrNull { it.deviceId == peerId } } catch (error: Exception) {
+            BridgeNative.sessionClose(handle)
+            postStatus("Could not read trusted-device registry: ${error.message}")
+            return
+        }
         if (trusted != null) {
             if (trusted.fingerprint == remoteFingerprint) {
                 activeSessions.put(peerId, handle)?.let(BridgeNative::sessionClose)
