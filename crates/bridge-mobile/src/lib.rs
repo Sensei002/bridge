@@ -5,7 +5,8 @@ use std::{
     net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs},
     os::raw::c_char,
     sync::{Mutex, OnceLock, atomic::{AtomicU64, Ordering}},
-    time::Duration,
+    thread,
+    time::{Duration, Instant},
 };
 
 use bridge_network::{accept_noise_xx, connect_noise_xx, NoiseConnection};
@@ -27,6 +28,7 @@ struct PairRequest {
     private_key_hex: String,
     local_device: DeviceDescriptor,
     expected_fingerprint: Option<String>,
+    timeout_ms: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -90,8 +92,21 @@ fn pair_accept(request: PairRequest) -> Result<PairResult, String> {
     let ip = request.bind_ip.unwrap_or_else(|| "0.0.0.0".into());
     let address: SocketAddr = format!("{ip}:{}", request.port).parse().map_err(|e| e.to_string())?;
     let listener = TcpListener::bind(address).map_err(|e| e.to_string())?;
-    listener.set_nonblocking(false).map_err(|e| e.to_string())?;
-    let (stream, _) = listener.accept().map_err(|e| e.to_string())?;
+    listener.set_nonblocking(true).map_err(|e| e.to_string())?;
+    let timeout = Duration::from_millis(request.timeout_ms.unwrap_or(1_000).clamp(250, 30_000));
+    let started = Instant::now();
+    let stream = loop {
+        match listener.accept() {
+            Ok((stream, _)) => break stream,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock && started.elapsed() < timeout => {
+                thread::sleep(Duration::from_millis(75));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                return Err("pairing listener timed out".into());
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    };
     let connection = accept_noise_xx(stream, &key, request.expected_fingerprint.as_deref())
         .map_err(|e| e.to_string())?;
     register(connection, &request.local_device)

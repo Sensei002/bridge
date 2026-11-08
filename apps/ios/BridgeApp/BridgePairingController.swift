@@ -120,11 +120,14 @@ final class BridgePairingController: ObservableObject {
         acceptTask = nil
         activeSessions.values.forEach(BridgeNativeClient.sessionClose)
         activeSessions.removeAll()
+        pending.forEach { BridgeNativeClient.sessionClose($0.handle) }
+        pending.removeAll()
     }
 
     private func makeRequest(host: String? = nil, bindIp: String? = nil, expectedFingerprint: String? = nil) -> String {
         var request: [String: Any] = [
             "port": 45821,
+            "timeout_ms": 1_000,
             "private_key_hex": privateKeyHex,
             "local_device": localDescriptor,
             "expected_fingerprint": expectedFingerprint as Any? ?? NSNull()
@@ -145,7 +148,8 @@ final class BridgePairingController: ObservableObject {
               let fingerprint = result["remote_fingerprint"] as? String else {
             if let data = json.data(using: .utf8),
                let result = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                status = result["error"] as? String ?? "Secure pairing failed."
+                let error = result["error"] as? String ?? "Secure pairing failed."
+                if error != "pairing listener timed out" { status = error }
             } else {
                 status = "Secure pairing returned an invalid response."
             }

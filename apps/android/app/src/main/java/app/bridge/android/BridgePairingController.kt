@@ -49,7 +49,7 @@ internal class BridgePairingController(
     private val appContext = context.applicationContext
     private val preferences = appContext.getSharedPreferences("bridge_trusted_devices", Context.MODE_PRIVATE)
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val keyHex = privateKey.joinToString("") { "%02x".format(it) }
+    private val keyHex = privateKey.joinToString("") { "%02x".format(it.toInt() and 0xff) }
     private val localDescriptor = JSONObject()
         .put("id", deviceId)
         .put("display_name", android.os.Build.MODEL?.take(64) ?: "Bridge Android")
@@ -65,7 +65,7 @@ internal class BridgePairingController(
                     val response = JSONObject(BridgeNative.pairAccept(request(bindIp = "0.0.0.0")))
                     handleResult(response)
                 } catch (error: Exception) {
-                    if (!stopped) postStatus("Secure pairing listener restarted: ${error.message}")
+                    if (!stopped && error.message != "pairing listener timed out") postStatus("Secure pairing listener restarted: ${error.message}")
                     try { Thread.sleep(900) } catch (_: InterruptedException) { break }
                 }
             }
@@ -178,6 +178,7 @@ internal class BridgePairingController(
     ): String {
         val json = JSONObject()
             .put("port", 45821)
+            .put("timeout_ms", 1_000)
             .put("private_key_hex", keyHex)
             .put("local_device", localDescriptor)
             .put("expected_fingerprint", expectedFingerprint ?: JSONObject.NULL)
