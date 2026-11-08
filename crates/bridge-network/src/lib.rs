@@ -9,7 +9,7 @@ use std::{
     time::Duration,
 };
 
-use bridge_protocol::{Platform, PROTOCOL_VERSION};
+use bridge_protocol::{DeviceDescriptor, Platform, PROTOCOL_VERSION};
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -33,6 +33,10 @@ pub enum NetworkError {
     InvalidFrameLength(usize),
     #[error("Noise error: {0}")]
     Noise(#[from] snow::Error),
+    #[error("device descriptor serialization error: {0}")]
+    DescriptorSerialization(#[from] serde_json::Error),
+    #[error("remote device descriptor is invalid: {0}")]
+    InvalidDescriptor(String),
     #[error("peer identity did not match the approved fingerprint")]
     IdentityMismatch,
     #[error("handshake did not complete")]
@@ -64,6 +68,31 @@ pub struct NoiseConnection {
     pub transport: TransportState,
     pub sas: String,
     pub remote_fingerprint: String,
+}
+
+impl NoiseConnection {
+    /// Exchange device metadata only after the authenticated Noise handshake.
+    /// Both peers send first, then receive, avoiding role-dependent deadlocks.
+    pub fn exchange_descriptors(
+        &mut self,
+        local: &DeviceDescriptor,
+    ) -> Result<DeviceDescriptor, NetworkError> {
+        local.validate().map_err(|error| NetworkError::InvalidDescriptor(error.to_string()))?;
+        let encoded = serde_json::to_vec(local)?;
+        let mut ciphertext = vec![0_u8; MAX_FRAME_BYTES];
+        let length = self.transport.write_message(&encoded, &mut ciphertext)?;
+        write_frame(&mut self.stream, &ciphertext[..length])?;
+
+        let received = read_frame(&mut self.stream)?;
+        let mut plaintext = vec![0_u8; MAX_FRAME_BYTES];
+        let length = self.transport.read_message(&received, &mut plaintext)?;
+        let remote: DeviceDescriptor = serde_json::from_slice(&plaintext[..length])?;
+        remote.validate().map_err(|error| NetworkError::InvalidDescriptor(error.to_string()))?;
+        if remote.id == local.id {
+            return Err(NetworkError::InvalidDescriptor("peer presented this device's own ID".into()));
+        }
+        Ok(remote)
+    }
 }
 
 pub struct LocalDiscovery {
@@ -378,6 +407,38 @@ mod tests {
             Err(NetworkError::IdentityMismatch)
         ));
         let _ = server.join().unwrap();
+    }
+
+    #[test]
+    fn encrypted_descriptor_exchange_authenticates_metadata() {
+        use bridge_protocol::{DeviceId, Platform, PROTOCOL_VERSION};
+        let params = NOISE_PATTERN.parse().unwrap();
+        let a = Builder::new(params).generate_keypair().unwrap();
+        let params = NOISE_PATTERN.parse().unwrap();
+        let b = Builder::new(params).generate_keypair().unwrap();
+        let a_descriptor = DeviceDescriptor {
+            id: DeviceId::new(), display_name: "Windows PC".into(),
+            platform: Platform::Windows, protocol_version: PROTOCOL_VERSION,
+        };
+        let b_descriptor = DeviceDescriptor {
+            id: DeviceId::new(), display_name: "Android phone".into(),
+            platform: Platform::Android, protocol_version: PROTOCOL_VERSION,
+        };
+        let a_for_server = a_descriptor.clone();
+        let b_for_server = b_descriptor.clone();
+        let b_private = b.private.clone();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut session = accept_noise_xx(stream, &b_private, None).unwrap();
+            session.exchange_descriptors(&b_for_server).unwrap()
+        });
+        let stream = TcpStream::connect(address).unwrap();
+        let mut client = connect_noise_xx(stream, &a.private, None).unwrap();
+        let remote = client.exchange_descriptors(&a_for_server).unwrap();
+        assert_eq!(remote, b_descriptor);
+        assert_eq!(server.join().unwrap(), a_descriptor);
     }
 
     #[test]
