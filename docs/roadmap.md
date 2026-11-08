@@ -32,10 +32,10 @@
 - [x] Native QR code rendering and invitation display in Windows egui, Android Compose, and iOS SwiftUI pairing UI
 - [x] Native camera scanning on Android (Google Code Scanner) and iOS (VisionKit), wired to the shared Rust one-time invitation consumer
 - [ ] Complete scanned-invitation pairing path physically verified from UI to Noise XX handshake on every platform
-- [ ] Physical Windows ↔ Android end-to-end pairing and reconnection tests
-- [ ] Physical Windows ↔ iOS end-to-end pairing and reconnection tests
-- [ ] Physical Android ↔ iOS end-to-end pairing and reconnection tests
-- [ ] Validate on different Wi-Fi routers, client isolation settings, IPv4/IPv6 environments, sleep/resume, and network changes
+- [ ] Physical Windows ↔ Android end-to-end pairing and reconnection tests (see docs/network-test.md)
+- [ ] Physical Windows ↔ iOS end-to-end pairing and reconnection tests (see docs/network-test.md)
+- [ ] Physical Android ↔ iOS end-to-end pairing and reconnection tests (see docs/network-test.md)
+- [ ] Validate on different Wi-Fi routers, client isolation settings, IPv4/IPv6 environments, sleep/resume, and network changes (see docs/network-test.md)
 - [ ] Connection lifecycle/resource-limit hardening, graceful shutdown, and platform permission/error handling
 - [ ] Independent security review of discovery, QR bootstrap, Noise identity pinning, trust persistence, and revocation
 
