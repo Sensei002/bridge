@@ -37,6 +37,8 @@ pub enum NetworkError {
     IdentityMismatch,
     #[error("handshake did not complete")]
     HandshakeIncomplete,
+    #[error("Noise static private key must contain exactly 32 bytes")]
+    InvalidPrivateKey,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,14 +96,15 @@ impl LocalDiscovery {
 
     pub fn shutdown(self) -> Result<(), NetworkError> {
         let _ = self.daemon.unregister(&self.instance_fullname);
-        self.daemon.shutdown().map_err(|e| NetworkError::Mdns(e.to_string()))
+        self.daemon.shutdown().map(|_| ()).map_err(|e| NetworkError::Mdns(e.to_string()))
     }
 }
 
 /// Convert a resolved DNS-SD event into an untrusted candidate peer.
 pub fn peer_from_event(event: &ServiceEvent) -> Option<DiscoveredPeer> {
     let ServiceEvent::ServiceResolved(service) = event else { return None };
-    if service.get_type() != SERVICE_TYPE || !service.is_valid() { return None; }
+    // Resolved events are scoped to the service type passed to browse().
+    if !service.get_fullname().ends_with(SERVICE_TYPE) || !service.is_valid() { return None; }
     let property = |key: &str| service.get_properties().get_property_val_str(key).map(str::to_owned);
     let record = DiscoveryRecord {
         device_id: property("id")?,
@@ -254,7 +257,7 @@ fn finish_handshake(
             return Err(NetworkError::IdentityMismatch);
         }
     }
-    let sas = short_authentication_string(private_key, remote);
+    let sas = short_authentication_string(private_key, remote)?;
     Ok((stream, state.into_transport_mode()?, sas))
 }
 
@@ -263,17 +266,22 @@ pub fn fingerprint(public_key: &[u8]) -> String {
 }
 
 /// Six-digit SAS derived symmetrically from both static public keys.
-pub fn short_authentication_string(local_private: &[u8], remote_public: &[u8]) -> String {
-    let params = NOISE_PATTERN.parse().expect("constant Noise pattern is valid");
-    let state = snow::Builder::new(params)
-        .local_private_key(local_private)
-        .build_initiator()
-        .expect("valid persisted Noise private key");
-    let local_public = state.get_local_static().expect("local static key is configured");
-    let (first, second) = if local_public <= remote_public {
-        (local_public, remote_public)
+pub fn short_authentication_string(
+    local_private: &[u8],
+    remote_public: &[u8],
+) -> Result<String, NetworkError> {
+    use x25519_dalek::{PublicKey, StaticSecret};
+
+    let private_bytes: [u8; 32] = local_private
+        .try_into()
+        .map_err(|_| NetworkError::InvalidPrivateKey)?;
+    let local_secret = StaticSecret::from(private_bytes);
+    let local_public = PublicKey::from(&local_secret);
+    let local_public = local_public.as_bytes();
+    let (first, second) = if local_public.as_slice() <= remote_public {
+        (local_public.as_slice(), remote_public)
     } else {
-        (remote_public, local_public)
+        (remote_public, local_public.as_slice())
     };
     let mut hasher = Sha256::new();
     hasher.update(b"Bridge SAS v1");
@@ -281,7 +289,7 @@ pub fn short_authentication_string(local_private: &[u8], remote_public: &[u8]) -
     hasher.update(second);
     let digest = hasher.finalize();
     let value = u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]) % 1_000_000;
-    format!("{value:06}")
+    Ok(format!("{value:06}"))
 }
 
 pub fn connect_to_peer(peer: &DiscoveredPeer) -> Result<TcpStream, NetworkError> {
@@ -322,8 +330,8 @@ mod tests {
         let params = NOISE_PATTERN.parse().unwrap();
         let b = Builder::new(params).generate_keypair().unwrap();
         assert_eq!(
-            short_authentication_string(&a.private, &b.public),
-            short_authentication_string(&b.private, &a.public)
+            short_authentication_string(&a.private, &b.public).unwrap(),
+            short_authentication_string(&b.private, &a.public).unwrap()
         );
     }
 

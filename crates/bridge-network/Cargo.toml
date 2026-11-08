@@ -14,3 +14,4 @@ snow = "0.9.6"
 thiserror.workspace = true
 sha2 = "0.10"
 hex = "0.4"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
