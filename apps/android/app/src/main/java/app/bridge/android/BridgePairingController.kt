@@ -262,7 +262,7 @@ internal class BridgePairingController(
     ): String {
         val json = JSONObject()
             .put("port", port)
-            .put("timeout_ms", 1_000)
+            .put("timeout_ms", 30_000)
             .put("private_key_hex", keyHex)
             .put("local_device", localDescriptor)
             .put("expected_fingerprint", expectedFingerprint ?: JSONObject.NULL)
