@@ -1,9 +1,9 @@
 import Foundation
 import Combine
+import Darwin
 
 struct BridgePendingPairing: Identifiable {
     let handle: UInt64
-    let sas: String
     let fingerprint: String
     let deviceId: String
     let name: String
@@ -32,8 +32,10 @@ final class BridgePairingController: ObservableObject {
     private var localDescriptor: [String: Any] = [:]
     private var acceptTask: Task<Void, Never>?
     private var activeSessions: [String: UInt64] = [:]
+    private var stopped = false
 
     func configure(privateKey: Data, deviceId: String, displayName: String) {
+        stopped = false
         privateKeyHex = privateKey.map { String(format: "%02x", $0) }.joined()
         localDescriptor = [
             "id": deviceId,
@@ -62,7 +64,7 @@ final class BridgePairingController: ObservableObject {
     func pair(_ peer: BridgePeer, expectedFingerprint: String? = nil) {
         let known = trusted.first(where: { $0.deviceId == peer.deviceId })
         let pinnedFingerprint = expectedFingerprint ?? known?.fingerprint
-        let request = makeRequest(host: peer.host, expectedFingerprint: pinnedFingerprint, port: peer.port)
+        let request = makeRequest(host: peer.host, expectedFingerprint: pinnedFingerprint, expectedDeviceId: peer.deviceId, port: peer.port)
         Task {
             let response = await Task.detached(priority: .userInitiated) {
                 BridgeNativeClient.pairConnect(request: request)
@@ -71,56 +73,7 @@ final class BridgePairingController: ObservableObject {
         }
     }
 
-    /// Create a short-lived invitation for a caller-supplied local IPv4 address.
-    func createInvitation(host: String) throws -> String {
-        let request: [String: Any] = [
-            "device": localDescriptor,
-            "host": host,
-            "port": 45821,
-            "fingerprint": try BridgeNativeClient.identityFingerprint(privateKeyHex: privateKeyHex),
-            "now_ms": UInt64(max(0, Date().timeIntervalSince1970 * 1000))
-        ]
-        let data = try JSONSerialization.data(withJSONObject: request)
-        let response = BridgeNativeClient.qrInvitationCreate(request: String(decoding: data, as: UTF8.self))
-        guard let responseData = response.data(using: .utf8),
-              let root = try JSONSerialization.jsonObject(with: responseData) as? [String: Any],
-              root["ok"] as? Bool == true,
-              let uri = root["uri"] as? String else {
-            throw NSError(domain: "BridgePairing", code: 1, userInfo: [NSLocalizedDescriptionKey: "Could not create a valid QR invitation."])
-        }
-        return uri
-    }
-
-    /// Consume a scanned QR nonce before using its endpoint; pin the fingerprint in Noise XX.
-    func pairFromInvitation(_ uri: String) {
-        let response = BridgeNativeClient.qrInvitationConsume(
-            uri: uri, nowMs: UInt64(max(0, Date().timeIntervalSince1970 * 1000))
-        )
-        guard let data = response.data(using: .utf8),
-              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              root["ok"] as? Bool == true,
-              let invite = root["invitation"] as? [String: Any],
-              let host = invite["host"] as? String,
-              let port = invite["port"] as? Int,
-              let deviceId = invite["device_id"] as? String,
-              let name = invite["display_name"] as? String,
-              let fingerprint = invite["fingerprint"] as? String,
-              let platform = invite["platform"] as? String else {
-            status = "QR invitation rejected: invalid, expired, or already used."
-            return
-        }
-        pair(BridgePeer(name: name, host: host, port: port, deviceId: deviceId,
-                        fingerprint: fingerprint, platform: platform),
-             expectedFingerprint: fingerprint)
-    }
-
-    func approve(_ item: BridgePendingPairing, otherScreenCode: String) {
-        guard otherScreenCode.count == 6,
-              otherScreenCode.allSatisfy({ $0.isNumber }),
-              otherScreenCode == item.sas else {
-            status = "Verification code mismatch. Device was not trusted."
-            return
-        }
+    func approve(_ item: BridgePendingPairing) {
         if let old = trusted.first(where: { $0.deviceId == item.deviceId }),
            old.fingerprint != item.fingerprint {
             BridgeNativeClient.sessionClose(item.handle)
@@ -140,16 +93,60 @@ final class BridgePairingController: ObservableObject {
             status = "Could not persist trusted-device approval: \(error.localizedDescription)"
             return
         }
+        let sent = BridgeNativeClient.sessionSend(item.handle, message: #"{ "type":"pairing_decision","decision":"accepted" }"#)
+        guard (try? JSONSerialization.jsonObject(with: Data(sent.utf8)) as? [String: Any])?["ok"] as? Bool == true else {
+            try? BridgeTrustedDeviceStore.save(trusted)
+            BridgeNativeClient.sessionClose(item.handle)
+            pending.removeAll { $0.id == item.id }
+            status = "Could not confirm pairing with the requesting device."
+            return
+        }
         trusted = next
         activeSessions[item.deviceId] = item.handle
         pending.removeAll { $0.id == item.id }
-        status = "\(item.name) is trusted. Encrypted Noise session established."
+        status = "\(item.name) is now connected and trusted."
     }
 
     func reject(_ item: BridgePendingPairing) {
+        _ = BridgeNativeClient.sessionSend(item.handle, message: #"{ "type":"pairing_decision","decision":"rejected" }"#)
         BridgeNativeClient.sessionClose(item.handle)
         pending.removeAll { $0.id == item.id }
-        status = "Pairing rejected. No trust record was created."
+        status = "Pairing request rejected."
+    }
+
+    private func finishInitiatorApproval(handle: UInt64, remote: [String: Any], fingerprint: String, response: String) {
+        guard let data = response.data(using: .utf8),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              root["ok"] as? Bool == true,
+              let message = root["message"] as? String,
+              let decisionData = message.data(using: .utf8),
+              let decision = try? JSONSerialization.jsonObject(with: decisionData) as? [String: Any],
+              decision["type"] as? String == "pairing_decision",
+              decision["decision"] as? String == "accepted" else {
+            BridgeNativeClient.sessionClose(handle)
+            status = "Pairing was not approved by the other device."
+            return
+        }
+        let deviceId = remote["id"] as? String ?? ""
+        let name = remote["display_name"] as? String ?? "Bridge device"
+        let platform = remote["platform"] as? String ?? "unknown"
+        if let old = trusted.first(where: { $0.deviceId == deviceId }), old.fingerprint != fingerprint {
+            BridgeNativeClient.sessionClose(handle)
+            status = "Trusted device identity changed. Connection rejected."
+            return
+        }
+        var next = trusted.filter { $0.deviceId != deviceId }
+        next.append(BridgeTrustedDevice(deviceId: deviceId, name: name, platform: platform,
+                                        fingerprint: fingerprint, pairedAt: Date().timeIntervalSince1970))
+        do {
+            try BridgeTrustedDeviceStore.save(next)
+            trusted = next
+            activeSessions[deviceId] = handle
+            status = "\(name) accepted. Device connected."
+        } catch {
+            BridgeNativeClient.sessionClose(handle)
+            status = "Could not save the trusted device: \(error.localizedDescription)"
+        }
     }
 
     func revoke(_ deviceId: String) {
@@ -168,6 +165,7 @@ final class BridgePairingController: ObservableObject {
     }
 
     func stop() {
+        stopped = true
         acceptTask?.cancel()
         acceptTask = nil
         activeSessions.values.forEach(BridgeNativeClient.sessionClose)
@@ -176,13 +174,14 @@ final class BridgePairingController: ObservableObject {
         pending.removeAll()
     }
 
-    private func makeRequest(host: String? = nil, bindIp: String? = nil, expectedFingerprint: String? = nil, port: Int = 45821) -> String {
+    private func makeRequest(host: String? = nil, bindIp: String? = nil, expectedFingerprint: String? = nil, expectedDeviceId: String? = nil, port: Int = 45821) -> String {
         var request: [String: Any] = [
             "port": port,
             "timeout_ms": 1_000,
             "private_key_hex": privateKeyHex,
             "local_device": localDescriptor,
-            "expected_fingerprint": expectedFingerprint as Any? ?? NSNull()
+            "expected_fingerprint": expectedFingerprint as Any? ?? NSNull(),
+            "expected_device_id": expectedDeviceId as Any? ?? NSNull()
         ]
         if let host { request["host"] = host }
         if let bindIp { request["bind_ip"] = bindIp }
@@ -208,6 +207,10 @@ final class BridgePairingController: ObservableObject {
             return
         }
         let handle = handleNumber.uint64Value
+        if stopped {
+            BridgeNativeClient.sessionClose(handle)
+            return
+        }
         let deviceId = remote["id"] as? String ?? ""
         let name = remote["display_name"] as? String ?? "Bridge device"
         let platform = remote["platform"] as? String ?? "unknown"
@@ -223,16 +226,19 @@ final class BridgePairingController: ObservableObject {
             }
             return
         }
-        guard let sas = result["sas"] as? String else {
-            BridgeNativeClient.sessionClose(handle)
-            status = "Handshake did not return a verification code."
+        if result["role"] as? String == "initiator" {
+            status = "Request sent to \(name). Waiting for approval on that device…"
+            Task.detached(priority: .userInitiated) {
+                let response = BridgeNativeClient.sessionReceive(handle)
+                await self.finishInitiatorApproval(handle: handle, remote: remote, fingerprint: fingerprint, response: response)
+            }
             return
         }
         pending.append(BridgePendingPairing(
-            handle: handle, sas: sas, fingerprint: fingerprint,
+            handle: handle, fingerprint: fingerprint,
             deviceId: deviceId, name: name, platform: platform
         ))
-        status = "Authenticated peer found. Compare the six-digit code on both devices."
+        status = "Pairing request from \(name). Review the request to allow this device."
     }
 
 }

@@ -12,8 +12,6 @@ internal object BridgeNative {
     external fun identityFingerprint(privateKeyHex: String): String
     external fun pairConnect(requestJson: String): String
     external fun pairAccept(requestJson: String): String
-    external fun qrInvitationCreate(requestJson: String): String
-    external fun qrInvitationConsume(uri: String, nowMs: Long): String
     external fun sessionSend(handle: Long, message: String): String
     external fun sessionReceive(handle: Long): String
     external fun sessionClose(handle: Long)

@@ -4,22 +4,20 @@ use std::{
     ffi::{CStr, CString},
     net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs},
     os::raw::c_char,
-    sync::{Mutex, OnceLock, atomic::{AtomicU64, Ordering}},
+    sync::{Arc, Mutex, OnceLock, atomic::{AtomicU64, Ordering}},
     thread,
     time::{Duration, Instant},
 };
 
 use bridge_network::{accept_noise_xx, connect_noise_xx, NoiseConnection};
-use bridge_core::pairing::{QrInvitation, QrInvitationReplayGuard};
-use bridge_protocol::DeviceDescriptor;
+use bridge_protocol::{DeviceDescriptor, DeviceId};
 use serde::{Deserialize, Serialize};
 
 const MAX_ACTIVE_SESSIONS: usize = 32;
 static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
-static SESSIONS: OnceLock<Mutex<HashMap<u64, NoiseConnection>>> = OnceLock::new();
-static QR_REPLAY_GUARD: OnceLock<Mutex<QrInvitationReplayGuard>> = OnceLock::new();
+static SESSIONS: OnceLock<Mutex<HashMap<u64, Arc<Mutex<NoiseConnection>>>>> = OnceLock::new();
 
-fn sessions() -> &'static Mutex<HashMap<u64, NoiseConnection>> {
+fn sessions() -> &'static Mutex<HashMap<u64, Arc<Mutex<NoiseConnection>>>> {
     SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -31,6 +29,7 @@ struct PairRequest {
     private_key_hex: String,
     local_device: DeviceDescriptor,
     expected_fingerprint: Option<String>,
+    expected_device_id: Option<DeviceId>,
     timeout_ms: Option<u64>,
 }
 
@@ -38,16 +37,16 @@ struct PairRequest {
 struct PairResult {
     ok: bool,
     handle: Option<u64>,
-    sas: Option<String>,
     remote_fingerprint: Option<String>,
     remote_device: Option<DeviceDescriptor>,
     error: Option<String>,
+    role: Option<String>,
 }
 
 fn result_error(error: impl ToString) -> PairResult {
     PairResult {
-        ok: false, handle: None, sas: None, remote_fingerprint: None,
-        remote_device: None, error: Some(error.to_string()),
+        ok: false, handle: None, remote_fingerprint: None,
+        remote_device: None, error: Some(error.to_string()), role: None,
     }
 }
 
@@ -60,8 +59,16 @@ fn decode_hex(value: &str) -> Result<Vec<u8>, String> {
         .collect()
 }
 
-fn register(mut connection: NoiseConnection, local: &DeviceDescriptor) -> Result<PairResult, String> {
+fn register(
+    mut connection: NoiseConnection,
+    local: &DeviceDescriptor,
+    expected_device_id: Option<&DeviceId>,
+    role: &'static str,
+) -> Result<PairResult, String> {
     let remote = connection.exchange_descriptors(local).map_err(|e: bridge_network::NetworkError| e.to_string())?;
+    if expected_device_id.is_some_and(|expected| *expected != remote.id) {
+        return Err("authenticated device ID does not match the selected peer".into());
+    }
     let mut registry = sessions().lock().map_err(|_| "session registry poisoned")?;
     if registry.len() >= MAX_ACTIVE_SESSIONS {
         return Err("active session limit reached".into());
@@ -70,12 +77,12 @@ fn register(mut connection: NoiseConnection, local: &DeviceDescriptor) -> Result
     let result = PairResult {
         ok: true,
         handle: Some(handle),
-        sas: Some(connection.sas.clone()),
         remote_fingerprint: Some(connection.remote_fingerprint.clone()),
         remote_device: Some(remote),
         error: None,
+        role: Some(role.into()),
     };
-    registry.insert(handle, connection);
+    registry.insert(handle, Arc::new(Mutex::new(connection)));
     Ok(result)
 }
 
@@ -93,7 +100,7 @@ fn pair_connect(request: PairRequest) -> Result<PairResult, String> {
         Ok(connection) => connection,
         Err(error) => return Err(error.to_string()),
     };
-    register(connection, &request.local_device)
+    register(connection, &request.local_device, request.expected_device_id.as_ref(), "initiator")
 }
 
 fn pair_accept(request: PairRequest) -> Result<PairResult, String> {
@@ -124,7 +131,7 @@ fn pair_accept(request: PairRequest) -> Result<PairResult, String> {
         Ok(connection) => connection,
         Err(error) => return Err(format!("{error}")),
     };
-    register(connection, &request.local_device)
+    register(connection, &request.local_device, None, "responder")
 }
 
 /// Derive the SHA-256 fingerprint for a 32-byte Noise private key encoded as hex.
@@ -187,66 +194,6 @@ pub unsafe extern "C" fn bridge_pair_accept(request_json: *const c_char) -> *mut
 }
 
 
-#[derive(Deserialize)]
-struct QrCreateRequest {
-    device: DeviceDescriptor,
-    host: String,
-    port: u16,
-    fingerprint: String,
-    now_ms: u64,
-}
-
-fn qr_json(value: serde_json::Value) -> *mut c_char {
-    CString::new(value.to_string()).unwrap_or_else(|_| CString::new("{\"ok\":false,\"error\":\"invalid QR response\"}").unwrap()).into_raw()
-}
-
-/// Create a validated, short-lived QR invitation URI from a local device descriptor.
-///
-/// # Safety
-/// `request_json` must be null or point to a valid NUL-terminated UTF-8 JSON C string.
-/// The returned allocation must be released with `bridge_string_free`.
-#[no_mangle]
-pub unsafe extern "C" fn bridge_qr_invitation_create(request_json: *const c_char) -> *mut c_char {
-    if request_json.is_null() { return qr_json(serde_json::json!({"ok":false,"error":"null request"})); }
-    let result = CStr::from_ptr(request_json).to_str()
-        .map_err(|e| e.to_string())
-        .and_then(|raw| serde_json::from_str::<QrCreateRequest>(raw).map_err(|e| e.to_string()))
-        .and_then(|request| {
-            QrInvitation::create(&request.device, &request.host, request.port, &request.fingerprint, request.now_ms)
-                .map_err(|e| e.to_string())
-        });
-    match result {
-        Ok(invitation) => match invitation.encode() {
-            Ok(uri) => qr_json(serde_json::json!({"ok":true,"uri":uri,"expires_at_ms":invitation.expires_at_ms})),
-            Err(error) => qr_json(serde_json::json!({"ok":false,"error":error.to_string()})),
-        },
-        Err(error) => qr_json(serde_json::json!({"ok":false,"error":error})),
-    }
-}
-
-/// Validate and consume a QR invitation nonce once per process before starting Noise XX.
-///
-/// # Safety
-/// `uri` must be null or point to a valid NUL-terminated UTF-8 C string.
-/// The returned allocation must be released with `bridge_string_free`.
-#[no_mangle]
-pub unsafe extern "C" fn bridge_qr_invitation_consume(uri: *const c_char, now_ms: u64) -> *mut c_char {
-    if uri.is_null() { return qr_json(serde_json::json!({"ok":false,"error":"null invitation"})); }
-    let result = CStr::from_ptr(uri).to_str()
-        .map_err(|e| e.to_string())
-        .and_then(|value| QrInvitation::decode(value, now_ms).map_err(|e| e.to_string()))
-        .and_then(|invitation| {
-            let guard = QR_REPLAY_GUARD.get_or_init(|| Mutex::new(QrInvitationReplayGuard::default()));
-            let mut guard = guard.lock().map_err(|_| "QR replay guard poisoned".to_string())?;
-            guard.consume(&invitation, now_ms).map_err(|e| e.to_string())?;
-            Ok(invitation)
-        });
-    match result {
-        Ok(invitation) => qr_json(serde_json::json!({"ok":true,"invitation":invitation})),
-        Err(error) => qr_json(serde_json::json!({"ok":false,"error":error})),
-    }
-}
-
 /// Encrypt and send one UTF-8 application message on an established session.
 ///
 /// # Safety
@@ -259,34 +206,48 @@ pub unsafe extern "C" fn bridge_session_send(handle: u64, message: *const c_char
         Ok(value) => value.as_bytes(),
         Err(error) => return to_json(Err(error.to_string())).into_raw(),
     };
-    let result: Result<(), String> = sessions().lock().map_err(|_| "session registry poisoned".to_string())
-        .and_then(|mut map| {
-            let connection = map.get_mut(&handle).ok_or_else(|| "session not found".to_string())?;
-            let mut encrypted = vec![0_u8; 65_535];
-            let length = connection.transport.write_message(message, &mut encrypted)
-                .map_err(|e: snow::Error| e.to_string())?;
-            bridge_network::write_frame(&mut connection.stream, &encrypted[..length])
-                .map_err(|e: bridge_network::NetworkError| e.to_string())
-        });
+    // Clone the per-session handle while holding the registry lock briefly.
+    // Never hold the global registry while doing socket I/O: a receive waiting
+    // on one peer must not prevent the accept loop from registering another.
+    let session = sessions().lock()
+        .map_err(|_| "session registry poisoned".to_string())
+        .and_then(|map| map.get(&handle).cloned().ok_or_else(|| "session not found".to_string()));
+    let result: Result<(), String> = session.and_then(|session| {
+        let mut connection = session.lock().map_err(|_| "session lock poisoned".to_string())?;
+        let mut encrypted = vec![0_u8; 65_535];
+        let length = connection.transport.write_message(message, &mut encrypted)
+            .map_err(|e: snow::Error| e.to_string())?;
+        bridge_network::write_frame(&mut connection.stream, &encrypted[..length])
+            .map_err(|e: bridge_network::NetworkError| e.to_string())
+    });
     let response = result.map(|()| PairResult {
-        ok: true, handle: Some(handle), sas: None, remote_fingerprint: None,
-        remote_device: None, error: None,
+        ok: true, handle: Some(handle), remote_fingerprint: None,
+        remote_device: None, error: None, role: None,
     });
     to_json(response).into_raw()
 }
 
 #[no_mangle]
 pub extern "C" fn bridge_session_receive(handle: u64) -> *mut c_char {
-    let result: Result<String, String> = sessions().lock().map_err(|_| "session registry poisoned".to_string())
-        .and_then(|mut map| {
-            let connection = map.get_mut(&handle).ok_or_else(|| "session not found".to_string())?;
+    // The registry lock is released before the potentially long blocking read.
+    let session = sessions().lock()
+        .map_err(|_| "session registry poisoned".to_string())
+        .and_then(|map| map.get(&handle).cloned().ok_or_else(|| "session not found".to_string()));
+    let result: Result<String, String> = session.and_then(|session| {
+        let mut connection = session.lock().map_err(|_| "session lock poisoned".to_string())?;
+        connection.stream.set_read_timeout(Some(Duration::from_secs(120)))
+            .map_err(|e| e.to_string())?;
+        let received = (|| {
             let encrypted = bridge_network::read_frame(&mut connection.stream)
                 .map_err(|e: bridge_network::NetworkError| e.to_string())?;
             let mut plaintext = vec![0_u8; 65_535];
             let length = connection.transport.read_message(&encrypted, &mut plaintext)
                 .map_err(|e: snow::Error| e.to_string())?;
             String::from_utf8(plaintext[..length].to_vec()).map_err(|e: std::string::FromUtf8Error| e.to_string())
-        });
+        })();
+        let _ = connection.stream.set_read_timeout(Some(Duration::from_secs(10)));
+        received
+    });
     let json = serde_json::json!({"ok": result.is_ok(), "message": result.as_ref().ok(), "error": result.err()});
     CString::new(json.to_string()).unwrap().into_raw()
 }
@@ -348,30 +309,6 @@ mod android_jni {
 
 
     #[no_mangle]
-    pub extern "system" fn Java_app_bridge_android_BridgeNative_qrInvitationCreate(
-        mut env: JNIEnv, _class: JClass, request: JString
-    ) -> jstring {
-        let text: String = env.get_string(&request).map(|v| v.into()).unwrap_or_default();
-        let input = CString::new(text).unwrap_or_default();
-        let output = unsafe { bridge_qr_invitation_create(input.as_ptr()) };
-        let response = unsafe { CStr::from_ptr(output).to_string_lossy().into_owned() };
-        unsafe { bridge_string_free(output); }
-        env.new_string(response).map(|value| value.into_raw()).unwrap_or(std::ptr::null_mut())
-    }
-
-    #[no_mangle]
-    pub extern "system" fn Java_app_bridge_android_BridgeNative_qrInvitationConsume(
-        mut env: JNIEnv, _class: JClass, uri: JString, now_ms: jni::sys::jlong
-    ) -> jstring {
-        let text: String = env.get_string(&uri).map(|v| v.into()).unwrap_or_default();
-        let input = CString::new(text).unwrap_or_default();
-        let output = unsafe { bridge_qr_invitation_consume(input.as_ptr(), now_ms.max(0) as u64) };
-        let response = unsafe { CStr::from_ptr(output).to_string_lossy().into_owned() };
-        unsafe { bridge_string_free(output); }
-        env.new_string(response).map(|value| value.into_raw()).unwrap_or(std::ptr::null_mut())
-    }
-
-    #[no_mangle]
     pub extern "system" fn Java_app_bridge_android_BridgeNative_sessionSend(
         mut env: JNIEnv, _class: JClass, handle: jni::sys::jlong, message: JString
     ) -> jstring {
@@ -412,6 +349,7 @@ mod tests {
         port: u16,
         private_key: &[u8],
         device: DeviceDescriptor,
+        expected_device_id: Option<DeviceId>,
     ) -> String {
         let value = serde_json::json!({
             "host": host,
@@ -420,7 +358,8 @@ mod tests {
             "timeout_ms": 5000,
             "private_key_hex": private_key.iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
             "local_device": device,
-            "expected_fingerprint": null
+            "expected_fingerprint": null,
+            "expected_device_id": expected_device_id
         });
         value.to_string()
     }
@@ -444,26 +383,43 @@ mod tests {
             platform: Platform::Android, protocol_version: PROTOCOL_VERSION,
         };
         let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-        let accept_request = request(None, Some("127.0.0.1"), port, &responder_key.private, responder_device);
+        let responder_device_id = responder_device.id;
+        let accept_request = request(None, Some("127.0.0.1"), port, &responder_key.private, responder_device, None);
         let responder = thread::spawn(move || {
             let input = CString::new(accept_request).unwrap();
             unsafe { take_json(bridge_pair_accept(input.as_ptr())) }
         });
         thread::sleep(Duration::from_millis(150));
 
-        let connect_request = request(Some("127.0.0.1"), None, port, &initiator_key.private, initiator_device);
+        let connect_request = request(Some("127.0.0.1"), None, port, &initiator_key.private, initiator_device, Some(responder_device_id));
         let input = CString::new(connect_request).unwrap();
         let initiator = unsafe { take_json(bridge_pair_connect(input.as_ptr())) };
         let responder = responder.join().unwrap();
 
         assert_eq!(initiator["ok"], true);
         assert_eq!(responder["ok"], true);
-        assert_eq!(initiator["sas"], responder["sas"]);
+        assert_eq!(initiator["role"], "initiator");
+        assert_eq!(responder["role"], "responder");
         assert_eq!(initiator["remote_device"]["platform"], "android");
         assert_eq!(responder["remote_device"]["platform"], "ios");
 
         let initiator_handle = initiator["handle"].as_u64().unwrap();
         let responder_handle = responder["handle"].as_u64().unwrap();
+        let decision = CString::new(r#"{"type":"pairing_decision","decision":"accepted"}"#).unwrap();
+        // A blocking receive on one session must not hold the global registry
+        // lock and prevent a different session from sending its response.
+        let receiver = thread::spawn(move || unsafe {
+            take_json(bridge_session_receive(initiator_handle))
+        });
+        thread::sleep(Duration::from_millis(50));
+        let sent_decision = unsafe { take_json(bridge_session_send(responder_handle, decision.as_ptr())) };
+        assert_eq!(sent_decision["ok"], true);
+        let received_decision = receiver.join().unwrap();
+        assert_eq!(received_decision["ok"], true);
+        let parsed_decision: serde_json::Value = serde_json::from_str(received_decision["message"].as_str().unwrap()).unwrap();
+        assert_eq!(parsed_decision["type"], "pairing_decision");
+        assert_eq!(parsed_decision["decision"], "accepted");
+
         let message = CString::new("encrypted native bridge payload").unwrap();
         let sent = unsafe { take_json(bridge_session_send(initiator_handle, message.as_ptr())) };
         assert_eq!(sent["ok"], true);
@@ -474,4 +430,6 @@ mod tests {
         bridge_session_close(initiator_handle);
         bridge_session_close(responder_handle);
     }
+
+
 }

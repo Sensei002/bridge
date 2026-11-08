@@ -3,6 +3,7 @@ package app.bridge.android
 import android.content.Context
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Publishes this device and browses for Bridge peers over DNS-SD.
@@ -11,12 +12,14 @@ import android.net.nsd.NsdServiceInfo
 internal class BridgeDiscovery(
     context: Context,
     private val onPeerFound: (BridgePeer) -> Unit,
+    private val onPeerLost: (String) -> Unit,
     private val onStatus: (String) -> Unit
 ) {
     private val manager = context.applicationContext.getSystemService(NsdManager::class.java)
     @Volatile private var stopped = false
     private var registered = false
     private var localDeviceId: String? = null
+    private val resolving = ConcurrentHashMap<String, NsdManager.ResolveListener>()
 
     private val registrationListener = object : NsdManager.RegistrationListener {
         override fun onServiceRegistered(serviceInfo: NsdServiceInfo) {
@@ -32,23 +35,27 @@ internal class BridgeDiscovery(
         }
     }
 
-    private val resolveListener = object : NsdManager.ResolveListener {
-        override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) = Unit
+    private fun resolveListener(serviceName: String): NsdManager.ResolveListener =
+        object : NsdManager.ResolveListener {
+            override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
+                resolving.remove(serviceName, this)
+            }
 
-        override fun onServiceResolved(serviceInfo: NsdServiceInfo) {
-            if (stopped) return
-            val host = serviceInfo.host?.hostAddress ?: return
-            val attributes = serviceInfo.attributes
-            fun attr(key: String) = attributes[key]?.toString(Charsets.UTF_8).orEmpty()
-            val id = attr("id")
-            val fingerprint = attr("fingerprint")
-            val platform = attr("platform")
-            val name = attr("name").ifBlank { serviceInfo.serviceName }
-            if (id.isBlank() || id == localDeviceId || fingerprint.length != 64 ||
-                !fingerprint.all { it.isDigit() || it.lowercaseChar() in 'a'..'f' }) return
-            onPeerFound(BridgePeer(name, host, serviceInfo.port, id, fingerprint, platform))
+            override fun onServiceResolved(serviceInfo: NsdServiceInfo) {
+                resolving.remove(serviceName, this)
+                if (stopped) return
+                val host = serviceInfo.host?.hostAddress ?: return
+                val attributes = serviceInfo.attributes
+                fun attr(key: String) = attributes[key]?.toString(Charsets.UTF_8).orEmpty()
+                val id = attr("id")
+                val fingerprint = attr("fingerprint")
+                val platform = attr("platform")
+                val name = attr("name").ifBlank { serviceInfo.serviceName }
+                if (id.isBlank() || id == localDeviceId || fingerprint.length != 64 ||
+                    !fingerprint.all { it.isDigit() || it.lowercaseChar() in 'a'..'f' }) return
+                onPeerFound(BridgePeer(name, host, serviceInfo.port, id, fingerprint, platform, serviceInfo.serviceName))
+            }
         }
-    }
 
     private val discoveryListener = object : NsdManager.DiscoveryListener {
         override fun onDiscoveryStarted(serviceType: String) = Unit
@@ -63,10 +70,20 @@ internal class BridgeDiscovery(
         }
         override fun onServiceFound(serviceInfo: NsdServiceInfo) {
             if (stopped || serviceInfo.serviceType != SERVICE_TYPE) return
+            val listener = resolveListener(serviceInfo.serviceName)
+            if (resolving.putIfAbsent(serviceInfo.serviceName, listener) != null) return
             @Suppress("DEPRECATION")
-            manager.resolveService(serviceInfo, resolveListener)
+            try {
+                manager.resolveService(serviceInfo, listener)
+            } catch (error: IllegalArgumentException) {
+                resolving.remove(serviceInfo.serviceName, listener)
+                onStatus("Could not resolve nearby Bridge device: ${error.message}")
+            }
         }
-        override fun onServiceLost(serviceInfo: NsdServiceInfo) = Unit
+        override fun onServiceLost(serviceInfo: NsdServiceInfo) {
+            resolving.remove(serviceInfo.serviceName)
+            if (!stopped) onPeerLost(serviceInfo.serviceName)
+        }
     }
 
     fun start(deviceId: String, displayName: String, fingerprint: String) {
@@ -90,6 +107,7 @@ internal class BridgeDiscovery(
     fun stop() {
         if (stopped) return
         stopped = true
+        resolving.clear()
         try { manager.stopServiceDiscovery(discoveryListener) } catch (_: IllegalArgumentException) { }
         if (registered) {
             try { manager.unregisterService(registrationListener) } catch (_: IllegalArgumentException) { }

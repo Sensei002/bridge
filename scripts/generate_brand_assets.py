@@ -26,6 +26,11 @@ def app_icon(size: int) -> Image.Image:
 app_icon(512).save(ROOT / "assets/bridge-app-icon.png", "PNG", optimize=True)
 app_icon(1024).save(ROOT / "apps/ios/BridgeApp/Assets.xcassets/AppIcon.appiconset/AppIcon.png", "PNG", optimize=True)
 
+# Android adaptive-icon foreground and in-app header both reference this drawable.
+android_drawables = ROOT / "apps/android/app/src/main/res/drawable-nodpi"
+android_drawables.mkdir(parents=True, exist_ok=True)
+app_icon(512).save(android_drawables / "bridge_app_icon.png", "PNG", optimize=True)
+
 # Android legacy launcher icon resources (all standard density buckets).
 android_res = ROOT / "apps/android/app/src/main/res"
 for density, size in {"mdpi":48, "hdpi":72, "xhdpi":96, "xxhdpi":144, "xxxhdpi":192}.items():

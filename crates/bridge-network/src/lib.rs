@@ -21,6 +21,8 @@ pub const DEFAULT_PORT: u16 = 45821;
 pub const MAX_FRAME_BYTES: usize = 65_535;
 const NOISE_PATTERN: &str = "Noise_XX_25519_ChaChaPoly_SHA256";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const CONNECT_RETRIES: usize = 8;
+const CONNECT_RETRY_DELAY: Duration = Duration::from_millis(250);
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Error)]
@@ -138,6 +140,38 @@ impl LocalDiscovery {
     }
 }
 
+/// Choose a usable IPv4 endpoint before IPv6. Link-local IPv6 scope IDs
+/// are not represented by a plain SocketAddr, so they are a fallback only.
+fn prefer_ipv4_address(addresses: impl IntoIterator<Item = IpAddr>) -> Option<IpAddr> {
+    let mut ipv6_fallback = None;
+    for address in addresses {
+        match address {
+            IpAddr::V4(_) => return Some(address),
+            IpAddr::V6(_) if ipv6_fallback.is_none() => ipv6_fallback = Some(address),
+            IpAddr::V6(_) => {}
+        }
+    }
+    ipv6_fallback
+}
+
+#[cfg(test)]
+mod address_selection_tests {
+    use super::*;
+
+    #[test]
+    fn prefers_ipv4_even_when_ipv6_is_discovered_first() {
+        let ipv6 = "fe80::54fc:41ff:fe1d:a855".parse().unwrap();
+        let ipv4 = "192.168.1.12".parse().unwrap();
+        assert_eq!(prefer_ipv4_address([ipv6, ipv4]), Some(ipv4));
+    }
+
+    #[test]
+    fn falls_back_to_ipv6_when_no_ipv4_exists() {
+        let ipv6 = "fe80::54fc:41ff:fe1d:a855".parse().unwrap();
+        assert_eq!(prefer_ipv4_address([ipv6]), Some(ipv6));
+    }
+}
+
 /// Convert a resolved DNS-SD event into an untrusted candidate peer.
 pub fn peer_from_event(event: &ServiceEvent) -> Option<DiscoveredPeer> {
     let ServiceEvent::ServiceResolved(service) = event else { return None };
@@ -160,11 +194,14 @@ pub fn peer_from_event(event: &ServiceEvent) -> Option<DiscoveredPeer> {
     {
         return None;
     }
-    let address = service.get_addresses().iter().find_map(|ip| match ip {
+    // Prefer IPv4 when both families are advertised. Link-local IPv6
+    // addresses require an interface scope ID; converting them to a plain
+    // SocketAddr loses that scope and can make Windows connect attempts fail.
+    let address = prefer_ipv4_address(service.get_addresses().iter().filter_map(|ip| match ip {
         mdns_sd::ScopedIp::V4(v4) => Some(IpAddr::V4(*v4.addr())),
         mdns_sd::ScopedIp::V6(v6) => Some(IpAddr::V6(*v6.addr())),
         _ => None,
-    })?;
+    }))?;
     Some(DiscoveredPeer {
         record,
         address: SocketAddr::new(address, service.get_port()),
@@ -345,8 +382,27 @@ pub fn short_authentication_string(
     Ok(format!("{value:06}"))
 }
 
+fn connect_with_retry(address: &SocketAddr) -> Result<TcpStream, NetworkError> {
+    for attempt in 0..CONNECT_RETRIES {
+        match TcpStream::connect_timeout(address, CONNECT_TIMEOUT) {
+            Ok(stream) => return Ok(stream),
+            Err(error)
+                if error.kind() == io::ErrorKind::ConnectionRefused
+                    && attempt + 1 < CONNECT_RETRIES =>
+            {
+                // Android may briefly reopen its one-shot native acceptor after
+                // handling a peer. Retry only an explicit refusal; other errors
+                // should be surfaced immediately instead of hiding real faults.
+                std::thread::sleep(CONNECT_RETRY_DELAY);
+            }
+            Err(error) => return Err(NetworkError::Io(error)),
+        }
+    }
+    unreachable!("the final connection attempt always returns")
+}
+
 pub fn connect_to_peer(peer: &DiscoveredPeer) -> Result<TcpStream, NetworkError> {
-    Ok(TcpStream::connect_timeout(&peer.address, CONNECT_TIMEOUT)?)
+    connect_with_retry(&peer.address)
 }
 
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
@@ -359,6 +415,24 @@ mod tests {
     use super::*;
     use snow::Builder;
     use std::{io::Cursor, net::TcpListener, thread};
+
+    #[test]
+    fn connect_retries_when_android_listener_is_reopening() {
+        let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = reservation.local_addr().unwrap();
+        drop(reservation);
+
+        let server = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(400));
+            let listener = TcpListener::bind(address).unwrap();
+            let (stream, _) = listener.accept().unwrap();
+            drop(stream);
+        });
+
+        let stream = connect_with_retry(&address).unwrap();
+        drop(stream);
+        server.join().unwrap();
+    }
 
     #[test]
     fn frames_round_trip_and_enforce_bounds() {

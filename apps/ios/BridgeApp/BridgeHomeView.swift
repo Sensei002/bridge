@@ -8,7 +8,7 @@ struct BridgeHomeView: View {
     @StateObject private var discovery = BridgeDiscovery()
     @StateObject private var pairing = BridgePairingController()
     @State private var identityStatus = "Preparing secure device identity…"
-    @State private var remoteCodes: [UInt64: String] = [:]
+    @State private var activePairingRequest: BridgePendingPairing?
 
     var body: some View {
         ZStack {
@@ -48,45 +48,12 @@ struct BridgeHomeView: View {
                                             .font(.system(size: 9)).foregroundStyle(.white.opacity(0.55))
                                     }
                                     Spacer()
-                                    Button("Pair") { pairing.pair(peer) }
+                                    Button("Connect") { pairing.pair(peer) }
                                         .font(.system(size: 11, weight: .bold))
                                         .foregroundStyle(bridgeBackground)
                                         .padding(.horizontal, 12).padding(.vertical, 7)
                                         .background(accent, in: RoundedRectangle(cornerRadius: 8))
                                 }
-                            }
-                        }
-
-                        if !pairing.pending.isEmpty {
-                            Text("VERIFY DEVICE").font(.system(size: 9, weight: .bold)).tracking(1.2).foregroundStyle(amber).padding(.top, 12)
-                            ForEach(pairing.pending) { item in
-                                VStack(alignment: .leading, spacing: 8) {
-                                    Text(item.name).font(.system(size: 14, weight: .semibold))
-                                    Text("Fingerprint · \(item.fingerprint.prefix(24))").font(.system(size: 9)).foregroundStyle(.white.opacity(0.55))
-                                    Text(item.sas).font(.system(size: 32, weight: .bold, design: .monospaced)).foregroundStyle(accent)
-                                    Text("Compare this code with the other device. Enter the code shown there. Never approve a mismatch.")
-                                        .font(.system(size: 10)).foregroundStyle(.white.opacity(0.62))
-                                    TextField("Code on the other device", text: Binding(
-                                        get: { remoteCodes[item.id] ?? "" },
-                                        set: { remoteCodes[item.id] = String($0.filter(\.isNumber).prefix(6)) }
-                                    ))
-                                    .keyboardType(.numberPad)
-                                    .textFieldStyle(.roundedBorder)
-                                    HStack {
-                                        Button("Confirm and trust") {
-                                            pairing.approve(item, otherScreenCode: remoteCodes[item.id] ?? "")
-                                            remoteCodes.removeValue(forKey: item.id)
-                                        }
-                                        .font(.system(size: 11, weight: .bold))
-                                        .foregroundStyle(bridgeBackground)
-                                        .padding(.horizontal, 10).padding(.vertical, 8)
-                                        .background(accent, in: RoundedRectangle(cornerRadius: 8))
-                                        Button("Reject") { pairing.reject(item) }
-                                            .font(.system(size: 11, weight: .semibold)).foregroundStyle(amber)
-                                    }
-                                }
-                                .padding(12)
-                                .background(bridgeBackground, in: RoundedRectangle(cornerRadius: 12))
                             }
                         }
 
@@ -141,6 +108,17 @@ struct BridgeHomeView: View {
             discovery.stop()
             pairing.stop()
         }
+        .onReceive(pairing.$pending) { requests in
+            if activePairingRequest == nil { activePairingRequest = requests.first }
+        }
+        .alert(item: $activePairingRequest) { request in
+            Alert(
+                title: Text("Pairing request"),
+                message: Text("\(request.name) (\(request.platform)) wants to connect to this device. Only accept if you recognize it."),
+                primaryButton: .default(Text("Accept")) { pairing.approve(request) },
+                secondaryButton: .destructive(Text("Reject")) { pairing.reject(request) }
+            )
+        }
     }
     private func eyebrow(_ title: String) -> some View {
         Text(title).font(.system(size: 10, weight: .bold)).tracking(1.8).foregroundStyle(accent)
@@ -153,3 +131,4 @@ struct BridgeHomeView: View {
         }.padding(.vertical, 5)
     }
 }
+

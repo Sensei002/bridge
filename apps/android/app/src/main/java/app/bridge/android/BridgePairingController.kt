@@ -5,7 +5,6 @@ import android.os.Handler
 import android.os.Looper
 import org.json.JSONArray
 import org.json.JSONObject
-import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
 internal data class BridgePeer(
@@ -14,12 +13,12 @@ internal data class BridgePeer(
     val port: Int,
     val deviceId: String,
     val fingerprint: String,
-    val platform: String
+    val platform: String,
+    val serviceName: String
 )
 
 internal data class BridgePendingPairing(
     val handle: Long,
-    val sas: String,
     val fingerprint: String,
     val deviceId: String,
     val name: String,
@@ -56,6 +55,7 @@ internal class BridgePairingController(
         .put("platform", "android")
         .put("protocol_version", 1)
     private val activeSessions = ConcurrentHashMap<String, Long>()
+    private val pendingSessions = ConcurrentHashMap<Long, Boolean>()
     @Volatile private var stopped = false
 
     fun start() {
@@ -79,7 +79,7 @@ internal class BridgePairingController(
                 val trusted = trustedDevices().firstOrNull { it.deviceId == peer.deviceId }
                 val expected = expectedFingerprint ?: trusted?.fingerprint
                 val response = JSONObject(
-                    BridgeNative.pairConnect(request(host = peer.host, expectedFingerprint = expected, port = peer.port))
+                    BridgeNative.pairConnect(request(host = peer.host, expectedFingerprint = expected, expectedDeviceId = peer.deviceId, port = peer.port))
                 )
                 handleResult(response)
             } catch (error: Exception) {
@@ -88,67 +88,70 @@ internal class BridgePairingController(
         }, "BridgeNoiseConnect").apply { isDaemon = true; start() }
     }
 
-    /** Build a signed-by-Noise invitation URI for a caller-supplied local IPv4 address. */
-    fun createInvitation(host: String): String {
-        val request = JSONObject()
-            .put("device", localDescriptor)
-            .put("host", host)
-            .put("port", 45821)
-            .put("fingerprint", fingerprint)
-            .put("now_ms", System.currentTimeMillis())
-        val response = JSONObject(BridgeNative.qrInvitationCreate(request.toString()))
-        check(response.optBoolean("ok")) { response.optString("error", "Could not create QR invitation.") }
-        return response.getString("uri")
-    }
-
-    /** Consume a scanned invitation once, then pin its fingerprint in the Noise XX handshake. */
-    fun pairFromInvitation(uri: String) {
-        try {
-            val response = JSONObject(BridgeNative.qrInvitationConsume(uri, System.currentTimeMillis()))
-            check(response.optBoolean("ok")) {
-                response.optString("error", "QR invitation is invalid, expired, or already used.")
-            }
-            val invite = response.getJSONObject("invitation")
-            val peer = BridgePeer(
-                name = invite.getString("display_name"),
-                host = invite.getString("host"),
-                port = invite.getInt("port"),
-                deviceId = invite.getString("device_id"),
-                fingerprint = invite.getString("fingerprint"),
-                platform = invite.getString("platform")
-            )
-            pair(peer, peer.fingerprint)
-        } catch (error: Exception) {
-            postStatus("QR invitation rejected: ${error.message}")
-        }
-    }
-
-    fun approve(pending: BridgePendingPairing, otherScreenCode: String): Boolean {
-        if (otherScreenCode.length != 6 || otherScreenCode.any { !it.isDigit() } || otherScreenCode != pending.sas) {
-            postStatus("Verification code mismatch. Device was not trusted.")
+    fun approve(pending: BridgePendingPairing): Boolean {
+        val currentTrusted = try { trustedDevices() } catch (error: Exception) {
+            pendingSessions.remove(pending.handle)
+            BridgeNative.sessionClose(pending.handle)
+            postStatus("Could not read trusted-device registry: ${error.message}")
             return false
         }
-        val existing = trustedDevices().firstOrNull { it.deviceId == pending.deviceId }
+        val existing = currentTrusted.firstOrNull { it.deviceId == pending.deviceId }
         if (existing != null && existing.fingerprint != pending.fingerprint) {
+            pendingSessions.remove(pending.handle)
             BridgeNative.sessionClose(pending.handle)
             postStatus("Identity changed for a previously trusted device. Pairing blocked.")
             return false
         }
-        val all = trustedDevices().filterNot { it.deviceId == pending.deviceId }.toMutableList()
+        val all = currentTrusted.filterNot { it.deviceId == pending.deviceId }.toMutableList()
         all += BridgeTrustedDevice(pending.deviceId, pending.name, pending.platform, pending.fingerprint, System.currentTimeMillis())
         if (!saveTrusted(all)) {
+            pendingSessions.remove(pending.handle)
             BridgeNative.sessionClose(pending.handle)
             postStatus("Could not persist trusted-device approval.")
             return false
         }
-        activeSessions[pending.deviceId] = pending.handle
-        postStatus("${pending.name} is trusted. Encrypted Noise session established.")
+        val sent = JSONObject(BridgeNative.sessionSend(pending.handle, """{"type":"pairing_decision","decision":"accepted"}"""))
+        if (!sent.optBoolean("ok")) {
+            saveTrusted(currentTrusted)
+            pendingSessions.remove(pending.handle)
+            BridgeNative.sessionClose(pending.handle)
+            postStatus("Could not confirm pairing with the requesting device.")
+            return false
+        }
+        pendingSessions.remove(pending.handle)
+        activeSessions.put(pending.deviceId, pending.handle)?.let(BridgeNative::sessionClose)
+        postStatus("${pending.name} is now connected and trusted.")
         return true
     }
 
     fun reject(pending: BridgePendingPairing) {
+        pendingSessions.remove(pending.handle)
+        BridgeNative.sessionSend(pending.handle, """{"type":"pairing_decision","decision":"rejected"}""")
         BridgeNative.sessionClose(pending.handle)
-        postStatus("Pairing rejected. No trust record was created.")
+        postStatus("Pairing request rejected.")
+    }
+
+    private fun awaitRemoteApproval(handle: Long, remote: JSONObject, fingerprint: String) {
+        try {
+            val response = JSONObject(BridgeNative.sessionReceive(handle))
+            if (!response.optBoolean("ok")) error(response.optString("error", "The other device did not respond."))
+            val message = JSONObject(response.getString("message"))
+            check(message.optString("type") == "pairing_decision" && message.optString("decision") == "accepted") {
+                "The other device rejected the pairing request."
+            }
+            val peerId = remote.getString("id")
+            val current = trustedDevices()
+            val existing = current.firstOrNull { it.deviceId == peerId }
+            check(existing == null || existing.fingerprint == fingerprint) { "Trusted device identity changed." }
+            val all = current.filterNot { it.deviceId == peerId }.toMutableList()
+            all += BridgeTrustedDevice(peerId, remote.getString("display_name"), remote.getString("platform"), fingerprint, System.currentTimeMillis())
+            check(saveTrusted(all)) { "Could not save the trusted device." }
+            activeSessions.put(peerId, handle)?.let(BridgeNative::sessionClose)
+            postStatus("${remote.getString("display_name")} accepted. Device connected.")
+        } catch (error: Exception) {
+            BridgeNative.sessionClose(handle)
+            postStatus("Pairing was not approved: ${error.message}")
+        }
     }
 
     fun revoke(deviceId: String) {
@@ -195,6 +198,8 @@ internal class BridgePairingController(
         stopped = true
         activeSessions.values.forEach(BridgeNative::sessionClose)
         activeSessions.clear()
+        pendingSessions.keys.toList().forEach(BridgeNative::sessionClose)
+        pendingSessions.clear()
     }
 
     private fun handleResult(response: JSONObject) {
@@ -205,11 +210,33 @@ internal class BridgePairingController(
         }
         val remote = response.getJSONObject("remote_device")
         val handle = response.getLong("handle")
+        if (stopped) {
+            BridgeNative.sessionClose(handle)
+            return
+        }
         val peerId = remote.getString("id")
         val remoteFingerprint = response.getString("remote_fingerprint")
-        val trusted = trustedDevices().firstOrNull { it.deviceId == peerId }
+        val trusted = try { trustedDevices().firstOrNull { it.deviceId == peerId } } catch (error: Exception) {
+            BridgeNative.sessionClose(handle)
+            postStatus("Could not read trusted-device registry: ${error.message}")
+            return
+        }
         if (trusted != null) {
             if (trusted.fingerprint == remoteFingerprint) {
+                // A trusted responder must acknowledge the initiator. Without this
+                // encrypted decision, a peer that has revoked its local trust waits
+                // forever for approval even though this device auto-accepted it.
+                if (response.optString("role") == "responder") {
+                    val sent = JSONObject(BridgeNative.sessionSend(
+                        handle,
+                        """{"type":"pairing_decision","decision":"accepted"}"""
+                    ))
+                    if (!sent.optBoolean("ok")) {
+                        BridgeNative.sessionClose(handle)
+                        postStatus("Could not confirm the trusted session: ${sent.optString("error")}")
+                        return
+                    }
+                }
                 activeSessions.put(peerId, handle)?.let(BridgeNative::sessionClose)
                 postStatus("Secure session re-established with ${trusted.name}.")
             } else {
@@ -218,29 +245,42 @@ internal class BridgePairingController(
             }
             return
         }
+        if (response.optString("role") == "initiator") {
+            postStatus("Request sent to ${remote.getString("display_name")}. Waiting for approval on that device…")
+            Thread({ awaitRemoteApproval(handle, remote, remoteFingerprint) }, "BridgePairApproval")
+                .apply { isDaemon = true; start() }
+            return
+        }
+        pendingSessions[handle] = true
         val pending = BridgePendingPairing(
             handle = handle,
-            sas = response.getString("sas"),
             fingerprint = remoteFingerprint,
             deviceId = peerId,
             name = remote.getString("display_name"),
             platform = remote.getString("platform")
         )
-        mainHandler.post { if (!stopped) onPending(pending) else BridgeNative.sessionClose(handle) }
+        mainHandler.post {
+            if (!stopped) onPending(pending) else {
+                pendingSessions.remove(handle)
+                BridgeNative.sessionClose(handle)
+            }
+        }
     }
 
     private fun request(
         host: String? = null,
         bindIp: String? = null,
         expectedFingerprint: String? = null,
+        expectedDeviceId: String? = null,
         port: Int = 45821
     ): String {
         val json = JSONObject()
             .put("port", port)
-            .put("timeout_ms", 1_000)
+            .put("timeout_ms", 30_000)
             .put("private_key_hex", keyHex)
             .put("local_device", localDescriptor)
             .put("expected_fingerprint", expectedFingerprint ?: JSONObject.NULL)
+            .put("expected_device_id", expectedDeviceId ?: JSONObject.NULL)
         if (host != null) json.put("host", host)
         if (bindIp != null) json.put("bind_ip", bindIp)
         return json.toString()

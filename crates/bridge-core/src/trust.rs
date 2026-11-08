@@ -34,7 +34,7 @@ pub enum TrustStoreError {
     IdentityMismatch,
 }
 
-/// Created only after the user confirms that both devices display the same SAS.
+/// Represents an explicit first-use trust decision for an authenticated peer.
 #[derive(Clone, Debug)]
 pub struct SasConfirmation {
     fingerprint: String,
@@ -58,6 +58,14 @@ impl SasConfirmation {
         {
             return Err(TrustStoreError::AuthenticationCodeMismatch);
         }
+        validate_fingerprint(remote_fingerprint)?;
+        Ok(Self { fingerprint: remote_fingerprint.to_ascii_lowercase() })
+    }
+
+    /// Create trust after the receiving device explicitly approves the authenticated
+    /// Noise peer. This is trust-on-first-use: the remote identity is cryptographically
+    /// bound to this session, while the user confirms the device name/platform in UI.
+    pub fn user_approved(remote_fingerprint: &str) -> Result<Self, TrustStoreError> {
         validate_fingerprint(remote_fingerprint)?;
         Ok(Self { fingerprint: remote_fingerprint.to_ascii_lowercase() })
     }

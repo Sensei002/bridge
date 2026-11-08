@@ -8,14 +8,14 @@
 
 Bridge is an open-source, local-first device interoperability project for Windows, Android, and iOS. The goal is to make nearby devices work together through one secure, permission-based ecosystem.
 
-> **Status: Milestone 1 foundation implemented; not yet complete.** Native client shells, local-network discovery, authenticated Noise XX pairing, platform-backed device identities, explicit-consent trust, trusted-device persistence/revocation, and secure QR invitation primitives are implemented. The QR invitation APIs are not yet connected to complete native QR display and camera-scanning experiences. Physical-device interoperability testing and final lifecycle/security review remain outstanding.
+> **Status: Milestone 1 complete for the validated Windows + Android pairing target.** Both platforms have passed real-device discovery, bidirectional pairing, receiver approval, trusted reconnection, app restart/reconnection, and local-network reconnect checks. Windows firewall and Android network permissions have been tested successfully. iOS builds in CI but has not been physically tested; Linux desktop validation is deferred until a Linux test environment is available. See the validation scope and remaining follow-up items below.
 
 ## Platforms
 
 - **Windows:** Native Rust + [egui](https://github.com/emilk/egui) desktop application. No WebView2, Tauri, Electron, Chromium, or embedded browser runtime.
 - **Android:** Kotlin + Jetpack Compose.
 - **iOS:** SwiftUI native app.
-- **Shared engine:** Rust workspace with versioned protocol types, device registry, pairing consent state machine, discovery, QR invitation validation/replay protection, and encrypted-session primitives.
+- **Shared engine:** Rust workspace with versioned protocol types, device registry, pairing consent state machine, local-network discovery, encrypted-session primitives, and trust persistence.
 
 ## Repository layout
 
@@ -41,15 +41,15 @@ Implemented foundations:
 - Bounded length-prefixed TCP framing, socket timeouts, and Noise XX sessions.
 - SHA-256 static-key fingerprints, symmetric six-digit short authentication strings, and pinned-identity checks.
 - Device identity persistence using Windows Credential Manager, Android Keystore-backed storage, and iOS Keychain.
-- Explicit matching-code confirmation before first-time trust; persistent trusted-device records and revocation.
-- Authenticated descriptor exchange, replay-resistant transport counters, QR invitation encoding/validation, one-time nonce consumption, and Rust mobile FFI entry points for invitation creation/consumption.
+- Explicit approval on the receiving device before first-time trust; the initiating device is trusted only after receiving the encrypted acceptance response. Persistent trusted-device records and revocation.
+- Authenticated descriptor exchange, replay-resistant transport counters, encrypted pairing-decision messages, and one-tap approval on the receiving device.
 
-Still required before Milestone 1 is complete:
+Milestone 1 validation outcome:
 
-- Native QR code rendering/display and camera scanning wired into Windows, Android, and iOS pairing screens.
-- End-to-end pairing tests on physical devices for Windows ↔ Android, Windows ↔ iOS, and Android ↔ iOS, including different Wi-Fi/router configurations.
-- Final connection lifecycle, resource-limit, reconnection, and platform network-permission hardening.
-- Independent security review of the complete pairing flow.
+- **Windows ↔ Android:** physical-device pairing and reconnection validated in both directions. App restart/reconnection, Wi-Fi disconnect/reconnect, Windows firewall, and Android network-permission behaviour were tested and reported working.
+- **iOS:** CI Simulator build passes; physical-device interoperability remains unverified because no iPhone or Mac test environment is currently available.
+- **Linux:** deferred until a Linux installation is available for testing.
+- **Follow-up hardening:** broader router/AP-isolation and IPv6-only coverage, resource-limit/lifecycle stress testing, and an independent security review remain recommended before a broad public release.
 
 See [docs/roadmap.md](docs/roadmap.md), [docs/protocol.md](docs/protocol.md), [docs/security-model.md](docs/security-model.md), [CONTRIBUTING.md](CONTRIBUTING.md), and [SECURITY.md](SECURITY.md).
 
@@ -75,14 +75,14 @@ The Windows client is a native Rust desktop application rendered by egui. It doe
 
 - Pairing must require user approval on both devices.
 - Noise XX provides an authenticated key exchange and encrypted transport; the remote static-key fingerprint must be checked before a peer is trusted.
-- QR invitations are short-lived endpoint hints, never authentication credentials. A scanned invitation pins the expected Noise identity but still requires matching SAS verification and explicit approval.
+- Local-network discovery is only a way to find peers, not proof of identity. Noise XX authenticates the encrypted session; first-time pairing uses trust-on-first-use after the receiving device explicitly approves the authenticated peer. Accept only devices you recognize.
 - Device identities must be revocable.
 - Capabilities are independently permissioned.
 - Network messages must be versioned, validated, and size-bounded.
 - No silent cloud upload or background relay.
 - Never commit secrets or signing keys.
 
-The current secure pairing foundation is implemented, but QR UI integration, physical-device validation, and independent review are still release gates. Do not treat a successful CI build or loopback test as proof of real-device interoperability.
+The Windows + Android Milestone 1 target is validated on physical devices. iOS and Linux remain build/platform validation follow-ups, not claims of completed physical-device interoperability. A successful CI build or loopback test alone is not proof of real-device interoperability.
 
 ## License
 

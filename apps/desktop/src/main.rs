@@ -65,8 +65,9 @@ impl Page {
 struct PendingApproval {
     connection: NoiseConnection,
     descriptor: DeviceDescriptor,
-    remote_code: String,
     already_trusted: bool,
+    /// Incoming sessions need an approval acknowledgement when trust already exists.
+    incoming: bool,
 }
 
 #[cfg(windows)]
@@ -263,11 +264,11 @@ fn start_secure_listener(status: Sender<String>, pending: Sender<PendingApproval
                                 let message = if already_trusted {
                                     format!("Secure session re-established with {}", descriptor.display_name)
                                 } else {
-                                    format!("Authenticated handshake from {} · awaiting matching code and approval", descriptor.display_name)
+                                    format!("Pairing request from {} · awaiting approval on this device", descriptor.display_name)
                                 };
                                 let _ = status.send(message);
                                 if pending.send(PendingApproval {
-                                    connection, descriptor, remote_code: String::new(), already_trusted
+                                    connection, descriptor, already_trusted, incoming: true
                                 }).is_err() {
                                     let _ = status.send("Pairing window closed; pending session discarded".into());
                                 }
@@ -305,11 +306,29 @@ fn start_pairing(peer: DiscoveredPeer, expected: Option<String>, status: Sender<
                     }
                     true
                 } else { false };
-                Ok(PendingApproval { connection, descriptor, remote_code: String::new(), already_trusted })
+                Ok(PendingApproval { connection, descriptor, already_trusted, incoming: false })
             });
         match result {
-            Ok(approval) => {
-                let _ = status.send("Noise XX handshake complete. Compare the six-digit code on both devices.".into());
+            Ok(mut approval) => {
+                if !approval.already_trusted {
+                    if let Err(error) = receive_pairing_decision(&mut approval.connection) {
+                        let _ = status.send(format!("Pairing was not approved: {error}"));
+                        return;
+                    }
+                    let confirmation = match SasConfirmation::user_approved(&approval.connection.remote_fingerprint) {
+                        Ok(value) => value,
+                        Err(error) => { let _ = status.send(format!("Could not verify approved device: {error}")); return; }
+                    };
+                    let mut store = match TrustStore::load(trust_store_path()) {
+                        Ok(value) => value,
+                        Err(error) => { let _ = status.send(format!("Trust registry unavailable: {error}")); return; }
+                    };
+                    if let Err(error) = store.trust_and_save(approval.descriptor.clone(), confirmation, now_ms(), trust_store_path()) {
+                        let _ = status.send(format!("Could not save approved device: {error}"));
+                        return;
+                    }
+                    approval.already_trusted = true;
+                }
                 if pending.send(approval).is_err() {
                     let _ = status.send("Pairing window closed; session discarded".into());
                 }
@@ -317,6 +336,37 @@ fn start_pairing(peer: DiscoveredPeer, expected: Option<String>, status: Sender<
             Err(error) => { let _ = status.send(format!("Secure pairing failed: {error}")); }
         }
     });
+}
+
+#[cfg(windows)]
+fn send_pairing_decision(connection: &mut NoiseConnection, decision: &str) -> Result<(), String> {
+    let message = serde_json::json!({"type":"pairing_decision","decision":decision}).to_string();
+    let mut encrypted = vec![0_u8; bridge_network::MAX_FRAME_BYTES];
+    let length = connection.transport.write_message(message.as_bytes(), &mut encrypted)
+        .map_err(|error| error.to_string())?;
+    bridge_network::write_frame(&mut connection.stream, &encrypted[..length])
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(windows)]
+fn receive_pairing_decision(connection: &mut NoiseConnection) -> Result<(), String> {
+    connection.stream.set_read_timeout(Some(Duration::from_secs(120)))
+        .map_err(|error| error.to_string())?;
+    let result = (|| {
+        let encrypted = bridge_network::read_frame(&mut connection.stream).map_err(|error| error.to_string())?;
+        let mut plaintext = vec![0_u8; bridge_network::MAX_FRAME_BYTES];
+        let length = connection.transport.read_message(&encrypted, &mut plaintext)
+            .map_err(|error| error.to_string())?;
+        let message: serde_json::Value = serde_json::from_slice(&plaintext[..length])
+            .map_err(|error| error.to_string())?;
+        if message["type"] == "pairing_decision" && message["decision"] == "accepted" {
+            Ok(())
+        } else {
+            Err("the other device rejected the request".into())
+        }
+    })();
+    let _ = connection.stream.set_read_timeout(Some(Duration::from_secs(10)));
+    result
 }
 
 #[cfg(windows)]
@@ -433,13 +483,50 @@ impl eframe::App for BridgeApp {
         #[cfg(windows)]
         {
             for peer in self.peer_rx.try_iter() {
-                if !self.discovered_peers.iter().any(|known| known.address == peer.address) {
+                // mDNS may resolve one physical device over both IPv4 and IPv6.
+                // Device identity, not socket address, defines one discovered row.
+                if let Some(existing) = self.discovered_peers.iter_mut()
+                    .find(|known| {
+                        known.record.device_id == peer.record.device_id
+                            || known.record.public_key_fingerprint.eq_ignore_ascii_case(
+                                &peer.record.public_key_fingerprint,
+                            )
+                    })
+                {
+                    // A single authenticated device may be resolved through both
+                    // IPv4 and IPv6. Device ID is the primary key; the advertised
+                    // public-key fingerprint is a stable fallback if a client has
+                    // inconsistent discovery IDs. Prefer IPv4 for Windows Connect.
+                    if peer.address.is_ipv4() || !existing.address.is_ipv4() {
+                        *existing = peer;
+                    }
+                } else {
                     self.discovered_peers.push(peer);
                 }
             }
-            for pairing in self.pairing_rx.try_iter() {
+            for mut pairing in self.pairing_rx.try_iter() {
+                // Pairing workers persist trust independently. Refresh the UI's snapshot
+                // before rendering so a successful connection is reflected immediately.
+                match TrustStore::load(trust_store_path()) {
+                    Ok(store) => {
+                        self.trust_store = store;
+                        self.trust_store_error = None;
+                    }
+                    Err(error) => {
+                        self.trust_store_error = Some(error.to_string());
+                        self.network_status = format!("Could not refresh trusted devices: {error}");
+                    }
+                }
                 if pairing.already_trusted {
-                    self.network_status = format!("Secure session re-established with {}.", pairing.descriptor.display_name);
+                    // A trusted inbound peer is auto-approved, but the initiator still
+                    // waits for this encrypted acknowledgement before marking the session ready.
+                    if pairing.incoming {
+                        if let Err(error) = send_pairing_decision(&mut pairing.connection, "accepted") {
+                            self.network_status = format!("Could not confirm trusted session: {error}");
+                            continue;
+                        }
+                    }
+                    self.network_status = format!("Secure session established with {}.", pairing.descriptor.display_name);
                     self.active_sessions.push(pairing.connection);
                 } else {
                     self.pending_pairings.push(pairing);
@@ -553,6 +640,14 @@ impl eframe::App for BridgeApp {
                 page_header(ui, self.selected);
                 match self.selected {
                     Page::Overview => {
+                        #[cfg(windows)]
+                        let trusted_count = self.trust_store.list().len();
+                        #[cfg(not(windows))]
+                        let trusted_count = 0usize;
+                        #[cfg(windows)]
+                        let active_count = self.active_sessions.len();
+                        #[cfg(not(windows))]
+                        let active_count = 0usize;
                         ui.columns(2, |columns| {
                             panel(&mut columns[0], |ui| {
                                 eyebrow(ui, "Your ecosystem");
@@ -569,8 +664,8 @@ impl eframe::App for BridgeApp {
                                 ui.horizontal(|ui| {
                                     ui.label(egui::RichText::new("◎").size(30.0).color(ACCENT));
                                     ui.vertical(|ui| {
-                                        ui.label(egui::RichText::new("Ready when you are").strong().size(16.0));
-                                        muted(ui, "No devices connected yet");
+                                        ui.label(egui::RichText::new(if active_count == 0 { "Ready when you are" } else { "Secure session active" }).strong().size(16.0));
+                                        muted(ui, &format!("{active_count} active secure session(s)"));
                                     });
                                 });
                                 ui.add_space(12.0);
@@ -581,7 +676,7 @@ impl eframe::App for BridgeApp {
                         eyebrow(ui, "At a glance");
                         ui.add_space(10.0);
                         ui.columns(3, |cols| {
-                            metric(&mut cols[0], "0", "Trusted devices", "Nothing paired yet");
+                            metric(&mut cols[0], &trusted_count.to_string(), "Trusted devices", if trusted_count == 1 { "1 device approved" } else { "Approved devices on this PC" });
                             metric(&mut cols[1], "0", "Active transfers", "No files moving");
                             metric(&mut cols[2], "Private", "Network mode", "Local-first by design");
                         });
@@ -644,18 +739,22 @@ impl eframe::App for BridgeApp {
                             panel(ui, |ui| {
                                 eyebrow(ui, "DISCOVERED ON YOUR NETWORK");
                                 ui.add_space(8.0);
-                                if self.discovered_peers.is_empty() {
-                                    muted(ui, "Searching for Bridge devices… Discovery results are unverified until Noise authentication completes.");
+                                let trusted_devices = self.trust_store.list();
+                                let visible_peers = self.discovered_peers.iter().enumerate()
+                                    .filter(|(_, peer)| !trusted_devices.iter().any(|device| device.descriptor.id.0.to_string() == peer.record.device_id))
+                                    .collect::<Vec<_>>();
+                                if visible_peers.is_empty() {
+                                    muted(ui, "No new devices found. Trusted devices are listed below.");
                                 } else {
                                     let mut pair_target = None;
-                                    for (index, peer) in self.discovered_peers.iter().enumerate() {
+                                    for (index, peer) in visible_peers {
                                         ui.horizontal(|ui| {
                                             ui.vertical(|ui| {
                                                 ui.label(egui::RichText::new(&peer.record.display_name).color(TEXT).strong());
                                                 muted(ui, &format!("{} · {}", peer.address, &peer.record.public_key_fingerprint[..8]));
                                             });
                                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                if primary_button(ui, "Pair") { pair_target = Some(index); }
+                                                if primary_button(ui, "Connect") { pair_target = Some(index); }
                                                 muted(ui, "UNVERIFIED");
                                             });
                                         });
@@ -718,7 +817,7 @@ impl eframe::App for BridgeApp {
                         panel(ui, |ui| {
                             eyebrow(ui, "SECURE TRANSPORT");
                             ui.label(egui::RichText::new("Authenticated local sessions").strong().size(17.0));
-                            muted(ui, "Bridge accepts Noise XX sessions on TCP 45821. A connection is retained only after both devices compare the same six-digit code and explicitly approve the peer.");
+                            muted(ui, "New devices must be accepted on the receiving device. Previously trusted devices reconnect automatically.");
                             ui.label(egui::RichText::new(&self.network_status).size(12.0).color(AMBER));
                         });
                     }
@@ -833,7 +932,7 @@ impl eframe::App for BridgeApp {
         if !self.pending_pairings.is_empty() {
             let mut approve_index = None;
             let mut reject_index = None;
-            egui::Window::new("Verify this device")
+            egui::Window::new("Pairing request")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
@@ -841,45 +940,44 @@ impl eframe::App for BridgeApp {
                     ui.set_min_width(380.0);
                     for (index, pending) in self.pending_pairings.iter_mut().enumerate() {
                         eyebrow(ui, "NOISE XX · AUTHENTICATED PEER");
-                        ui.label(egui::RichText::new(&pending.descriptor.display_name).size(19.0).strong());
-                        muted(ui, &format!("{:?} · fingerprint {}", pending.descriptor.platform, &pending.connection.remote_fingerprint[..16]));
-                        ui.add_space(8.0);
-                        ui.label(egui::RichText::new(&pending.connection.sas).size(34.0).strong().color(ACCENT));
-                        muted(ui, "Compare this six-digit code with the other device. Only continue if both screens show exactly the same code.");
-                        ui.label("Enter the code shown on the other device:");
-                        ui.add(egui::TextEdit::singleline(&mut pending.remote_code).desired_width(180.0).hint_text("000000"));
+                        ui.label(egui::RichText::new("Allow this device to connect?").size(18.0).strong());
+                        ui.label(egui::RichText::new(&pending.descriptor.display_name).size(20.0).strong());
+                        muted(ui, &format!("{:?} · authenticated identity · {}", pending.descriptor.platform, &pending.connection.remote_fingerprint[..16]));
+                        muted(ui, "Only accept if you recognize this device. Its connection is encrypted and its identity will be saved on this PC.");
                         ui.horizontal(|ui| {
-                            if primary_button(ui, "Confirm and trust") { approve_index = Some(index); }
+                            if primary_button(ui, "Accept") { approve_index = Some(index); }
                             if ui.button("Reject").clicked() { reject_index = Some(index); }
                         });
                         ui.separator();
                     }
                 });
             if let Some(index) = reject_index {
-                self.pending_pairings.remove(index);
-                self.network_status = "Pairing rejected. No trust record was created.".into();
+                let mut pending = self.pending_pairings.remove(index);
+                let _ = send_pairing_decision(&mut pending.connection, "rejected");
+                self.network_status = "Pairing request rejected.".into();
             }
             if let Some(index) = approve_index {
-                let pending = self.pending_pairings.remove(index);
+                let mut pending = self.pending_pairings.remove(index);
                 if let Some(error) = &self.trust_store_error {
                     self.network_status = format!("Pairing approval blocked because the trust registry is unreadable: {error}");
                     return;
                 }
-                match SasConfirmation::user_confirmed(
-                    &pending.connection.sas,
-                    &pending.connection.sas,
-                    pending.remote_code.trim(),
-                    &pending.connection.remote_fingerprint,
-                ).and_then(|confirmation| {
-                    self.trust_store.trust_and_save(
+                let result = SasConfirmation::user_approved(&pending.connection.remote_fingerprint)
+                    .and_then(|confirmation| self.trust_store.trust_and_save(
                         pending.descriptor.clone(), confirmation, now_ms(), trust_store_path()
-                    )
-                }) {
+                    ));
+                match result {
                     Ok(()) => {
-                        self.active_sessions.push(pending.connection);
-                        self.network_status = format!("{} is now trusted. Encrypted Noise session established.", pending.descriptor.display_name);
+                        if let Err(error) = send_pairing_decision(&mut pending.connection, "accepted") {
+                            let _ = self.trust_store.revoke_and_save(&pending.descriptor.id, trust_store_path());
+                            self.network_status = format!("Could not confirm pairing: {error}");
+                        } else {
+                            self.active_sessions.push(pending.connection);
+                            self.network_status = format!("{} is now connected and trusted.", pending.descriptor.display_name);
+                        }
                     }
                     Err(error) => {
+                        let _ = send_pairing_decision(&mut pending.connection, "rejected");
                         self.network_status = format!("Pairing was not trusted: {error}");
                     }
                 }
@@ -895,9 +993,9 @@ impl eframe::App for BridgeApp {
                     eyebrow(ui, "AUTHENTICATED DEVICE PAIRING");
                     ui.add_space(8.0);
                     ui.label(egui::RichText::new("Secure pairing is active").size(19.0).strong());
-                    muted(ui, "Choose a discovered Bridge device. Both devices must complete Noise XX, compare the same six-digit code, and approve the peer.");
+                    muted(ui, "Bridge automatically discovers nearby devices. Choose one and press Connect; the other device will show an approval popup.");
                     ui.add_space(10.0);
-                    muted(ui, "QR is not enabled yet. Pair directly from the discovered-device list while both devices are on the same LAN.");
+                    muted(ui, "Previously trusted devices reconnect automatically. New devices are never trusted without approval on the receiving device.");
                     ui.add_space(12.0);
                     if ui.button("Close").clicked() { self.show_pair_dialog = false; }
                 });
