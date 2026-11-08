@@ -919,7 +919,8 @@ impl eframe::App for BridgeApp {
                         }
                     }
                     #[cfg(windows)]
-                    if let Some(texture) = &self.invitation_texture {
+                    let invitation_texture = self.invitation_texture.clone();
+                    if let Some(texture) = invitation_texture {
                         ui.add_space(8.0);
                         ui.vertical_centered(|ui| {
                             ui.image((texture.id(), egui::vec2(220.0, 220.0)));
