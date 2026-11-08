@@ -14,7 +14,7 @@ targets:
     sources:
       - path: BridgeApp
     dependencies:
-      - framework: BridgeApp/Frameworks/BridgeMobile.xcframework
+      - framework: Frameworks/BridgeMobile.xcframework
         embed: false
     settings:
       base:

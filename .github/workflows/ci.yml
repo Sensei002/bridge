@@ -106,22 +106,22 @@ jobs:
           cargo build --release --target aarch64-apple-ios -p bridge-mobile
           cargo build --release --target aarch64-apple-ios-sim -p bridge-mobile
           cargo build --release --target x86_64-apple-ios -p bridge-mobile
-          mkdir -p apps/ios/BridgeApp/Frameworks/Headers
-          cp apps/ios/BridgeApp/BridgeNative.h apps/ios/BridgeApp/Frameworks/Headers/BridgeMobile.h
+          mkdir -p apps/ios/Frameworks/Headers
+          cp apps/ios/BridgeApp/BridgeNative.h apps/ios/Frameworks/Headers/BridgeMobile.h
           lipo -create \
             target/aarch64-apple-ios-sim/release/libbridge_mobile.a \
             target/x86_64-apple-ios/release/libbridge_mobile.a \
-            -output apps/ios/BridgeApp/Frameworks/libbridge_mobile_sim.a
+            -output apps/ios/Frameworks/libbridge_mobile_sim.a
           xcodebuild -create-xcframework \
             -library target/aarch64-apple-ios/release/libbridge_mobile.a \
-            -headers apps/ios/BridgeApp/Frameworks/Headers \
-            -library apps/ios/BridgeApp/Frameworks/libbridge_mobile_sim.a \
-            -headers apps/ios/BridgeApp/Frameworks/Headers \
-            -output apps/ios/BridgeApp/Frameworks/BridgeMobile.xcframework
+            -headers apps/ios/Frameworks/Headers \
+            -library apps/ios/Frameworks/libbridge_mobile_sim.a \
+            -headers apps/ios/Frameworks/Headers \
+            -output apps/ios/Frameworks/BridgeMobile.xcframework
       - name: Install XcodeGen
         run: brew install xcodegen
       - name: Verify shared Rust library
-        run: test -d apps/ios/BridgeApp/Frameworks/BridgeMobile.xcframework
+        run: test -d apps/ios/Frameworks/BridgeMobile.xcframework
       - name: Generate Xcode project
         working-directory: apps/ios
         run: xcodegen generate
