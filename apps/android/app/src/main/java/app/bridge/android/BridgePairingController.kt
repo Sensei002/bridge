@@ -6,6 +6,8 @@ import android.os.Looper
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
+import java.net.Inet4Address
+import java.net.NetworkInterface
 import java.util.concurrent.ConcurrentHashMap
 
 internal data class BridgePeer(
@@ -89,7 +91,7 @@ internal class BridgePairingController(
     }
 
     /** Build a signed-by-Noise invitation URI for a caller-supplied local IPv4 address. */
-    fun createInvitation(host: String): String {
+    fun createInvitation(host: String = localIpv4Address()): String {
         val request = JSONObject()
             .put("device", localDescriptor)
             .put("host", host)
