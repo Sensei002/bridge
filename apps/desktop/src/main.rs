@@ -253,7 +253,7 @@ fn start_pairing(peer: DiscoveredPeer, expected: Option<String>, status: Sender<
                 let mut connection = connect_noise_xx(stream, &key, expected.as_deref())
                     .map_err(|error| error.to_string())?;
                 let local = DeviceDescriptor {
-                    id: DeviceId::new(),
+                    id: local_device_id(),
                     display_name: "Bridge Windows".into(),
                     platform: Platform::Windows,
                     protocol_version: PROTOCOL_VERSION,
