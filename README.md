@@ -1,6 +1,10 @@
-# Bridge
+<p align="center">
+  <img src="assets/bridge-mark.svg" alt="Bridge — Connect, Share, Beyond" width="560" />
+</p>
 
-**One ecosystem. Every device.**
+<h1 align="center">Bridge</h1>
+<p align="center"><strong>CONNECT · SHARE · BEYOND</strong></p>
+<p align="center">One ecosystem. Every device.</p>
 
 Bridge is an open-source, local-first device interoperability project for Windows, Android, and iOS. The goal is to make nearby devices work together through one secure, permission-based ecosystem.
 
