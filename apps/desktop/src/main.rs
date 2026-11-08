@@ -483,7 +483,17 @@ impl eframe::App for BridgeApp {
         #[cfg(windows)]
         {
             for peer in self.peer_rx.try_iter() {
-                if !self.discovered_peers.iter().any(|known| known.address == peer.address) {
+                // mDNS may resolve one physical device over both IPv4 and IPv6.
+                // Device identity, not socket address, defines one discovered row.
+                if let Some(existing) = self.discovered_peers.iter_mut()
+                    .find(|known| known.record.device_id == peer.record.device_id)
+                {
+                    // Prefer IPv4 for the Windows Connect action when both routes
+                    // are available; otherwise retain whichever usable route arrived.
+                    if peer.address.is_ipv4() || !existing.address.is_ipv4() {
+                        *existing = peer;
+                    }
+                } else {
                     self.discovered_peers.push(peer);
                 }
             }
