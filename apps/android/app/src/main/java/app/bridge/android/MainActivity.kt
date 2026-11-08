@@ -521,16 +521,18 @@ private fun DevicesScreen(
     onReject: (BridgePendingPairing) -> Unit,
     onRevoke: (String) -> Unit
 ) {
+    val trustedIds = trusted.map { it.deviceId }.toSet()
+    val untrustedPeers = peers.filterNot { it.deviceId in trustedIds }
     ScreenContent {
         ScreenHeading("YOUR ECOSYSTEM", "Devices", "Nearby Bridge devices appear here automatically.")
         Panel {
-            Eyebrow("NEARBY DEVICES")
+            Eyebrow("DISCOVERED DEVICES")
             Text("Available on your network", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
             Text("Keep Bridge open on both devices and connect them to the same Wi-Fi network.", color = Muted, fontSize = 12.sp, lineHeight = 18.sp)
-            if (peers.isEmpty()) {
+            if (untrustedPeers.isEmpty()) {
                 Text("Searching for Bridge devices…", color = Muted, fontSize = 11.sp)
             } else {
-                peers.forEach { peer ->
+                untrustedPeers.forEach { peer ->
                     Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
