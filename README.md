@@ -8,7 +8,7 @@
 
 Bridge is an open-source, local-first device interoperability project for Windows, Android, and iOS. The goal is to make nearby devices work together through one secure, permission-based ecosystem.
 
-> **Status: Milestone 1 foundation implemented; not yet complete.** Native Windows, Android, and iOS clients automatically discover Bridge peers on the local network. A user selects **Connect**, the receiving device displays an approval popup, and the initiator waits for that decision over the encrypted Noise session. New peers are trusted only after the receiving device accepts; previously trusted devices reconnect automatically. Physical-device interoperability testing, lifecycle hardening, and independent security review remain outstanding.
+> **Status: Milestone 1 complete for the validated Windows + Android pairing target.** Both platforms have passed real-device discovery, bidirectional pairing, receiver approval, trusted reconnection, app restart/reconnection, and local-network reconnect checks. Windows firewall and Android network permissions have been tested successfully. iOS builds in CI but has not been physically tested; Linux desktop validation is deferred until a Linux test environment is available. See the validation scope and remaining follow-up items below.
 
 ## Platforms
 
@@ -44,12 +44,12 @@ Implemented foundations:
 - Explicit approval on the receiving device before first-time trust; the initiating device is trusted only after receiving the encrypted acceptance response. Persistent trusted-device records and revocation.
 - Authenticated descriptor exchange, replay-resistant transport counters, encrypted pairing-decision messages, and one-tap approval on the receiving device.
 
-Still required before Milestone 1 is complete:
+Milestone 1 validation outcome:
 
-- Physical-device end-to-end pairing tests for Windows ↔ Android, Windows ↔ iOS, and Android ↔ iOS, including trusted reconnection and revocation.
-- Physical network/lifecycle validation across router configurations, isolation, sleep/resume, and network changes.
-- Final connection lifecycle, resource-limit, reconnection, and platform network-permission hardening.
-- Independent security review of the complete pairing flow.
+- **Windows ↔ Android:** physical-device pairing and reconnection validated in both directions. App restart/reconnection, Wi-Fi disconnect/reconnect, Windows firewall, and Android network-permission behaviour were tested and reported working.
+- **iOS:** CI Simulator build passes; physical-device interoperability remains unverified because no iPhone or Mac test environment is currently available.
+- **Linux:** deferred until a Linux installation is available for testing.
+- **Follow-up hardening:** broader router/AP-isolation and IPv6-only coverage, resource-limit/lifecycle stress testing, and an independent security review remain recommended before a broad public release.
 
 See [docs/roadmap.md](docs/roadmap.md), [docs/protocol.md](docs/protocol.md), [docs/security-model.md](docs/security-model.md), [CONTRIBUTING.md](CONTRIBUTING.md), and [SECURITY.md](SECURITY.md).
 
@@ -82,7 +82,7 @@ The Windows client is a native Rust desktop application rendered by egui. It doe
 - No silent cloud upload or background relay.
 - Never commit secrets or signing keys.
 
-The automatic discovery and one-tap pairing flow is implemented in the native clients. Physical-device interoperability, lifecycle/network validation, and independent security review remain release gates. Do not treat a successful CI build or loopback test as proof of real-device interoperability.
+The Windows + Android Milestone 1 target is validated on physical devices. iOS and Linux remain build/platform validation follow-ups, not claims of completed physical-device interoperability. A successful CI build or loopback test alone is not proof of real-device interoperability.
 
 ## License
 
