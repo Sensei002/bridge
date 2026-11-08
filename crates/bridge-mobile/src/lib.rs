@@ -118,6 +118,11 @@ fn pair_accept(request: PairRequest) -> Result<PairResult, String> {
     register(connection, &request.local_device)
 }
 
+/// Derive the SHA-256 fingerprint for a 32-byte Noise private key encoded as hex.
+///
+/// # Safety
+/// `private_key_hex` must be null or point to a valid NUL-terminated UTF-8 C string.
+/// The returned allocation must be released with `bridge_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn bridge_identity_fingerprint(private_key_hex: *const c_char) -> *mut c_char {
     if private_key_hex.is_null() { return CString::new("{\"ok\":false,\"error\":\"null key\"}").unwrap().into_raw(); }
@@ -138,6 +143,11 @@ fn to_json(result: Result<PairResult, String>) -> CString {
         .unwrap_or_else(|_| CString::new("{\"ok\":false,\"error\":\"invalid response\"}").unwrap())
 }
 
+/// Establish an authenticated Noise XX session to the requested peer.
+///
+/// # Safety
+/// `request_json` must be null or point to a valid NUL-terminated UTF-8 JSON C string.
+/// The returned allocation must be released with `bridge_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn bridge_pair_connect(request_json: *const c_char) -> *mut c_char {
     if request_json.is_null() { return to_json(Err("null request".into())).into_raw(); }
@@ -150,6 +160,11 @@ pub unsafe extern "C" fn bridge_pair_connect(request_json: *const c_char) -> *mu
     to_json(pair_connect(request)).into_raw()
 }
 
+/// Listen for and establish one authenticated Noise XX session.
+///
+/// # Safety
+/// `request_json` must be null or point to a valid NUL-terminated UTF-8 JSON C string.
+/// The returned allocation must be released with `bridge_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn bridge_pair_accept(request_json: *const c_char) -> *mut c_char {
     if request_json.is_null() { return to_json(Err("null request".into())).into_raw(); }
@@ -162,6 +177,11 @@ pub unsafe extern "C" fn bridge_pair_accept(request_json: *const c_char) -> *mut
     to_json(pair_accept(request)).into_raw()
 }
 
+/// Encrypt and send one UTF-8 application message on an established session.
+///
+/// # Safety
+/// `message` must be null or point to a valid NUL-terminated UTF-8 C string.
+/// The returned allocation must be released with `bridge_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn bridge_session_send(handle: u64, message: *const c_char) -> *mut c_char {
     if message.is_null() { return to_json(Err("null message".into())).into_raw(); }
@@ -186,7 +206,7 @@ pub unsafe extern "C" fn bridge_session_send(handle: u64, message: *const c_char
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn bridge_session_receive(handle: u64) -> *mut c_char {
+pub extern "C" fn bridge_session_receive(handle: u64) -> *mut c_char {
     let result: Result<String, String> = sessions().lock().map_err(|_| "session registry poisoned".to_string())
         .and_then(|mut map| {
             let connection = map.get_mut(&handle).ok_or_else(|| "session not found".to_string())?;
@@ -206,6 +226,10 @@ pub extern "C" fn bridge_session_close(handle: u64) {
     if let Ok(mut map) = sessions().lock() { map.remove(&handle); }
 }
 
+/// Release a string allocated by another Bridge FFI function.
+///
+/// # Safety
+/// `value` must be null or a pointer previously returned by this library and not yet freed.
 #[no_mangle]
 pub unsafe extern "C" fn bridge_string_free(value: *mut c_char) {
     if !value.is_null() { drop(CString::from_raw(value)); }
