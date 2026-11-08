@@ -635,6 +635,39 @@ impl eframe::App for BridgeApp {
                             }
                         });
                         ui.add_space(16.0);
+                        let mut revoke_device = None;
+                        panel(ui, |ui| {
+                            eyebrow(ui, "TRUSTED DEVICES");
+                            let devices = self.trust_store.list();
+                            if devices.is_empty() {
+                                muted(ui, "No trusted devices yet. Pairing requires matching verification codes and approval on both devices.");
+                            } else {
+                                for device in devices {
+                                    ui.horizontal(|ui| {
+                                        ui.vertical(|ui| {
+                                            ui.label(egui::RichText::new(&device.descriptor.display_name).strong().color(TEXT));
+                                            muted(ui, &format!("{:?} · {}", device.descriptor.platform, &device.public_key_fingerprint[..16]));
+                                        });
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            if ui.button(egui::RichText::new("Revoke").color(egui::Color32::from_rgb(239, 68, 68))).clicked() {
+                                                revoke_device = Some(device.descriptor.id);
+                                            }
+                                        });
+                                    });
+                                    ui.add_space(5.0);
+                                }
+                            }
+                        });
+                        if let Some(id) = revoke_device {
+                            match self.trust_store.revoke_and_save(&id, trust_store_path()) {
+                                Ok(device) => {
+                                    self.active_sessions.retain(|session| session.remote_fingerprint != device.public_key_fingerprint);
+                                    self.network_status = format!("Trust revoked for {}. Its active session was closed.", device.descriptor.display_name);
+                                }
+                                Err(error) => self.network_status = format!("Could not revoke device: {error}"),
+                            }
+                        }
+                        ui.add_space(16.0);
                         panel(ui, |ui| {
                             eyebrow(ui, "NETWORK TEST · TCP");
                             ui.add_space(6.0);
