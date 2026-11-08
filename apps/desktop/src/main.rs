@@ -7,11 +7,11 @@ use eframe::egui;
 #[cfg(windows)]
 use bridge_network::{accept_noise_xx, connect_noise_xx, connect_to_peer, local_key_fingerprint, peer_from_event, DiscoveredPeer, DiscoveryRecord, LocalDiscovery, NoiseConnection};
 #[cfg(windows)]
-use bridge_core::trust::{SasConfirmation, TrustStore};
+use bridge_core::{pairing::QrInvitation, trust::{SasConfirmation, TrustStore}};
 #[cfg(windows)]
 use bridge_protocol::{DeviceDescriptor, DeviceId, Platform, PROTOCOL_VERSION};
 #[cfg(windows)]
-use std::net::TcpListener;
+use std::net::{TcpListener, UdpSocket};
 #[cfg(windows)]
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -107,6 +107,10 @@ struct BridgeApp {
     #[cfg(windows)]
     network_tx: Sender<String>,
     brand_texture: Option<egui::TextureHandle>,
+    #[cfg(windows)]
+    invitation_uri: Option<String>,
+    #[cfg(windows)]
+    invitation_texture: Option<egui::TextureHandle>,
 }
 
 impl Default for BridgeApp {
@@ -163,6 +167,10 @@ impl Default for BridgeApp {
             #[cfg(windows)]
             network_tx,
             brand_texture: None,
+            #[cfg(windows)]
+            invitation_uri: None,
+            #[cfg(windows)]
+            invitation_texture: None,
         }
     }
 }
@@ -897,12 +905,70 @@ impl eframe::App for BridgeApp {
                     ui.label(egui::RichText::new("Secure pairing is active").size(19.0).strong());
                     muted(ui, "Choose a discovered Bridge device. Both devices must complete Noise XX, compare the same six-digit code, and approve the peer.");
                     ui.add_space(10.0);
-                    muted(ui, "QR is not enabled yet. Pair directly from the discovered-device list while both devices are on the same LAN.");
+                    muted(ui, "Create a two-minute QR invitation for a phone to scan. The QR only supplies the local endpoint; Noise XX fingerprint pinning and matching-code approval remain mandatory.");
+                    ui.add_space(10.0);
+                    #[cfg(windows)]
+                    if primary_button(ui, "Generate pairing QR") {
+                        match create_local_invitation() {
+                            Ok((uri, pixels)) => {
+                                self.invitation_uri = Some(uri);
+                                self.invitation_texture = Some(ctx.load_texture("bridge-pairing-qr", pixels, egui::TextureOptions::NEAREST));
+                                self.network_status = "Short-lived QR invitation created. It expires in two minutes.".into();
+                            }
+                            Err(error) => self.network_status = format!("Could not create QR invitation: {error}"),
+                        }
+                    }
+                    #[cfg(windows)]
+                    if let Some(texture) = &self.invitation_texture {
+                        ui.add_space(8.0);
+                        ui.vertical_centered(|ui| {
+                            ui.image((texture.id(), egui::vec2(220.0, 220.0)));
+                            muted(ui, "Scan with Bridge on Android or iOS. Expires after two minutes.");
+                            if ui.button("Hide QR").clicked() {
+                                self.invitation_uri = None;
+                                self.invitation_texture = None;
+                            }
+                        });
+                    }
                     ui.add_space(12.0);
                     if ui.button("Close").clicked() { self.show_pair_dialog = false; }
                 });
         }
     }
+}
+
+#[cfg(windows)]
+fn create_local_invitation() -> Result<(String, egui::ColorImage), String> {
+    let socket = UdpSocket::bind(("0.0.0.0", 0)).map_err(|error| error.to_string())?;
+    socket.connect(("192.0.2.1", 80)).map_err(|error| error.to_string())?;
+    let host = socket.local_addr().map_err(|error| error.to_string())?.ip();
+    if !host.is_ipv4() || !host.is_private() {
+        return Err("No private IPv4 Wi-Fi address was found. Connect to your local network and retry.".into());
+    }
+    let key = identity_store::load_or_create().map_err(|error| error.to_string())?;
+    let fingerprint = local_key_fingerprint(&key).map_err(|error| error.to_string())?;
+    let device = DeviceDescriptor {
+        id: local_device_id(),
+        display_name: "Bridge Windows".into(),
+        platform: Platform::Windows,
+        protocol_version: PROTOCOL_VERSION,
+    };
+    let invitation = QrInvitation::create(&device, &host.to_string(), NETWORK_PORT, &fingerprint, now_ms())
+        .map_err(|error| error.to_string())?
+        .encode().map_err(|error| error.to_string())?;
+    let code = qrcode::QrCode::new(invitation.as_bytes()).map_err(|error| error.to_string())?;
+    let modules = code.width();
+    let quiet = 4usize;
+    let side = modules + quiet * 2;
+    let mut pixels = vec![egui::Color32::WHITE; side * side];
+    for y in 0..modules {
+        for x in 0..modules {
+            if code[(x, y)] == qrcode::Color::Dark {
+                pixels[(y + quiet) * side + x + quiet] = egui::Color32::BLACK;
+            }
+        }
+    }
+    Ok((invitation, egui::ColorImage::new([side, side], pixels)))
 }
 
 #[cfg(windows)]
