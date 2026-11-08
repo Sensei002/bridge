@@ -47,7 +47,7 @@ internal class BridgeDiscovery(
             val name = attr("name").ifBlank { serviceInfo.serviceName }
             if (id.isBlank() || id == localDeviceId || fingerprint.length != 64 ||
                 !fingerprint.all { it.isDigit() || it.lowercaseChar() in 'a'..'f' }) return
-            onPeerFound(BridgePeer(name, host, serviceInfo.port, id, fingerprint, platform))
+            onPeerFound(BridgePeer(name, host, serviceInfo.port, id, fingerprint, platform, serviceInfo.serviceName))
         }
     }
 
