@@ -65,7 +65,6 @@ impl Page {
 struct PendingApproval {
     connection: NoiseConnection,
     descriptor: DeviceDescriptor,
-    incoming: bool,
     already_trusted: bool,
 }
 
@@ -267,7 +266,7 @@ fn start_secure_listener(status: Sender<String>, pending: Sender<PendingApproval
                                 };
                                 let _ = status.send(message);
                                 if pending.send(PendingApproval {
-                                    connection, descriptor, incoming: !already_trusted, already_trusted
+                                    connection, descriptor, already_trusted
                                 }).is_err() {
                                     let _ = status.send("Pairing window closed; pending session discarded".into());
                                 }
@@ -305,7 +304,7 @@ fn start_pairing(peer: DiscoveredPeer, expected: Option<String>, status: Sender<
                     }
                     true
                 } else { false };
-                Ok(PendingApproval { connection, descriptor, incoming: false, already_trusted })
+                Ok(PendingApproval { connection, descriptor, already_trusted })
             });
         match result {
             Ok(mut approval) => {
@@ -704,7 +703,7 @@ impl eframe::App for BridgeApp {
                                                 muted(ui, &format!("{} · {}", peer.address, &peer.record.public_key_fingerprint[..8]));
                                             });
                                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                if primary_button(ui, "Pair") { pair_target = Some(index); }
+                                                if primary_button(ui, "Connect") { pair_target = Some(index); }
                                                 muted(ui, "UNVERIFIED");
                                             });
                                         });
