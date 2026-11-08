@@ -266,6 +266,15 @@ pub fn fingerprint(public_key: &[u8]) -> String {
     hex::encode(Sha256::digest(public_key))
 }
 
+/// Derive the public-key fingerprint for a persisted 32-byte Noise static key.
+pub fn local_key_fingerprint(private_key: &[u8]) -> Result<String, NetworkError> {
+    use x25519_dalek::{PublicKey, StaticSecret};
+    let bytes: [u8; 32] = private_key.try_into().map_err(|_| NetworkError::InvalidPrivateKey)?;
+    let secret = StaticSecret::from(bytes);
+    let public = PublicKey::from(&secret);
+    Ok(fingerprint(public.as_bytes()))
+}
+
 /// Six-digit SAS derived symmetrically from both static public keys.
 pub fn short_authentication_string(
     local_private: &[u8],

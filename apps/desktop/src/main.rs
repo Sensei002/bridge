@@ -4,6 +4,10 @@
 mod identity_store;
 
 use eframe::egui;
+#[cfg(windows)]
+use bridge_network::{local_key_fingerprint, peer_from_event, DiscoveryRecord, LocalDiscovery};
+#[cfg(windows)]
+use bridge_protocol::{Platform, PROTOCOL_VERSION};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
@@ -67,6 +71,8 @@ impl Default for BridgeApp {
         let (network_tx, network_rx) = mpsc::channel();
         let identity_status = secure_identity_status();
         start_network_listener(network_tx.clone());
+        #[cfg(windows)]
+        start_local_discovery(network_tx.clone());
         Self {
             selected: Page::Overview,
             show_pair_dialog: false,
@@ -101,6 +107,61 @@ fn start_network_listener(status: Sender<String>) {
                     thread::spawn(move || handle_network_client(stream, status));
                 }
                 Err(error) => { let _ = status.send(format!("Network listener error: {error}")); }
+            }
+        }
+    });
+}
+
+#[cfg(windows)]
+fn start_local_discovery(status: Sender<String>) {
+    thread::spawn(move || {
+        let private_key = match identity_store::load_or_create() {
+            Ok(key) => key,
+            Err(error) => {
+                let _ = status.send(format!("Local discovery unavailable: {error}"));
+                return;
+            }
+        };
+        let fingerprint = match local_key_fingerprint(&private_key) {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = status.send(format!("Local discovery unavailable: {error}"));
+                return;
+            }
+        };
+        let suffix = &fingerprint[..8];
+        let record = DiscoveryRecord {
+            device_id: fingerprint.clone(),
+            display_name: "Bridge Windows".into(),
+            platform: Platform::Windows,
+            protocol_version: PROTOCOL_VERSION,
+            public_key_fingerprint: fingerprint.clone(),
+        };
+        let (discovery, events) = match LocalDiscovery::start(
+            &format!("Bridge-{suffix}"),
+            &format!("bridge-{suffix}.local."),
+            NETWORK_PORT,
+            &record,
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = status.send(format!("Local discovery unavailable: {error}"));
+                return;
+            }
+        };
+        let _keep_service_registered = discovery;
+        let _ = status.send("Bridge is advertising on the local network. Discovered peers remain unverified.".into());
+        while let Ok(event) = events.recv() {
+            if let Some(peer) = peer_from_event(&event) {
+                if peer.record.public_key_fingerprint.eq_ignore_ascii_case(&fingerprint) {
+                    continue;
+                }
+                let _ = status.send(format!(
+                    "Unverified Bridge candidate: {} at {} (fingerprint {})",
+                    peer.record.display_name,
+                    peer.address,
+                    &peer.record.public_key_fingerprint[..8],
+                ));
             }
         }
     });
