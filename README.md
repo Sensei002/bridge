@@ -8,14 +8,14 @@
 
 Bridge is an open-source, local-first device interoperability project for Windows, Android, and iOS. The goal is to make nearby devices work together through one secure, permission-based ecosystem.
 
-> **Status: Milestone 1 foundation implemented; not yet complete.** Native client shells, local-network discovery, authenticated Noise XX pairing, platform-backed device identities, explicit-consent trust, trusted-device persistence/revocation, and secure QR invitation primitives are implemented. Native QR display is now wired into all three clients, with camera scanning on Android and iOS feeding the one-time Rust invitation consumer and pinned Noise XX pairing path. Physical-device interoperability testing, final lifecycle hardening, and independent security review remain outstanding.
+> **Status: Milestone 1 foundation implemented; not yet complete.** Native Windows, Android, and iOS clients automatically discover Bridge peers on the local network. A user selects **Connect**, the receiving device displays an approval popup, and the initiator waits for that decision over the encrypted Noise session. New peers are trusted only after the receiving device accepts; previously trusted devices reconnect automatically. Physical-device interoperability testing, lifecycle hardening, and independent security review remain outstanding.
 
 ## Platforms
 
 - **Windows:** Native Rust + [egui](https://github.com/emilk/egui) desktop application. No WebView2, Tauri, Electron, Chromium, or embedded browser runtime.
 - **Android:** Kotlin + Jetpack Compose.
 - **iOS:** SwiftUI native app.
-- **Shared engine:** Rust workspace with versioned protocol types, device registry, pairing consent state machine, discovery, QR invitation validation/replay protection, and encrypted-session primitives.
+- **Shared engine:** Rust workspace with versioned protocol types, device registry, pairing consent state machine, local-network discovery, encrypted-session primitives, and trust persistence.
 
 ## Repository layout
 
@@ -41,8 +41,8 @@ Implemented foundations:
 - Bounded length-prefixed TCP framing, socket timeouts, and Noise XX sessions.
 - SHA-256 static-key fingerprints, symmetric six-digit short authentication strings, and pinned-identity checks.
 - Device identity persistence using Windows Credential Manager, Android Keystore-backed storage, and iOS Keychain.
-- Explicit matching-code confirmation before first-time trust; persistent trusted-device records and revocation.
-- Authenticated descriptor exchange, replay-resistant transport counters, QR invitation encoding/validation, one-time nonce consumption, and Rust mobile FFI entry points for invitation creation/consumption.
+- Explicit approval on the receiving device before first-time trust; the initiating device is trusted only after receiving the encrypted acceptance response. Persistent trusted-device records and revocation.
+- Authenticated descriptor exchange, replay-resistant transport counters, encrypted pairing-decision messages, and one-tap approval on the receiving device.
 
 Still required before Milestone 1 is complete:
 
@@ -75,14 +75,14 @@ The Windows client is a native Rust desktop application rendered by egui. It doe
 
 - Pairing must require user approval on both devices.
 - Noise XX provides an authenticated key exchange and encrypted transport; the remote static-key fingerprint must be checked before a peer is trusted.
-- QR invitations are short-lived endpoint hints, never authentication credentials. A scanned invitation pins the expected Noise identity but still requires matching SAS verification and explicit approval.
+- Local-network discovery is only a way to find peers, not proof of identity. Noise XX authenticates the encrypted session; first-time pairing uses trust-on-first-use after the receiving device explicitly approves the authenticated peer. Accept only devices you recognize.
 - Device identities must be revocable.
 - Capabilities are independently permissioned.
 - Network messages must be versioned, validated, and size-bounded.
 - No silent cloud upload or background relay.
 - Never commit secrets or signing keys.
 
-The native QR UI and secure invitation-to-Noise integration are implemented. Physical-device interoperability, lifecycle/network validation, and independent security review remain release gates. Do not treat a successful CI build or loopback test as proof of real-device interoperability.
+The automatic discovery and one-tap pairing flow is implemented in the native clients. Physical-device interoperability, lifecycle/network validation, and independent security review remain release gates. Do not treat a successful CI build or loopback test as proof of real-device interoperability.
 
 ## License
 
