@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import Darwin
 
 struct BridgePendingPairing: Identifiable {
     let handle: UInt64
@@ -89,6 +90,33 @@ final class BridgePairingController: ObservableObject {
             throw NSError(domain: "BridgePairing", code: 1, userInfo: [NSLocalizedDescriptionKey: "Could not create a valid QR invitation."])
         }
         return uri
+    }
+
+    func report(_ message: String) { status = message }
+
+    static func localIPv4Address() throws -> String {
+        var head: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&head) == 0, let first = head else {
+            throw NSError(domain: "BridgePairing", code: 2, userInfo: [NSLocalizedDescriptionKey: "Could not inspect local network interfaces."])
+        }
+        defer { freeifaddrs(head) }
+        for pointer in sequence(first: first, next: { $0.pointee.ifa_next }) {
+            let item = pointer.pointee
+            guard let address = item.ifa_addr,
+                  Int32(address.pointee.sa_family) == AF_INET,
+                  (Int32(item.ifa_flags) & IFF_UP) != 0,
+                  (Int32(item.ifa_flags) & IFF_LOOPBACK) == 0,
+                  String(cString: item.ifa_name).hasPrefix("en") else { continue }
+            let ipv4 = address.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee.sin_addr }
+            var buffer = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+            if inet_ntop(AF_INET, [ipv4], &buffer, socklen_t(buffer.count)) != nil {
+                let value = String(cString: buffer)
+                if value.hasPrefix("10.") || value.hasPrefix("192.168.") || value.range(of: "^172\\.(1[6-9]|2[0-9]|3[0-1])\\.", options: .regularExpression) != nil {
+                    return value
+                }
+            }
+        }
+        throw NSError(domain: "BridgePairing", code: 3, userInfo: [NSLocalizedDescriptionKey: "No private Wi-Fi IPv4 address found. Connect to Wi-Fi and try again."])
     }
 
     /// Consume a scanned QR nonce before using its endpoint; pin the fingerprint in Noise XX.
