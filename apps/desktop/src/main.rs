@@ -694,7 +694,7 @@ impl eframe::App for BridgeApp {
                                 ui.add_space(8.0);
                                 let trusted_devices = self.trust_store.list();
                                 let visible_peers = self.discovered_peers.iter().enumerate()
-                                    .filter(|(_, peer)| !trusted_devices.iter().any(|device| device.descriptor.id == peer.record.id))
+                                    .filter(|(_, peer)| !trusted_devices.iter().any(|device| device.descriptor.id == peer.record.device_id))
                                     .collect::<Vec<_>>();
                                 if visible_peers.is_empty() {
                                     muted(ui, "No new devices found. Trusted devices are listed below.");
