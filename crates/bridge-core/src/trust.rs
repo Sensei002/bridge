@@ -224,7 +224,11 @@ mod tests {
             SasConfirmation::user_confirmed("123456", "123456", "123457", &"ab".repeat(32)),
             Err(TrustStoreError::AuthenticationCodeMismatch)
         ));
-        assert!(SasConfirmation::user_confirmed("654321", "123456", "123456", &"ab".repeat(32)).is_ok());
+        assert!(matches!(
+            SasConfirmation::user_confirmed("654321", "123456", "123456", &"ab".repeat(32)),
+            Err(TrustStoreError::AuthenticationCodeMismatch)
+        ));
+        assert!(SasConfirmation::user_confirmed("123456", "123456", "123456", &"ab".repeat(32)).is_ok());
     }
 
     #[test]
