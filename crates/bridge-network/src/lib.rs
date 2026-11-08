@@ -140,6 +140,38 @@ impl LocalDiscovery {
     }
 }
 
+/// Choose a usable IPv4 endpoint before IPv6. Link-local IPv6 scope IDs
+/// are not represented by a plain SocketAddr, so they are a fallback only.
+fn prefer_ipv4_address(addresses: impl IntoIterator<Item = IpAddr>) -> Option<IpAddr> {
+    let mut ipv6_fallback = None;
+    for address in addresses {
+        match address {
+            IpAddr::V4(_) => return Some(address),
+            IpAddr::V6(_) if ipv6_fallback.is_none() => ipv6_fallback = Some(address),
+            IpAddr::V6(_) => {}
+        }
+    }
+    ipv6_fallback
+}
+
+#[cfg(test)]
+mod address_selection_tests {
+    use super::*;
+
+    #[test]
+    fn prefers_ipv4_even_when_ipv6_is_discovered_first() {
+        let ipv6 = "fe80::54fc:41ff:fe1d:a855".parse().unwrap();
+        let ipv4 = "192.168.1.12".parse().unwrap();
+        assert_eq!(prefer_ipv4_address([ipv6, ipv4]), Some(ipv4));
+    }
+
+    #[test]
+    fn falls_back_to_ipv6_when_no_ipv4_exists() {
+        let ipv6 = "fe80::54fc:41ff:fe1d:a855".parse().unwrap();
+        assert_eq!(prefer_ipv4_address([ipv6]), Some(ipv6));
+    }
+}
+
 /// Convert a resolved DNS-SD event into an untrusted candidate peer.
 pub fn peer_from_event(event: &ServiceEvent) -> Option<DiscoveredPeer> {
     let ServiceEvent::ServiceResolved(service) = event else { return None };
@@ -162,11 +194,14 @@ pub fn peer_from_event(event: &ServiceEvent) -> Option<DiscoveredPeer> {
     {
         return None;
     }
-    let address = service.get_addresses().iter().find_map(|ip| match ip {
+    // Prefer IPv4 when both families are advertised. Link-local IPv6
+    // addresses require an interface scope ID; converting them to a plain
+    // SocketAddr loses that scope and can make Windows connect attempts fail.
+    let address = prefer_ipv4_address(service.get_addresses().iter().filter_map(|ip| match ip {
         mdns_sd::ScopedIp::V4(v4) => Some(IpAddr::V4(*v4.addr())),
         mdns_sd::ScopedIp::V6(v6) => Some(IpAddr::V6(*v6.addr())),
         _ => None,
-    })?;
+    }))?;
     Some(DiscoveredPeer {
         record,
         address: SocketAddr::new(address, service.get_port()),
