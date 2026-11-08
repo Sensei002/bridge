@@ -34,7 +34,7 @@ struct BridgeHomeView: View {
                         Text(identityStatus).font(.system(size: 11, weight: .medium)).foregroundStyle(accent).padding(.top, 8)
                         if !discovery.peers.isEmpty {
                             Text("UNVERIFIED LOCAL DEVICES").font(.system(size: 9, weight: .bold)).tracking(1.2).foregroundStyle(amber).padding(.top, 10)
-                            ForEach(discovery.peers, id: \\.self) { peer in
+                            ForEach(discovery.peers, id: \.self) { peer in
                                 Text(peer).font(.system(size: 11, weight: .medium)).foregroundStyle(.white.opacity(0.72))
                             }
                         }
