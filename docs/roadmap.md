@@ -43,6 +43,21 @@
 
 **Milestone 1 is complete for the currently available Windows + Android target.** iOS and Linux physical-device/platform validation remain explicitly deferred; the completed milestone does not claim those platforms have passed real-device testing. See [docs/network-test.md](network-test.md) for the detailed record.
 
+## Milestone 2: secure local file transfer — in progress
+
+### Shared transfer engine
+- [x] Dedicated Rust transfer crate shared by native clients
+- [x] Bounded transfer-control messages and 48 KiB chunk framing for Noise transport
+- [x] File-offer validation, 2 GiB initial size ceiling, and SHA-256 integrity verification
+- [x] Safe filename validation and collision-safe, no-overwrite destination publication
+- [x] Temporary-file cleanup for cancelled, interrupted, or invalid transfers
+- [ ] Wire the transfer engine into authenticated desktop and Android sessions
+- [ ] Incoming-file approval and destination selection UI on both platforms
+- [ ] Streaming progress, cancellation, and completion/error states
+- [ ] End-to-end Windows ↔ Android physical-device transfer tests
+- [ ] Disconnect handling and interrupted-transfer cleanup tests
+- [ ] Resume support (deferred until reliable non-resumable transfer is validated)
+
 ## Device capabilities
 - [ ] Capability permission model
 - [ ] Universal clipboard (text first)
