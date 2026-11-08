@@ -59,15 +59,39 @@ final class BridgePairingController: ObservableObject {
         }
     }
 
-    func pair(_ peer: BridgePeer) {
+    func pair(_ peer: BridgePeer, expectedFingerprint: String? = nil) {
         let known = trusted.first(where: { $0.deviceId == peer.deviceId })
-        let request = makeRequest(host: peer.host, expectedFingerprint: known?.fingerprint)
+        let pinnedFingerprint = expectedFingerprint ?? known?.fingerprint
+        let request = makeRequest(host: peer.host, expectedFingerprint: pinnedFingerprint)
         Task {
             let response = await Task.detached(priority: .userInitiated) {
                 BridgeNativeClient.pairConnect(request: request)
             }.value
             handle(response)
         }
+    }
+
+    /// Consume a scanned QR nonce before using its endpoint; pin the fingerprint in Noise XX.
+    func pairFromInvitation(_ uri: String) {
+        let response = BridgeNativeClient.qrInvitationConsume(
+            uri: uri, nowMs: UInt64(max(0, Date().timeIntervalSince1970 * 1000))
+        )
+        guard let data = response.data(using: .utf8),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              root["ok"] as? Bool == true,
+              let invite = root["invitation"] as? [String: Any],
+              let host = invite["host"] as? String,
+              let port = invite["port"] as? Int,
+              let deviceId = invite["device_id"] as? String,
+              let name = invite["display_name"] as? String,
+              let fingerprint = invite["fingerprint"] as? String,
+              let platform = invite["platform"] as? String else {
+            status = "QR invitation rejected: invalid, expired, or already used."
+            return
+        }
+        pair(BridgePeer(name: name, host: host, port: port, deviceId: deviceId,
+                        fingerprint: fingerprint, platform: platform),
+             expectedFingerprint: fingerprint)
     }
 
     func approve(_ item: BridgePendingPairing, otherScreenCode: String) {
