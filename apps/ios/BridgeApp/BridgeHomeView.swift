@@ -5,6 +5,8 @@ private let amber = Color(red: 0.98, green: 0.75, blue: 0.14)
 private let bridgeBackground = Color(red: 0.04, green: 0.045, blue: 0.06)
 
 struct BridgeHomeView: View {
+    @State private var identityStatus = "Preparing secure device identity…"
+
     var body: some View {
         ZStack {
             bridgeBackground.ignoresSafeArea()
@@ -28,6 +30,7 @@ struct BridgeHomeView: View {
                         Text("No devices paired").font(.system(size: 20, weight: .semibold))
                         Text("Local-network discovery and secure pairing are being brought online in stages.")
                             .font(.system(size: 13)).foregroundStyle(.white.opacity(0.58))
+                        Text(identityStatus).font(.system(size: 11, weight: .medium)).foregroundStyle(accent).padding(.top, 8)
                         Text("PAIRING NOT AVAILABLE YET").font(.system(size: 9, weight: .bold))
                             .tracking(1.4).foregroundStyle(accent).padding(.top, 8)
                     }.padding(20).frame(maxWidth: .infinity, alignment: .leading)
@@ -43,6 +46,14 @@ struct BridgeHomeView: View {
                         .font(.system(size: 9, weight: .medium)).tracking(1)
                         .foregroundStyle(.white.opacity(0.4)).padding(.top, 18)
                 }.padding(.horizontal, 24).padding(.bottom, 32)
+            }
+        }
+        .task {
+            do {
+                _ = try BridgeIdentityStore.loadOrCreate()
+                identityStatus = "Device identity protected by iOS Keychain"
+            } catch {
+                identityStatus = "Secure identity unavailable: \\(error.localizedDescription)"
             }
         }
     }

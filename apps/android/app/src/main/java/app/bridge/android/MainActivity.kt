@@ -77,6 +77,12 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        try {
+            BridgeIdentityStore.loadOrCreate(this)
+            pairingMessage = "Device identity protected by Android Keystore. Pairing is not enabled yet."
+        } catch (error: Exception) {
+            pairingMessage = "Secure device identity unavailable: ${error.message}"
+        }
         setContent { BridgeApp(onScanQr = { launchQrScanner() }) }
     }
 
