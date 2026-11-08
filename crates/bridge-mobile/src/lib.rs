@@ -406,9 +406,15 @@ mod tests {
         let initiator_handle = initiator["handle"].as_u64().unwrap();
         let responder_handle = responder["handle"].as_u64().unwrap();
         let decision = CString::new(r#"{"type":"pairing_decision","decision":"accepted"}"#).unwrap();
+        // A blocking receive on one session must not hold the global registry
+        // lock and prevent a different session from sending its response.
+        let receiver = thread::spawn(move || unsafe {
+            take_json(bridge_session_receive(initiator_handle))
+        });
+        thread::sleep(Duration::from_millis(50));
         let sent_decision = unsafe { take_json(bridge_session_send(responder_handle, decision.as_ptr())) };
         assert_eq!(sent_decision["ok"], true);
-        let received_decision = unsafe { take_json(bridge_session_receive(initiator_handle)) };
+        let received_decision = receiver.join().unwrap();
         assert_eq!(received_decision["ok"], true);
         let parsed_decision: serde_json::Value = serde_json::from_str(received_decision["message"].as_str().unwrap()).unwrap();
         assert_eq!(parsed_decision["type"], "pairing_decision");
