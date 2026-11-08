@@ -34,6 +34,8 @@ pub enum TransferError {
     ChecksumMismatch,
     #[error("transfer is incomplete")]
     Incomplete,
+    #[error("source file changed while it was being sent")]
+    SourceChanged,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -200,6 +202,57 @@ pub fn offer_for_file(path: impl AsRef<Path>) -> Result<FileOffer, TransferError
     Ok(offer)
 }
 
+/// Streams an offered source file in bounded chunks and verifies that it did
+/// not change between offer creation and the end of transmission.
+pub struct OutgoingFile {
+    file: File,
+    offer: FileOffer,
+    offset: u64,
+    hasher: Sha256,
+    finished: bool,
+}
+
+impl OutgoingFile {
+    pub fn open(path: impl AsRef<Path>, offer: FileOffer) -> Result<Self, TransferError> {
+        offer.validate()?;
+        let file = File::open(path)?;
+        Ok(Self { file, offer, offset: 0, hasher: Sha256::new(), finished: false })
+    }
+
+    pub fn next_chunk(&mut self) -> Result<Option<FileChunk>, TransferError> {
+        if self.finished { return Ok(None); }
+        if self.offset == self.offer.file_size {
+            let mut extra = [0_u8; 1];
+            if self.file.read(&mut extra)? != 0 {
+                return Err(TransferError::SourceChanged);
+            }
+            let digest = hex::encode(self.hasher.clone().finalize());
+            if !digest.eq_ignore_ascii_case(&self.offer.sha256) {
+                return Err(TransferError::SourceChanged);
+            }
+            self.finished = true;
+            return Ok(None);
+        }
+
+        let remaining = self.offer.file_size - self.offset;
+        let length = remaining.min(CHUNK_DATA_BYTES as u64) as usize;
+        let mut data = vec![0_u8; length];
+        self.file.read_exact(&mut data).map_err(|error| {
+            if error.kind() == io::ErrorKind::UnexpectedEof {
+                TransferError::SourceChanged
+            } else {
+                TransferError::Io(error)
+            }
+        })?;
+        self.hasher.update(&data);
+        let chunk = FileChunk { transfer_id: self.offer.transfer_id, offset: self.offset, data };
+        self.offset += length as u64;
+        Ok(Some(chunk))
+    }
+
+    pub fn total_bytes(&self) -> u64 { self.offer.file_size }
+}
+
 fn validate_file_name(name: &str) -> Result<(), TransferError> {
     if name.is_empty() || name.len() > MAX_FILENAME_BYTES || name == "." || name == ".." {
         return Err(TransferError::InvalidOffer("file name is empty, too long, or reserved".into()));
@@ -359,6 +412,40 @@ mod tests {
         assert_eq!(decode_packet(&encode_packet(&chunk).unwrap()).unwrap(), chunk);
         assert!(decode_packet(&[0xff, 0x00]).is_err());
         assert!(decode_packet(&[CONTROL_PACKET_TAG]).is_err());
+    }
+
+    #[test]
+    fn outgoing_file_streams_bounded_chunks_and_verifies_source() {
+        let directory = temp_dir();
+        let data = vec![0x5a; CHUNK_DATA_BYTES + 17];
+        let path = directory.join("outgoing.bin");
+        fs::write(&path, &data).unwrap();
+        let offer = offer_for_file(&path).unwrap();
+        let mut outgoing = OutgoingFile::open(&path, offer.clone()).unwrap();
+        let first = outgoing.next_chunk().unwrap().unwrap();
+        let second = outgoing.next_chunk().unwrap().unwrap();
+        assert_eq!(first.offset, 0);
+        assert_eq!(first.data.len(), CHUNK_DATA_BYTES);
+        assert_eq!(second.offset, CHUNK_DATA_BYTES as u64);
+        assert_eq!(second.data, vec![0x5a; 17]);
+        assert!(outgoing.next_chunk().unwrap().is_none());
+        assert!(outgoing.next_chunk().unwrap().is_none());
+
+        let mut changed = OutgoingFile::open(&path, offer).unwrap();
+        fs::write(&path, b"changed after offer").unwrap();
+        assert!(matches!(changed.next_chunk(), Err(TransferError::SourceChanged)));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn outgoing_file_supports_empty_files() {
+        let directory = temp_dir();
+        let path = directory.join("empty.txt");
+        fs::write(&path, []).unwrap();
+        let offer = offer_for_file(&path).unwrap();
+        let mut outgoing = OutgoingFile::open(&path, offer).unwrap();
+        assert!(outgoing.next_chunk().unwrap().is_none());
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
