@@ -138,11 +138,7 @@ internal class BridgePairingController(
         }
     }
 
-    fun approve(pending: BridgePendingPairing, otherScreenCode: String): Boolean {
-        if (otherScreenCode.length != 6 || otherScreenCode.any { !it.isDigit() } || otherScreenCode != pending.sas) {
-            postStatus("Verification code mismatch. Device was not trusted.")
-            return false
-        }
+    fun approve(pending: BridgePendingPairing): Boolean {
         val currentTrusted = try { trustedDevices() } catch (error: Exception) {
             pendingSessions.remove(pending.handle)
             BridgeNative.sessionClose(pending.handle)
@@ -164,16 +160,48 @@ internal class BridgePairingController(
             postStatus("Could not persist trusted-device approval.")
             return false
         }
+        val sent = JSONObject(BridgeNative.sessionSend(pending.handle, """{"type":"pairing_decision","decision":"accepted"}"""))
+        if (!sent.optBoolean("ok")) {
+            saveTrusted(currentTrusted)
+            pendingSessions.remove(pending.handle)
+            BridgeNative.sessionClose(pending.handle)
+            postStatus("Could not confirm pairing with the requesting device.")
+            return false
+        }
         pendingSessions.remove(pending.handle)
         activeSessions.put(pending.deviceId, pending.handle)?.let(BridgeNative::sessionClose)
-        postStatus("${pending.name} is trusted. Encrypted Noise session established.")
+        postStatus("${pending.name} is now connected and trusted.")
         return true
     }
 
     fun reject(pending: BridgePendingPairing) {
         pendingSessions.remove(pending.handle)
+        BridgeNative.sessionSend(pending.handle, """{"type":"pairing_decision","decision":"rejected"}""")
         BridgeNative.sessionClose(pending.handle)
-        postStatus("Pairing rejected. No trust record was created.")
+        postStatus("Pairing request rejected.")
+    }
+
+    private fun awaitRemoteApproval(handle: Long, remote: JSONObject, fingerprint: String) {
+        try {
+            val response = JSONObject(BridgeNative.sessionReceive(handle))
+            if (!response.optBoolean("ok")) error(response.optString("error", "The other device did not respond."))
+            val message = JSONObject(response.getString("message"))
+            check(message.optString("type") == "pairing_decision" && message.optString("decision") == "accepted") {
+                "The other device rejected the pairing request."
+            }
+            val peerId = remote.getString("id")
+            val current = trustedDevices()
+            val existing = current.firstOrNull { it.deviceId == peerId }
+            check(existing == null || existing.fingerprint == fingerprint) { "Trusted device identity changed." }
+            val all = current.filterNot { it.deviceId == peerId }.toMutableList()
+            all += BridgeTrustedDevice(peerId, remote.getString("display_name"), remote.getString("platform"), fingerprint, System.currentTimeMillis())
+            check(saveTrusted(all)) { "Could not save the trusted device." }
+            activeSessions.put(peerId, handle)?.let(BridgeNative::sessionClose)
+            postStatus("${remote.getString("display_name")} accepted. Device connected.")
+        } catch (error: Exception) {
+            BridgeNative.sessionClose(handle)
+            postStatus("Pairing was not approved: ${error.message}")
+        }
     }
 
     fun revoke(deviceId: String) {
@@ -253,10 +281,16 @@ internal class BridgePairingController(
             }
             return
         }
+        if (response.optString("role") == "initiator") {
+            postStatus("Request sent to ${remote.getString("display_name")}. Waiting for approval on that device…")
+            Thread({ awaitRemoteApproval(handle, remote, remoteFingerprint) }, "BridgePairApproval")
+                .apply { isDaemon = true; start() }
+            return
+        }
         pendingSessions[handle] = true
         val pending = BridgePendingPairing(
             handle = handle,
-            sas = response.getString("sas"),
+            sas = response.optString("sas"),
             fingerprint = remoteFingerprint,
             deviceId = peerId,
             name = remote.getString("display_name"),
