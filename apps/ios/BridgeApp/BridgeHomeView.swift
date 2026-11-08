@@ -5,6 +5,7 @@ private let amber = Color(red: 0.98, green: 0.75, blue: 0.14)
 private let bridgeBackground = Color(red: 0.04, green: 0.045, blue: 0.06)
 
 struct BridgeHomeView: View {
+    @StateObject private var discovery = BridgeDiscovery()
     @State private var identityStatus = "Preparing secure device identity…"
 
     var body: some View {
@@ -31,6 +32,12 @@ struct BridgeHomeView: View {
                         Text("Local-network discovery and secure pairing are being brought online in stages.")
                             .font(.system(size: 13)).foregroundStyle(.white.opacity(0.58))
                         Text(identityStatus).font(.system(size: 11, weight: .medium)).foregroundStyle(accent).padding(.top, 8)
+                        if !discovery.peers.isEmpty {
+                            Text("UNVERIFIED LOCAL DEVICES").font(.system(size: 9, weight: .bold)).tracking(1.2).foregroundStyle(amber).padding(.top, 10)
+                            ForEach(discovery.peers, id: \\.self) { peer in
+                                Text(peer).font(.system(size: 11, weight: .medium)).foregroundStyle(.white.opacity(0.72))
+                            }
+                        }
                         Text("PAIRING NOT AVAILABLE YET").font(.system(size: 9, weight: .bold))
                             .tracking(1.4).foregroundStyle(accent).padding(.top, 8)
                     }.padding(20).frame(maxWidth: .infinity, alignment: .leading)
@@ -49,6 +56,7 @@ struct BridgeHomeView: View {
             }
         }
         .task {
+            discovery.start()
             do {
                 _ = try BridgeIdentityStore.loadOrCreate()
                 identityStatus = "Device identity protected by iOS Keychain"

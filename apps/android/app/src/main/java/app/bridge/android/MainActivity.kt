@@ -59,6 +59,8 @@ private enum class BridgeTab(val label: String, val symbol: String) {
 }
 
 class MainActivity : ComponentActivity() {
+    private var discovery: BridgeDiscovery? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         try {
@@ -67,11 +69,20 @@ class MainActivity : ComponentActivity() {
         } catch (error: Exception) {
             pairingMessage = "Secure device identity unavailable: ${error.message}"
         }
+        discovery = BridgeDiscovery(this) { name, host, port ->
+            pairingMessage = "Found $name at $host:$port — discovery is unverified; secure pairing is not enabled."
+        }.also { it.start() }
         setContent {
             BridgeApp(onScanQr = {
                 pairingMessage = "QR pairing is temporarily disabled until authenticated Noise verification is connected."
             })
         }
+    }
+
+    override fun onDestroy() {
+        discovery?.stop()
+        discovery = null
+        super.onDestroy()
     }
 }
 
