@@ -109,8 +109,8 @@ final class BridgePairingController: ObservableObject {
                   String(cString: item.ifa_name).hasPrefix("en") else { continue }
             let ipv4 = address.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee.sin_addr }
             var buffer = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
-            var address = ipv4
-            if inet_ntop(AF_INET, &address, &buffer, socklen_t(buffer.count)) != nil {
+            var ipv4Address = ipv4
+            if inet_ntop(AF_INET, &ipv4Address, &buffer, socklen_t(buffer.count)) != nil {
                 let value = String(cString: buffer)
                 if value.hasPrefix("10.") || value.hasPrefix("192.168.") || value.range(of: "^172\\.(1[6-9]|2[0-9]|3[0-1])\\.", options: .regularExpression) != nil {
                     return value
