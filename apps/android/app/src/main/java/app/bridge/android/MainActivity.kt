@@ -1,9 +1,6 @@
 package app.bridge.android
 
 import android.os.Bundle
-import android.net.Uri
-import com.journeyapps.barcodescanner.ScanContract
-import com.journeyapps.barcodescanner.ScanOptions
 import android.os.Handler
 import android.os.Looper
 import java.net.ServerSocket
@@ -62,54 +59,26 @@ private enum class BridgeTab(val label: String, val symbol: String) {
 }
 
 class MainActivity : ComponentActivity() {
-    private val qrScanner = registerForActivityResult(ScanContract()) { result ->
-        val raw = result.contents
-        if (!raw.isNullOrBlank()) {
-            val uri = Uri.parse(raw)
-            val host = uri.getQueryParameter("host")
-            val port = uri.getQueryParameter("port")?.toIntOrNull() ?: BRIDGE_PORT
-            val code = uri.getQueryParameter("code")
-            if (uri.scheme == "bridge" && uri.host == "pair" && !host.isNullOrBlank() && code?.matches(Regex("\\d{6}")) == true) {
-                completeBridgePairing(host, port, code) { pairingMessage = it }
-            } else pairingMessage = "Invalid Bridge QR code"
-        } else pairingMessage = "QR scan cancelled"
-    }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         try {
             BridgeIdentityStore.loadOrCreate(this)
-            pairingMessage = "Device identity protected by Android Keystore. Pairing is not enabled yet."
+            pairingMessage = "Device identity protected by Android Keystore. Secure pairing is not enabled yet."
         } catch (error: Exception) {
             pairingMessage = "Secure device identity unavailable: ${error.message}"
         }
-        setContent { BridgeApp(onScanQr = { launchQrScanner() }) }
-    }
-
-    private fun launchQrScanner() {
-        qrScanner.launch(ScanOptions().setDesiredBarcodeFormats(ScanOptions.QR_CODE).setPrompt("Scan the QR code shown on Bridge for Windows").setBeepEnabled(false).setOrientationLocked(false))
+        setContent {
+            BridgeApp(onScanQr = {
+                pairingMessage = "QR pairing is temporarily disabled until authenticated Noise verification is connected."
+            })
+        }
     }
 }
 
 private var pairingMessage by mutableStateOf("Scan the QR code displayed by Bridge on your PC.")
 private const val BRIDGE_PORT = 45821
 
-private fun completeBridgePairing(host: String, port: Int, code: String, onStatus: (String) -> Unit) {
-    Thread {
-        try {
-            Socket().use { socket ->
-                socket.connect(InetSocketAddress(host, port), 5000)
-                socket.soTimeout = 5000
-                PrintWriter(socket.getOutputStream(), true).println("BRIDGE_PAIR/1|$code|Android")
-                val response = BufferedReader(InputStreamReader(socket.getInputStream())).readLine()
-                if (response == "BRIDGE_PAIRED/1") mainHandler.post { onStatus("Paired successfully with $host") }
-                else mainHandler.post { onStatus("Pairing rejected. Refresh the QR code on your PC.") }
-            }
-        } catch (error: Exception) {
-            mainHandler.post { onStatus("Pairing failed: ${error.message}") }
-        }
-    }.apply { isDaemon = true; name = "BridgePairing" }.start()
-}
+
 private val mainHandler = Handler(Looper.getMainLooper())
 
 private fun startBridgeListener(onStatus: (String) -> Unit) {
@@ -227,15 +196,15 @@ private fun BridgeApp(onScanQr: () -> Unit) {
             title = { Text("Pair a device", fontWeight = FontWeight.Bold) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text("Scan the QR code shown on Bridge for Windows. Pairing starts immediately after a valid scan.", color = Color.White, fontSize = 13.sp, lineHeight = 19.sp)
+                    Text("Secure pairing is not available yet. Bridge will only trust a device after an authenticated Noise handshake, matching verification codes, and explicit approval.", color = Color.White, fontSize = 13.sp, lineHeight = 19.sp)
                     Surface(color = Panel, shape = RoundedCornerShape(14.dp), modifier = Modifier.fillMaxWidth()) {
                         Column(modifier = Modifier.padding(18.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                             Text("▦", color = Accent, fontSize = 34.sp)
-                            Text("QR pairing", color = Color.White, fontWeight = FontWeight.SemiBold)
+                            Text("Authenticated pairing", color = Color.White, fontWeight = FontWeight.SemiBold)
                             Text(currentPairingMessage, color = Amber, fontSize = 11.sp)
                         }
                     }
-                    PrimaryAction("Scan QR code", onScanQr, Modifier.fillMaxWidth())
+                    PrimaryAction("Why is pairing disabled?", onScanQr, Modifier.fillMaxWidth())
                 }
             },
             confirmButton = {
@@ -429,8 +398,8 @@ private fun DevicesScreen(
         Panel {
             Eyebrow("DEVICE DISCOVERY")
             Text("Bring your devices together.", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-            Text("Discover devices on your local network and pair them securely.", color = Muted, fontSize = 12.sp, lineHeight = 18.sp)
-            PrimaryAction("▦   Scan QR to pair", onPair, Modifier.fillMaxWidth())
+            Text("Local discovery is being integrated with authenticated pairing. Unverified discovery results will never be treated as trusted devices.", color = Muted, fontSize = 12.sp, lineHeight = 18.sp)
+            PrimaryAction("▦   Secure pairing unavailable", onPair, Modifier.fillMaxWidth())
         }
         Panel {
             Box(modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp), contentAlignment = Alignment.Center) {

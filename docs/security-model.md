@@ -21,3 +21,8 @@ The security crate is a cryptographic foundation, not yet a complete production 
 5. Independent capability grants for clipboard, files, notifications, camera, microphone, and input control.
 
 Private keys must never leave their device. Any relay must be opt-in and must not store user content by default.
+
+
+## Legacy prototype pairing disabled
+
+The former `BRIDGE_PAIR/1` QR exchange only compared a short code over an unauthenticated TCP connection. It did not run Noise, pin a peer identity, or provide cryptographic authentication. It has been disabled in both native clients and must never be used to establish trust. The TCP ping/pong endpoint remains a connectivity diagnostic only and is not an authenticated session.
