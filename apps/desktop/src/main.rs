@@ -655,7 +655,7 @@ impl eframe::App for BridgeApp {
                                     }
                                 }
                             });
-    
+
                         }
                         ui.add_space(16.0);
                         #[cfg(windows)]
@@ -692,7 +692,7 @@ impl eframe::App for BridgeApp {
                                     Err(error) => self.network_status = format!("Could not revoke device: {error}"),
                                 }
                             }
-    
+
                         }
                         ui.add_space(16.0);
                         panel(ui, |ui| {
