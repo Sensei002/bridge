@@ -46,8 +46,8 @@ Implemented foundations:
 
 Still required before Milestone 1 is complete:
 
-- Native QR code rendering/display and camera scanning wired into Windows, Android, and iOS pairing screens.
-- End-to-end pairing tests on physical devices for Windows ↔ Android, Windows ↔ iOS, and Android ↔ iOS, including different Wi-Fi/router configurations.
+- Physical-device end-to-end pairing tests for Windows ↔ Android, Windows ↔ iOS, and Android ↔ iOS, including trusted reconnection and revocation.
+- Physical network/lifecycle validation across router configurations, isolation, sleep/resume, and network changes.
 - Final connection lifecycle, resource-limit, reconnection, and platform network-permission hardening.
 - Independent security review of the complete pairing flow.
 
@@ -82,7 +82,7 @@ The Windows client is a native Rust desktop application rendered by egui. It doe
 - No silent cloud upload or background relay.
 - Never commit secrets or signing keys.
 
-The current secure pairing foundation is implemented, but QR UI integration, physical-device validation, and independent review are still release gates. Do not treat a successful CI build or loopback test as proof of real-device interoperability.
+The native QR UI and secure invitation-to-Noise integration are implemented. Physical-device interoperability, lifecycle/network validation, and independent security review remain release gates. Do not treat a successful CI build or loopback test as proof of real-device interoperability.
 
 ## License
 
