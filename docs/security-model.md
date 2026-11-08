@@ -11,13 +11,14 @@ Bridge is local-first and permission-first. Discovery is never proof of identity
 - All three native clients can initiate or accept the shared Rust Noise XX handshake, exchange authenticated device descriptors, display a six-digit SAS, and require explicit matching-code approval before trusting a new device.
 - Reconnection to an existing trusted device pins its stored fingerprint. A changed fingerprint is rejected.
 - Trusted-device records and revocation persist on each platform: Windows stores public fingerprints in an app-local trust registry; Android encrypts the registry with an Android Keystore AES-GCM key; iOS stores it in Keychain with device-only accessibility. Revocation closes active sessions.
-- The Rust mobile FFI has loopback integration tests covering pairing, SAS agreement, and encrypted message exchange. CI builds the native Windows app, Android APK, iOS Simulator app, and shared Rust workspace.
+- The Rust mobile FFI has loopback integration tests covering pairing, SAS agreement, encrypted message exchange, and bounded session handling. Secure QR invitations carry the expected device ID and Noise fingerprint; the authenticated descriptor must match both before the session is registered. CI builds the native Windows app, Android APK, iOS Simulator app, and shared Rust workspace.
 
 ## Remaining before Milestone 1 can be called complete
 
-1. A new, secure QR invitation/bootstrap flow. The old QR prototype remains disabled because it used unauthenticated TCP. Direct local-network discovery pairing is active.
-2. Cross-platform end-to-end testing on physical Windows, Android, and iOS devices and different Wi-Fi/router configurations. CI loopback tests and simulator builds do not replace this.
-3. Operational hardening and review on connection limits, lifecycle handling, and platform-specific network permission behavior.
+1. Physical-device end-to-end pairing and trusted reconnection/revocation tests for Windows ↔ Android, Windows ↔ iOS, and Android ↔ iOS. CI loopback tests and simulator builds do not replace this.
+2. Physical network/lifecycle validation across router vendors, client isolation, IPv4/IPv6, sleep/resume, app backgrounding, and network changes.
+3. Final connection lifecycle, resource-limit, shutdown, and platform permission/error-path validation on real devices.
+4. Independent security review of discovery parsing, QR expiry/replay, Noise identity pinning, SAS confirmation, trust persistence, and revocation.
 
 Private keys must never leave their device. Discovery names, addresses, TXT records, and advertised fingerprints are attacker-controlled until verified by Noise. A matching SAS and explicit user approval are required for first-time trust.
 
