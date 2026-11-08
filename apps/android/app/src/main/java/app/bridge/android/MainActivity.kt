@@ -543,20 +543,6 @@ private fun DevicesScreen(
             }
         }
         Panel {
-                    Eyebrow("PAIRING REQUEST")
-                    Text("Allow this device to connect?", color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.Bold)
-                    Text("${request.name} wants to pair with this device.", color = Muted, fontSize = 12.sp)
-                    Text("${request.platform} · authenticated device identity", color = Muted, fontSize = 10.sp)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        PrimaryAction("Accept", { onApprove(request) }, Modifier.weight(1f))
-                        Button(onClick = { onReject(request) }, colors = ButtonDefaults.buttonColors(containerColor = PanelAlt, contentColor = Amber)) {
-                            Text("Reject")
-                        }
-                    }
-                }
-            }
-        }
-        Panel {
             Eyebrow("TRUSTED DEVICES")
             if (trusted.isEmpty()) {
                 Text("No trusted devices yet.", color = Muted, fontSize = 12.sp)
