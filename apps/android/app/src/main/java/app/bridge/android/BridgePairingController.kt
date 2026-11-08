@@ -127,7 +127,11 @@ internal class BridgePairingController(
     }
 
     fun trustedDevices(): List<BridgeTrustedDevice> {
-        val array = try { JSONArray(preferences.getString("devices", "[]")) } catch (_: Exception) { JSONArray() }
+        val encoded = preferences.getString("devices_encrypted_v1", null) ?: return emptyList()
+        val plaintext = BridgeIdentityStore.decryptLocalData(
+            appContext, TRUST_STORE_PURPOSE, android.util.Base64.decode(encoded, android.util.Base64.NO_WRAP)
+        )
+        val array = JSONArray(String(plaintext, Charsets.UTF_8))
         return (0 until array.length()).mapNotNull { index ->
             val item = array.optJSONObject(index) ?: return@mapNotNull null
             BridgeTrustedDevice(
@@ -201,8 +205,19 @@ internal class BridgePairingController(
                 .put("fingerprint", device.fingerprint)
                 .put("paired_at", device.pairedAt))
         }
-        return preferences.edit().putString("devices", array.toString()).commit()
+        val encrypted = BridgeIdentityStore.encryptLocalData(
+            appContext, TRUST_STORE_PURPOSE, array.toString().toByteArray(Charsets.UTF_8)
+        )
+        val encoded = android.util.Base64.encodeToString(encrypted, android.util.Base64.NO_WRAP)
+        return preferences.edit()
+            .putString("devices_encrypted_v1", encoded)
+            .remove("devices")
+            .commit()
     }
 
     private fun postStatus(message: String) = mainHandler.post { onStatus(message) }
+
+    private companion object {
+        const val TRUST_STORE_PURPOSE = "bridge.trusted.devices.v1"
+    }
 }

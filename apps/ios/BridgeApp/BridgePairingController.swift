@@ -42,8 +42,13 @@ final class BridgePairingController: ObservableObject {
             "platform": "ios",
             "protocol_version": 1
         ]
-        trusted = loadTrusted()
-        status = "iOS Keychain identity ready · shared Rust Noise XX enabled."
+        do {
+            trusted = try BridgeTrustedDeviceStore.load()
+        } catch {
+            status = "Trusted-device Keychain is unavailable: \(error.localizedDescription)"
+            return
+        }
+        status = "iOS Keychain identity and trusted-device store ready · shared Rust Noise XX enabled."
         let request = makeRequest(bindIp: "0.0.0.0")
         acceptTask = Task {
             while !Task.isCancelled {
@@ -85,9 +90,11 @@ final class BridgePairingController: ObservableObject {
             deviceId: item.deviceId, name: item.name, platform: item.platform,
             fingerprint: item.fingerprint, pairedAt: Date().timeIntervalSince1970
         ))
-        guard saveTrusted(next) else {
+        do {
+            try BridgeTrustedDeviceStore.save(next)
+        } catch {
             BridgeNativeClient.sessionClose(item.handle)
-            status = "Could not persist trusted-device approval."
+            status = "Could not persist trusted-device approval: \(error.localizedDescription)"
             return
         }
         trusted = next
@@ -104,8 +111,10 @@ final class BridgePairingController: ObservableObject {
 
     func revoke(_ deviceId: String) {
         let next = trusted.filter { $0.deviceId != deviceId }
-        guard saveTrusted(next) else {
-            status = "Could not persist device revocation."
+        do {
+            try BridgeTrustedDeviceStore.save(next)
+        } catch {
+            status = "Could not persist device revocation: \(error.localizedDescription)"
             return
         }
         trusted = next
@@ -183,23 +192,16 @@ final class BridgePairingController: ObservableObject {
         status = "Authenticated peer found. Compare the six-digit code on both devices."
     }
 
-    private func loadTrusted() -> [BridgeTrustedDevice] {
-        guard let data = UserDefaults.standard.data(forKey: storeKey),
-              let values = try? JSONDecoder().decode([StoredDevice].self, from: data) else { return [] }
-        return values.map {
-            BridgeTrustedDevice(deviceId: $0.deviceId, name: $0.name, platform: $0.platform, fingerprint: $0.fingerprint, pairedAt: $0.pairedAt)
-        }
-    }
-
-    private func saveTrusted(_ devices: [BridgeTrustedDevice]) -> Bool {
-        let values = devices.map { StoredDevice(deviceId: $0.deviceId, name: $0.name, platform: $0.platform, fingerprint: $0.fingerprint, pairedAt: $0.pairedAt) }
-        guard let data = try? JSONEncoder().encode(values) else { return false }
-        UserDefaults.standard.set(data, forKey: storeKey)
-        return UserDefaults.standard.data(forKey: storeKey) == data
-    }
 }
 
-private struct StoredDevice: Codable {
+struct StoredDevice: Codable {
+    let deviceId: String
+    let name: String
+    let platform: String
+    let fingerprint: String
+    let pairedAt: Double
+}
+
     let deviceId: String
     let name: String
     let platform: String

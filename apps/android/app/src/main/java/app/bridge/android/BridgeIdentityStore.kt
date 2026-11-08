@@ -49,6 +49,25 @@ internal object BridgeIdentityStore {
         return privateKey
     }
 
+    /** Encrypt non-secret local records with a purpose-bound Keystore key. */
+    fun encryptLocalData(context: Context, purpose: String, plaintext: ByteArray): ByteArray {
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.ENCRYPT_MODE, wrappingKey())
+        cipher.updateAAD(purpose.toByteArray(Charsets.UTF_8))
+        return cipher.iv + cipher.doFinal(plaintext)
+    }
+
+    /** Decrypt a purpose-bound local record; authentication failures are fatal. */
+    fun decryptLocalData(context: Context, purpose: String, blob: ByteArray): ByteArray {
+        require(blob.size > 12 + 16) { "Encrypted Bridge data is truncated" }
+        val iv = blob.copyOfRange(0, 12)
+        val ciphertext = blob.copyOfRange(12, blob.size)
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.DECRYPT_MODE, wrappingKey(), GCMParameterSpec(128, iv))
+        cipher.updateAAD(purpose.toByteArray(Charsets.UTF_8))
+        return cipher.doFinal(ciphertext)
+    }
+
     private fun wrappingKey(): SecretKey {
         val keyStore = KeyStore.getInstance(KEYSTORE).apply { load(null) }
         (keyStore.getKey(KEY_ALIAS, null) as? SecretKey)?.let { return it }
