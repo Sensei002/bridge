@@ -4,7 +4,7 @@
 //! network peers or establish encryption; callers must not expose it over an
 //! unauthenticated transport.
 use std::collections::{HashMap, HashSet};
-use bridge_protocol::{DeviceDescriptor, DeviceId, PairingRequest, ProtocolValidationError, MAX_PAIRING_WINDOW_MS};
+use bridge_protocol::{DeviceDescriptor, DeviceId, PairingRequest, Platform, ProtocolValidationError, MAX_PAIRING_WINDOW_MS};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -85,6 +85,7 @@ pub struct QrInvitation {
     pub version: u8,
     pub device_id: DeviceId,
     pub display_name: String,
+    pub platform: Platform,
     pub host: String,
     pub port: u16,
     pub fingerprint: String,
@@ -126,6 +127,7 @@ impl QrInvitation {
             version: 1,
             device_id: device.id,
             display_name: device.display_name.clone(),
+            platform: device.platform.clone(),
             host: host.to_owned(),
             port,
             fingerprint: fingerprint.to_ascii_lowercase(),
@@ -234,6 +236,7 @@ mod tests {
             &device, "192.168.1.25", 45821, &"ab".repeat(32), 10_000
         ).unwrap();
         let uri = invitation.encode().unwrap();
+        assert_eq!(invitation.platform, Platform::Android);
         assert_eq!(QrInvitation::decode(&uri, 10_001).unwrap(), invitation);
         assert_eq!(
             QrInvitation::decode(&uri, 10_000 + QR_INVITATION_TTL_MS),
