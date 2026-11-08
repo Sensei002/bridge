@@ -19,6 +19,9 @@
 - [x] Android NSD and iOS Bonjour browsing for Bridge service candidates
 - [x] Durable trust/revocation transaction APIs with rollback on storage failure
 - [x] Replay rejection and pinned-fingerprint negative-path tests
+- [x] Windows UI integration for live mDNS discovery and unverified candidate display
+- [x] Android NSD browsing for Bridge service candidates
+- [x] iOS Bonjour browsing for Bridge service candidates
 - [ ] Windows UI integration for Noise handshake, matching SAS display, and user-confirmed trust
 - [ ] Android NSD candidate selection + Keystore-backed Noise client integration
 - [ ] iOS Bonjour candidate selection + Keychain-backed Noise client integration

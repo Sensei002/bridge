@@ -61,6 +61,7 @@ struct BridgeApp {
     auto_accept: bool,
     network_ip: String,
     network_status: String,
+    discovered_peers: Vec<String>,
     network_rx: Receiver<String>,
     network_tx: Sender<String>,
     brand_texture: Option<egui::TextureHandle>,
@@ -82,6 +83,7 @@ impl Default for BridgeApp {
             auto_accept: false,
             network_ip: String::new(),
             network_status: identity_status,
+            discovered_peers: Vec::new(),
             network_rx,
             network_tx,
             brand_texture: None,
@@ -157,7 +159,7 @@ fn start_local_discovery(status: Sender<String>) {
                     continue;
                 }
                 let _ = status.send(format!(
-                    "Unverified Bridge candidate: {} at {} (fingerprint {})",
+                    "DISCOVERED|{} · {} · fingerprint {}",
                     peer.record.display_name,
                     peer.address,
                     &peer.record.public_key_fingerprint[..8],
@@ -266,7 +268,14 @@ fn feature_row(ui: &mut egui::Ui, symbol: &str, title: &str, detail: &str, statu
 impl eframe::App for BridgeApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         for message in self.network_rx.try_iter() {
-            self.network_status = message;
+            if let Some(peer) = message.strip_prefix("DISCOVERED|") {
+                if !self.discovered_peers.iter().any(|known| known == peer) {
+                    self.discovered_peers.push(peer.to_owned());
+                }
+                self.network_status = format!("Found unverified local peer: {peer}");
+            } else {
+                self.network_status = message;
+            }
         }
         ctx.request_repaint_after(Duration::from_millis(250));
         if self.brand_texture.is_none() {
@@ -459,6 +468,25 @@ impl eframe::App for BridgeApp {
                                 if primary_button(ui, "Start pairing") { self.show_pair_dialog = true; }
                                 ui.add_space(20.0);
                             });
+                        });
+                        ui.add_space(16.0);
+                        panel(ui, |ui| {
+                            eyebrow(ui, "DISCOVERED ON YOUR NETWORK");
+                            ui.add_space(8.0);
+                            if self.discovered_peers.is_empty() {
+                                muted(ui, "Searching for Bridge devices… Results are unverified until secure pairing is completed.");
+                            } else {
+                                for peer in &self.discovered_peers {
+                                    ui.horizontal(|ui| {
+                                        ui.label(egui::RichText::new("●").color(AMBER));
+                                        ui.label(egui::RichText::new(peer).color(TEXT).size(12.0));
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            muted(ui, "UNVERIFIED");
+                                        });
+                                    });
+                                    ui.add_space(5.0);
+                                }
+                            }
                         });
                         ui.add_space(16.0);
                         panel(ui, |ui| {

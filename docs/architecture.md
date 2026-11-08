@@ -13,7 +13,9 @@ Bridge uses native clients with a shared Rust domain layer, versioned wire proto
 - `bridge-protocol`: stable, versioned message types and validation.
 - `bridge-core`: device registry, explicit-consent pairing lifecycle, and persistent public trust records.
 - `bridge-security`: Noise XX over Curve25519, ChaChaPoly, and SHA-256.
-- `bridge-network`: mDNS/DNS-SD discovery, bounded TCP framing, Noise XX handshake, and short authentication string generation.
+- `bridge-network`: mDNS/DNS-SD discovery, bounded TCP framing, Noise XX handshake, short authentication string generation, and persisted-key fingerprint derivation.
+
+Windows advertises its local Bridge service using the persisted Noise identity. Android uses NSD and iOS uses Bonjour to browse for candidates. Candidate metadata remains explicitly untrusted; native Noise XX, SAS approval, and platform trust-store UI are still being integrated.
 
 ## Trust and identity
 

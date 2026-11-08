@@ -1,10 +1,32 @@
-# QR pairing (Windows → Android)
+# Secure pairing status
 
-1. Open Bridge on Windows and choose **Pair a device**. A QR code and six-digit one-time code are displayed.
-2. On Android, open **Devices** and tap **Scan QR to pair**.
-3. Allow camera access, scan the Windows QR code. Android connects to the address embedded in the QR and submits the one-time code automatically.
-4. Windows accepts the first valid code and reports the paired Android device.
+QR pairing is currently disabled in the native clients. The previous QR exchange
+was an unauthenticated prototype: it accepted a short code over a plain TCP
+connection and did not bind the remote device to a cryptographic identity. It
+must not be used to establish trust.
 
-Both devices must be on the same local network. Allow Bridge through Windows Firewall on private networks. TCP port 45821 is used.
+The local-network discovery layer is now active:
+- Windows advertises a Bridge DNS-SD service.
+- Android browses with Android NSD.
+- iOS browses with Bonjour.
+- Every discovered result is an unverified candidate only. Names, addresses,
+  TXT records, and advertised fingerprints are attacker-controlled until
+  authenticated by the Noise handshake.
 
-This is the first pairing handshake milestone. The one-time code is a short-lived, single-use pairing secret, but this version does not yet persist trusted identities or complete the Noise XX encrypted identity verification. Do not treat it as production-grade secure pairing yet.
+The secure pairing flow still required before QR pairing can be re-enabled:
+
+1. Exchange a versioned, short-lived QR payload containing only the candidate
+   endpoint and a random pairing nonce. The QR payload is not an authentication
+   credential.
+2. Complete the three-message Noise XX handshake using each device's
+   OS-protected static identity key.
+3. Derive the same six-digit short authentication string from the authenticated
+   Noise static keys and display it on both devices.
+4. Require the user to compare both displays and explicitly approve the exact
+   peer fingerprint. A mismatch or timeout aborts the attempt.
+5. Persist the approved public fingerprint in the local trust store. Future
+   sessions must pin that fingerprint; revocation must persist immediately.
+
+Until the native handshake and approval screens are connected end to end, the
+clients must continue to show pairing as unavailable. A successful TCP ping,
+mDNS result, or matching device name is never proof of identity.
