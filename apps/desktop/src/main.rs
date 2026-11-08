@@ -7,11 +7,11 @@ use eframe::egui;
 #[cfg(windows)]
 use bridge_network::{accept_noise_xx, connect_noise_xx, connect_to_peer, local_key_fingerprint, peer_from_event, DiscoveredPeer, DiscoveryRecord, LocalDiscovery, NoiseConnection};
 #[cfg(windows)]
-use bridge_core::{pairing::QrInvitation, trust::{SasConfirmation, TrustStore}};
+use bridge_core::trust::{SasConfirmation, TrustStore};
 #[cfg(windows)]
 use bridge_protocol::{DeviceDescriptor, DeviceId, Platform, PROTOCOL_VERSION};
 #[cfg(windows)]
-use std::net::{TcpListener, UdpSocket};
+use std::net::TcpListener;
 #[cfg(windows)]
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -65,7 +65,7 @@ impl Page {
 struct PendingApproval {
     connection: NoiseConnection,
     descriptor: DeviceDescriptor,
-    remote_code: String,
+    incoming: bool,
     already_trusted: bool,
 }
 
@@ -107,8 +107,6 @@ struct BridgeApp {
     #[cfg(windows)]
     network_tx: Sender<String>,
     brand_texture: Option<egui::TextureHandle>,
-    #[cfg(windows)]
-    invitation_texture: Option<egui::TextureHandle>,
 }
 
 impl Default for BridgeApp {
@@ -165,8 +163,6 @@ impl Default for BridgeApp {
             #[cfg(windows)]
             network_tx,
             brand_texture: None,
-            #[cfg(windows)]
-            invitation_texture: None,
         }
     }
 }
@@ -271,7 +267,7 @@ fn start_secure_listener(status: Sender<String>, pending: Sender<PendingApproval
                                 };
                                 let _ = status.send(message);
                                 if pending.send(PendingApproval {
-                                    connection, descriptor, remote_code: String::new(), already_trusted
+                                    connection, descriptor, incoming: !already_trusted, already_trusted
                                 }).is_err() {
                                     let _ = status.send("Pairing window closed; pending session discarded".into());
                                 }
@@ -309,11 +305,18 @@ fn start_pairing(peer: DiscoveredPeer, expected: Option<String>, status: Sender<
                     }
                     true
                 } else { false };
-                Ok(PendingApproval { connection, descriptor, remote_code: String::new(), already_trusted })
+                Ok(PendingApproval { connection, descriptor, incoming: false, already_trusted })
             });
         match result {
             Ok(approval) => {
-                let _ = status.send("Noise XX handshake complete. Compare the six-digit code on both devices.".into());
+                if !approval.already_trusted {
+                    let mut approval = approval;
+                    let accepted = receive_pairing_decision(&mut approval.connection);
+                    if let Err(error) = accepted {
+                        let _ = status.send(format!("Pairing was not approved: {error}"));
+                        return;
+                    }
+                }
                 if pending.send(approval).is_err() {
                     let _ = status.send("Pairing window closed; session discarded".into());
                 }
@@ -321,6 +324,37 @@ fn start_pairing(peer: DiscoveredPeer, expected: Option<String>, status: Sender<
             Err(error) => { let _ = status.send(format!("Secure pairing failed: {error}")); }
         }
     });
+}
+
+#[cfg(windows)]
+fn send_pairing_decision(connection: &mut NoiseConnection, decision: &str) -> Result<(), String> {
+    let message = serde_json::json!({"type":"pairing_decision","decision":decision}).to_string();
+    let mut encrypted = vec![0_u8; bridge_network::MAX_FRAME_BYTES];
+    let length = connection.transport.write_message(message.as_bytes(), &mut encrypted)
+        .map_err(|error| error.to_string())?;
+    bridge_network::write_frame(&mut connection.stream, &encrypted[..length])
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(windows)]
+fn receive_pairing_decision(connection: &mut NoiseConnection) -> Result<(), String> {
+    connection.stream.set_read_timeout(Some(Duration::from_secs(120)))
+        .map_err(|error| error.to_string())?;
+    let result = (|| {
+        let encrypted = bridge_network::read_frame(&mut connection.stream).map_err(|error| error.to_string())?;
+        let mut plaintext = vec![0_u8; bridge_network::MAX_FRAME_BYTES];
+        let length = connection.transport.read_message(&encrypted, &mut plaintext)
+            .map_err(|error| error.to_string())?;
+        let message: serde_json::Value = serde_json::from_slice(&plaintext[..length])
+            .map_err(|error| error.to_string())?;
+        if message["type"] == "pairing_decision" && message["decision"] == "accepted" {
+            Ok(())
+        } else {
+            Err("the other device rejected the request".into())
+        }
+    })();
+    let _ = connection.stream.set_read_timeout(Some(Duration::from_secs(10)));
+    result
 }
 
 #[cfg(windows)]
