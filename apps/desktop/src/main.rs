@@ -107,6 +107,8 @@ impl Default for BridgeApp {
             start_secure_listener(network_tx.clone(), pairing_tx.clone());
             start_local_discovery(network_tx.clone(), peer_tx);
         }
+        #[cfg(not(windows))]
+        let _ = &network_tx;
         Self {
             selected: Page::Overview,
             show_pair_dialog: false,
@@ -132,8 +134,6 @@ impl Default for BridgeApp {
             network_rx,
             #[cfg(windows)]
             network_tx,
-            #[cfg(not(windows))]
-            { let _ = network_tx; }
             brand_texture: None,
         }
     }
