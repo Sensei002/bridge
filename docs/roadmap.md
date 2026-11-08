@@ -7,12 +7,19 @@
 - [x] Device registry
 - [x] Pairing consent and expiry state machine
 
-## Next: authenticated local connectivity
-- [ ] Persistent per-device cryptographic identity
-- [ ] QR-based peer verification and authenticated key agreement
-- [ ] mDNS/DNS-SD discovery with spoofing-safe UI
-- [ ] Encrypted local sessions and replay protection
-- [ ] Persistent trusted-device management and revocation
+## Milestone 1: authenticated local connectivity
+- [x] Shared Rust local-network discovery module using mDNS/DNS-SD
+- [x] Versioned discovery records with device IDs, platform, endpoint and public-key fingerprint
+- [x] Bounded length-prefixed TCP framing
+- [x] Noise XX initiator/responder transport primitives
+- [x] SHA-256 public-key fingerprints and symmetric six-digit short authentication strings
+- [x] Expected-fingerprint verification before a session is returned
+- [ ] OS-backed persistent identity adapters (Windows DPAPI/Credential Manager, Android Keystore, Apple Keychain)
+- [ ] Windows UI integration for live discovery and user-confirmed SAS
+- [ ] Android NSD discovery + Keystore-backed Noise client integration
+- [ ] iOS Bonjour discovery + Keychain-backed Noise client integration
+- [ ] Persist trusted peers and revocation on each platform
+- [ ] Cross-platform end-to-end tests on physical devices
 
 ## Device capabilities
 - [ ] Capability permission model
