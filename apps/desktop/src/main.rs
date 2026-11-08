@@ -881,7 +881,7 @@ impl eframe::App for BridgeApp {
         if !self.pending_pairings.is_empty() {
             let mut approve_index = None;
             let mut reject_index = None;
-            egui::Window::new("Verify this device")
+            egui::Window::new("Pairing request")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
