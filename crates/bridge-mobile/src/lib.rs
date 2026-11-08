@@ -291,12 +291,18 @@ pub extern "C" fn bridge_session_receive(handle: u64) -> *mut c_char {
     let result: Result<String, String> = sessions().lock().map_err(|_| "session registry poisoned".to_string())
         .and_then(|mut map| {
             let connection = map.get_mut(&handle).ok_or_else(|| "session not found".to_string())?;
-            let encrypted = bridge_network::read_frame(&mut connection.stream)
-                .map_err(|e: bridge_network::NetworkError| e.to_string())?;
-            let mut plaintext = vec![0_u8; 65_535];
-            let length = connection.transport.read_message(&encrypted, &mut plaintext)
-                .map_err(|e: snow::Error| e.to_string())?;
-            String::from_utf8(plaintext[..length].to_vec()).map_err(|e: std::string::FromUtf8Error| e.to_string())
+            connection.stream.set_read_timeout(Some(Duration::from_secs(120)))
+                .map_err(|e| e.to_string())?;
+            let received = (|| {
+                let encrypted = bridge_network::read_frame(&mut connection.stream)
+                    .map_err(|e: bridge_network::NetworkError| e.to_string())?;
+                let mut plaintext = vec![0_u8; 65_535];
+                let length = connection.transport.read_message(&encrypted, &mut plaintext)
+                    .map_err(|e: snow::Error| e.to_string())?;
+                String::from_utf8(plaintext[..length].to_vec()).map_err(|e: std::string::FromUtf8Error| e.to_string())
+            })();
+            let _ = connection.stream.set_read_timeout(Some(Duration::from_secs(10)));
+            received
         });
     let json = serde_json::json!({"ok": result.is_ok(), "message": result.as_ref().ok(), "error": result.err()});
     CString::new(json.to_string()).unwrap().into_raw()
