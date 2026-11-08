@@ -11,6 +11,7 @@ import android.net.nsd.NsdServiceInfo
 internal class BridgeDiscovery(
     context: Context,
     private val onPeerFound: (BridgePeer) -> Unit,
+    private val onPeerLost: (String) -> Unit,
     private val onStatus: (String) -> Unit
 ) {
     private val manager = context.applicationContext.getSystemService(NsdManager::class.java)
@@ -66,7 +67,9 @@ internal class BridgeDiscovery(
             @Suppress("DEPRECATION")
             manager.resolveService(serviceInfo, resolveListener)
         }
-        override fun onServiceLost(serviceInfo: NsdServiceInfo) = Unit
+        override fun onServiceLost(serviceInfo: NsdServiceInfo) {
+            if (!stopped) onPeerLost(serviceInfo.serviceName)
+        }
     }
 
     fun start(deviceId: String, displayName: String, fingerprint: String) {
