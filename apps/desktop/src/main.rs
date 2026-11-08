@@ -10,8 +10,8 @@ use bridge_network::{accept_noise_xx, connect_noise_xx, connect_to_peer, local_k
 use bridge_core::trust::{SasConfirmation, TrustStore};
 #[cfg(windows)]
 use bridge_protocol::{DeviceDescriptor, DeviceId, Platform, PROTOCOL_VERSION};
-use std::io::{BufRead, BufReader, Write};
-use std::net::{TcpListener, TcpStream};
+#[cfg(windows)]
+use std::net::TcpListener;
 #[cfg(windows)]
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -245,27 +245,6 @@ fn start_pairing(peer: DiscoveredPeer, expected: Option<String>, status: Sender<
     });
 }
 
-fn start_network_listener(status: Sender<String>) {
-    thread::spawn(move || {
-        let listener = match TcpListener::bind(("0.0.0.0", NETWORK_PORT)) {
-            Ok(listener) => listener,
-            Err(error) => {
-                let _ = status.send(format!("Could not listen on port {NETWORK_PORT}: {error}"));
-                return;
-            }
-        };
-        for stream in listener.incoming() {
-            match stream {
-                Ok(stream) => {
-                    let status = status.clone();
-                    thread::spawn(move || handle_network_client(stream, status));
-                }
-                Err(error) => { let _ = status.send(format!("Network listener error: {error}")); }
-            }
-        }
-    });
-}
-
 #[cfg(windows)]
 fn start_local_discovery(status: Sender<String>, peers: Sender<DiscoveredPeer>) {
     thread::spawn(move || {
@@ -317,50 +296,6 @@ fn start_local_discovery(status: Sender<String>, peers: Sender<DiscoveredPeer>) 
                 let _ = peers.send(peer);
             }
         }
-    });
-}
-
-fn handle_network_client(mut stream: TcpStream, status: Sender<String>) {
-    let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_else(|_| "unknown device".into());
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-    let mut line = String::new();
-    let result = {
-        let mut reader = BufReader::new(&mut stream);
-        reader.read_line(&mut line)
-    };
-    match result {
-        Ok(_) if line.trim() == "BRIDGE_PING/1" => {
-            let _ = stream.write_all(b"BRIDGE_PONG/1\n");
-            let _ = status.send(format!("Bridge network test succeeded with {peer}"));
-        }
-        Ok(_) if line.trim().starts_with("BRIDGE_PAIR/1|") => {
-            let _ = stream.write_all(b"BRIDGE_PAIRING_DISABLED/1\n");
-            let _ = status.send(format!("Rejected legacy unauthenticated pairing attempt from {peer}"));
-        }
-        Ok(_) => { let _ = status.send(format!("Received an unknown test message from {peer}")); }
-        Err(error) => { let _ = status.send(format!("Connection from {peer} failed: {error}")); }
-    }
-}
-
-fn connect_to_peer(host: String, status: Sender<String>) {
-    thread::spawn(move || {
-        let address = format!("{host}:{NETWORK_PORT}");
-        let result = TcpStream::connect_timeout(
-            &address.parse().unwrap_or_else(|_| "127.0.0.1:0".parse().unwrap()),
-            Duration::from_secs(4),
-        ).and_then(|mut stream| {
-            stream.set_read_timeout(Some(Duration::from_secs(4)))?;
-            stream.write_all(b"BRIDGE_PING/1\n")?;
-            let mut response = String::new();
-            BufReader::new(stream).read_line(&mut response)?;
-            if response.trim() == "BRIDGE_PONG/1" { Ok(()) }
-            else { Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "unexpected Bridge response")) }
-        });
-        let message = match result {
-            Ok(()) => format!("Connection test succeeded with {host}"),
-            Err(error) => format!("Could not connect to {host}:{NETWORK_PORT}: {error}"),
-        };
-        let _ = status.send(message);
     });
 }
 
@@ -696,26 +631,11 @@ impl eframe::App for BridgeApp {
                         }
                         ui.add_space(16.0);
                         panel(ui, |ui| {
-                            eyebrow(ui, "NETWORK TEST · TCP");
-                            ui.add_space(6.0);
-                            ui.label(egui::RichText::new("Test a direct local connection").strong().size(17.0));
-                            muted(ui, "Both devices must be on the same Wi-Fi/LAN and Bridge must be open on both.");
-                            ui.horizontal(|ui| {
-                                ui.label("Peer IP");
-                                ui.add(egui::TextEdit::singleline(&mut self.network_ip)
-                                    .hint_text("e.g. 192.168.1.25").desired_width(190.0));
-                                if primary_button(ui, "Test connection") {
-                                    let host = self.network_ip.trim().to_string();
-                                    if !host.is_empty() { connect_to_peer(host, self.network_tx.clone()); }
-                                    else { self.network_status = "Enter the other device's local IP address.".into(); }
-                                }
-                            });
-                            ui.add_space(6.0);
+                            eyebrow(ui, "SECURE TRANSPORT");
+                            ui.label(egui::RichText::new("Authenticated local sessions").strong().size(17.0));
+                            muted(ui, "Bridge accepts Noise XX sessions on TCP 45821. A connection is retained only after both devices compare the same six-digit code and explicitly approve the peer.");
                             ui.label(egui::RichText::new(&self.network_status).size(12.0).color(AMBER));
-                            muted(ui, "Bridge test port: TCP 45821 · This test exchanges a harmless ping/pong only.");
                         });
-                        ui.add_space(12.0);
-                        muted(ui, "Automatic discovery and encrypted pairing are the next networking milestones.");
                     }
                     Page::Transfers => {
                         ui.horizontal(|ui| {

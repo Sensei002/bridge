@@ -101,7 +101,7 @@ fn pair_accept(request: PairRequest) -> Result<PairResult, String> {
 pub unsafe extern "C" fn bridge_identity_fingerprint(private_key_hex: *const c_char) -> *mut c_char {
     if private_key_hex.is_null() { return CString::new("{\"ok\":false,\"error\":\"null key\"}").unwrap().into_raw(); }
     let result: Result<String, String> = CStr::from_ptr(private_key_hex).to_str()
-        .map_err(|e| e.to_string())
+        .map_err(|e: std::str::Utf8Error| e.to_string())
         .and_then(decode_hex)
         .and_then(|key| bridge_network::local_key_fingerprint(&key).map_err(|e| e.to_string()));
     let json = match result {
