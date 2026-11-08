@@ -140,6 +140,7 @@ impl Default for BridgeApp {
     }
 }
 
+#[cfg(windows)]
 const NETWORK_PORT: u16 = 45821;
 
 #[cfg(windows)]

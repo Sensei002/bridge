@@ -81,8 +81,10 @@ fn pair_connect(request: PairRequest) -> Result<PairResult, String> {
         .next().ok_or("peer host did not resolve")?;
     let stream = TcpStream::connect_timeout(&address, Duration::from_secs(5))
         .map_err(|e| e.to_string())?;
-    let connection = connect_noise_xx(stream, &key, request.expected_fingerprint.as_deref())
-        .map_err(|e: bridge_network::NetworkError| e.to_string())?;
+    let connection = match connect_noise_xx(stream, &key, request.expected_fingerprint.as_deref()) {
+        Ok(connection) => connection,
+        Err(error) => return Err(error.to_string()),
+    };
     register(connection, &request.local_device)
 }
 
@@ -107,8 +109,10 @@ fn pair_accept(request: PairRequest) -> Result<PairResult, String> {
             Err(error) => return Err(error.to_string()),
         }
     };
-    let connection = accept_noise_xx(stream, &key, request.expected_fingerprint.as_deref())
-        .map_err(|e: bridge_network::NetworkError| e.to_string())?;
+    let connection = match accept_noise_xx(stream, &key, request.expected_fingerprint.as_deref()) {
+        Ok(connection) => connection,
+        Err(error) => return Err(error.to_string()),
+    };
     register(connection, &request.local_device)
 }
 
