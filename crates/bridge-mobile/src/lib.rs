@@ -108,7 +108,7 @@ fn pair_accept(request: PairRequest) -> Result<PairResult, String> {
         }
     };
     let connection = accept_noise_xx(stream, &key, request.expected_fingerprint.as_deref())
-        .map_err(|e| e.to_string())?;
+        .map_err(|e: bridge_network::NetworkError| e.to_string())?;
     register(connection, &request.local_device)
 }
 
