@@ -623,6 +623,14 @@ impl eframe::App for BridgeApp {
                 page_header(ui, self.selected);
                 match self.selected {
                     Page::Overview => {
+                        #[cfg(windows)]
+                        let trusted_count = self.trust_store.list().len();
+                        #[cfg(not(windows))]
+                        let trusted_count = 0usize;
+                        #[cfg(windows)]
+                        let active_count = self.active_sessions.len();
+                        #[cfg(not(windows))]
+                        let active_count = 0usize;
                         ui.columns(2, |columns| {
                             panel(&mut columns[0], |ui| {
                                 eyebrow(ui, "Your ecosystem");
@@ -639,8 +647,8 @@ impl eframe::App for BridgeApp {
                                 ui.horizontal(|ui| {
                                     ui.label(egui::RichText::new("◎").size(30.0).color(ACCENT));
                                     ui.vertical(|ui| {
-                                        ui.label(egui::RichText::new("Ready when you are").strong().size(16.0));
-                                        muted(ui, "No devices connected yet");
+                                        ui.label(egui::RichText::new(if active_count == 0 { "Ready when you are" } else { "Secure session active" }).strong().size(16.0));
+                                        muted(ui, &format!("{active_count} active secure session(s)"));
                                     });
                                 });
                                 ui.add_space(12.0);
@@ -651,7 +659,7 @@ impl eframe::App for BridgeApp {
                         eyebrow(ui, "At a glance");
                         ui.add_space(10.0);
                         ui.columns(3, |cols| {
-                            metric(&mut cols[0], "0", "Trusted devices", "Nothing paired yet");
+                            metric(&mut cols[0], &trusted_count.to_string(), "Trusted devices", if trusted_count == 1 { "1 device approved" } else { "Approved devices on this PC" });
                             metric(&mut cols[1], "0", "Active transfers", "No files moving");
                             metric(&mut cols[2], "Private", "Network mode", "Local-first by design");
                         });
