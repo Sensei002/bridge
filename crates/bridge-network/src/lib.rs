@@ -57,6 +57,15 @@ pub struct DiscoveredPeer {
     pub instance_name: String,
 }
 
+/// Result of a completed Noise XX handshake. The fingerprint is the
+/// authenticated remote static key, not the untrusted mDNS advertisement.
+pub struct NoiseConnection {
+    pub stream: TcpStream,
+    pub transport: TransportState,
+    pub sas: String,
+    pub remote_fingerprint: String,
+}
+
 pub struct LocalDiscovery {
     daemon: ServiceDaemon,
     instance_fullname: String,
@@ -211,7 +220,7 @@ pub fn connect_noise_xx(
     mut stream: TcpStream,
     private_key: &[u8],
     expected_remote_fingerprint: Option<&str>,
-) -> Result<(TcpStream, TransportState, String), NetworkError> {
+) -> Result<NoiseConnection, NetworkError> {
     configure_stream(&stream)?;
     let mut state = initiator_handshake(private_key)?;
     write_frame(&mut stream, &write_noise(&mut state)?)?;
@@ -259,7 +268,12 @@ fn finish_handshake(
         }
     }
     let sas = short_authentication_string(private_key, remote)?;
-    Ok((stream, state.into_transport_mode()?, sas))
+    Ok(NoiseConnection {
+        stream,
+        transport: state.into_transport_mode()?,
+        sas,
+        remote_fingerprint: actual,
+    })
 }
 
 pub fn fingerprint(public_key: &[u8]) -> String {
@@ -390,17 +404,18 @@ mod tests {
             accept_noise_xx(stream, &b_private, Some(&fingerprint(&a_public)))
         });
         let stream = TcpStream::connect(address).unwrap();
-        let (mut client_stream, mut initiator, sas_a) =
-            connect_noise_xx(stream, &a.private, Some(&fingerprint(&b_public))).unwrap();
-        let (mut server_stream, mut responder, sas_b) = server.join().unwrap().unwrap();
-        assert_eq!(sas_a, sas_b);
+        let mut client = connect_noise_xx(stream, &a.private, Some(&fingerprint(&b_public))).unwrap();
+        let mut server = server.join().unwrap().unwrap();
+        assert_eq!(client.sas, server.sas);
+        assert_eq!(client.remote_fingerprint, fingerprint(&b_public));
+        assert_eq!(server.remote_fingerprint, fingerprint(&a_public));
         let mut encrypted = vec![0_u8; 128];
-        let length = initiator.write_message(b"private hello", &mut encrypted).unwrap();
-        write_frame(&mut client_stream, &encrypted[..length]).unwrap();
-        let received = read_frame(&mut server_stream).unwrap();
+        let length = client.transport.write_message(b"private hello", &mut encrypted).unwrap();
+        write_frame(&mut client.stream, &encrypted[..length]).unwrap();
+        let received = read_frame(&mut server.stream).unwrap();
         let mut plaintext = vec![0_u8; 128];
-        let length = responder.read_message(&received, &mut plaintext).unwrap();
+        let length = server.transport.read_message(&received, &mut plaintext).unwrap();
         assert_eq!(&plaintext[..length], b"private hello");
-        assert!(responder.read_message(&received, &mut plaintext).is_err(), "replayed transport messages must be rejected");
+        assert!(server.transport.read_message(&received, &mut plaintext).is_err(), "replayed transport messages must be rejected");
     }
 }
