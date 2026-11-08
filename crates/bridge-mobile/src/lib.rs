@@ -4,7 +4,7 @@ use std::{
     ffi::{CStr, CString},
     net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs},
     os::raw::c_char,
-    sync::{Arc, Mutex, OnceLock, atomic::{AtomicU64, Ordering}},
+    sync::{Arc, Mutex, OnceLock, mpsc::{self, Receiver}, atomic::{AtomicBool, AtomicU64, Ordering}},
     thread,
     time::{Duration, Instant},
 };
@@ -15,9 +15,11 @@ use serde::{Deserialize, Serialize};
 
 const MAX_ACTIVE_SESSIONS: usize = 32;
 static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
-static SESSIONS: OnceLock<Mutex<HashMap<u64, Arc<Mutex<NoiseConnection>>>>> = OnceLock::new();
+struct SessionEntry { connection: Arc<Mutex<NoiseConnection>>, incoming: Mutex<Receiver<Vec<u8>>>, stop: Arc<AtomicBool> }
 
-fn sessions() -> &'static Mutex<HashMap<u64, Arc<Mutex<NoiseConnection>>>> {
+static SESSIONS: OnceLock<Mutex<HashMap<u64, Arc<SessionEntry>>>> = OnceLock::new();
+
+fn sessions() -> &'static Mutex<HashMap<u64, Arc<SessionEntry>>> {
     SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -223,7 +225,7 @@ fn session_send_payload(handle: u64, message: &[u8]) -> Result<(), String> {
     let session = sessions().lock()
         .map_err(|_| "session registry poisoned".to_string())
         .and_then(|map| map.get(&handle).cloned().ok_or_else(|| "session not found".to_string()))?;
-    let mut connection = session.lock().map_err(|_| "session lock poisoned".to_string())?;
+    let mut connection = session.connection.lock().map_err(|_| "session lock poisoned".to_string())?;
     let mut encrypted = vec![0_u8; 65_535];
     let length = connection.transport.write_message(message, &mut encrypted)
         .map_err(|e: snow::Error| e.to_string())?;
@@ -235,20 +237,11 @@ fn session_receive_payload(handle: u64) -> Result<Vec<u8>, String> {
     let session = sessions().lock()
         .map_err(|_| "session registry poisoned".to_string())
         .and_then(|map| map.get(&handle).cloned().ok_or_else(|| "session not found".to_string()))?;
-    let mut connection = session.lock().map_err(|_| "session lock poisoned".to_string())?;
-    connection.stream.set_read_timeout(Some(Duration::from_secs(120)))
-        .map_err(|e| e.to_string())?;
-    let received = (|| {
-        let encrypted = bridge_network::read_frame(&mut connection.stream)
-            .map_err(|e: bridge_network::NetworkError| e.to_string())?;
-        let mut plaintext = vec![0_u8; MAX_APPLICATION_BYTES];
-        let length = connection.transport.read_message(&encrypted, &mut plaintext)
-            .map_err(|e: snow::Error| e.to_string())?;
-        plaintext.truncate(length);
-        Ok(plaintext)
-    })();
-    let _ = connection.stream.set_read_timeout(Some(Duration::from_secs(10)));
-    received
+    let receiver = session.incoming.lock().map_err(|_| "session receive queue poisoned".to_string())?;
+    receiver.recv_timeout(Duration::from_secs(120)).map_err(|error| match error {
+        mpsc::RecvTimeoutError::Timeout => "session receive timed out".to_string(),
+        mpsc::RecvTimeoutError::Disconnected => "session reader disconnected".to_string(),
+    })
 }
 
 /// Encrypt and send one UTF-8 application message on an established session.
@@ -302,7 +295,11 @@ pub extern "C" fn bridge_session_receive(handle: u64) -> *mut c_char {
 
 #[no_mangle]
 pub extern "C" fn bridge_session_close(handle: u64) {
-    if let Ok(mut map) = sessions().lock() { map.remove(&handle); }
+    let entry = sessions().lock().ok().and_then(|mut map| map.remove(&handle));
+    if let Some(entry) = entry {
+        entry.stop.store(true, Ordering::Release);
+        if let Ok(connection) = entry.connection.lock() { let _ = connection.stream.shutdown(std::net::Shutdown::Both); }
+    }
 }
 
 /// Release a string allocated by another Bridge FFI function.
