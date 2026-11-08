@@ -64,7 +64,8 @@ private enum class BridgeTab(val label: String, val symbol: String) {
 }
 
 class MainActivity : ComponentActivity() {
-    private var discovery: BridgeDiscovery? = null
+    @Volatile private var destroyed = false
+    @Volatile private var discovery: BridgeDiscovery? = null
     @Volatile private var pairingController: BridgePairingController? = null
     private val discoveredPeers = mutableStateListOf<BridgePeer>()
     private val pendingPairings = mutableStateListOf<BridgePendingPairing>()
@@ -176,6 +177,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        destroyed = true
         pairingController?.stop()
         discovery?.stop()
         discovery = null
