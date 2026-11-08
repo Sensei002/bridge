@@ -109,9 +109,11 @@ fn pair_accept(request: PairRequest) -> Result<PairResult, String> {
             Err(error) => return Err(error.to_string()),
         }
     };
-    let connection = match accept_noise_xx(stream, &key, request.expected_fingerprint.as_deref()) {
+    let handshake: Result<NoiseConnection, bridge_network::NetworkError> =
+        accept_noise_xx(stream, &key, request.expected_fingerprint.as_deref());
+    let connection = match handshake {
         Ok(connection) => connection,
-        Err(error) => return Err(error.to_string()),
+        Err(error) => return Err(format!("{error}")),
     };
     register(connection, &request.local_device)
 }
