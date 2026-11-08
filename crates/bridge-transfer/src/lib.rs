@@ -95,7 +95,7 @@ pub fn decode_control(bytes: &[u8]) -> Result<TransferControl, TransferError> {
     Ok(message)
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileChunk {
     pub transfer_id: Uuid,
     pub offset: u64,
@@ -128,7 +128,7 @@ pub const CHUNK_PACKET_TAG: u8 = 0x02;
 pub const MAX_PACKET_BYTES: usize = 65_519;
 
 pub fn encode_packet(packet: &TransferPacket) -> Result<Vec<u8>, TransferError> {
-    let mut encoded = match packet {
+    let encoded = match packet {
         TransferPacket::Control(message) => {
             let mut bytes = vec![CONTROL_PACKET_TAG];
             bytes.extend_from_slice(&encode_control(message)?);
