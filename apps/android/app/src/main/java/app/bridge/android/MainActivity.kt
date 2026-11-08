@@ -65,7 +65,7 @@ private enum class BridgeTab(val label: String, val symbol: String) {
 
 class MainActivity : ComponentActivity() {
     private var discovery: BridgeDiscovery? = null
-    private var pairingController: BridgePairingController? = null
+    @Volatile private var pairingController: BridgePairingController? = null
     private val discoveredPeers = mutableStateListOf<BridgePeer>()
     private val pendingPairings = mutableStateListOf<BridgePendingPairing>()
     private val trustedDevices = mutableStateListOf<BridgeTrustedDevice>()
@@ -74,35 +74,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        try {
-            val privateKey = BridgeIdentityStore.loadOrCreate(this)
-            val keyHex = privateKey.joinToString("") { "%02x".format(it.toInt() and 0xff) }
-            val fingerprintResult = org.json.JSONObject(BridgeNative.identityFingerprint(keyHex))
-            check(fingerprintResult.optBoolean("ok")) { fingerprintResult.optString("error") }
-            val fingerprint = fingerprintResult.getString("fingerprint")
-            val identityPreferences = getSharedPreferences("bridge_secure_identity", MODE_PRIVATE)
-            val deviceId = identityPreferences.getString("device_id", null) ?: java.util.UUID.randomUUID().toString().also {
-                check(identityPreferences.edit().putString("device_id", it).commit())
-            }
-            pairingController = BridgePairingController(
-                this, privateKey, fingerprint, deviceId,
-                onPending = { pendingPairings.add(it) },
-                onStatus = { pairingStatus = it }
-            ).also {
-                trustedDevices.addAll(it.trustedDevices())
-                it.start()
-            }
-            discovery = BridgeDiscovery(this, { peer ->
-                if (peer.deviceId != deviceId && discoveredPeers.none { it.deviceId == peer.deviceId }) {
-                    discoveredPeers.add(peer)
-                }
-            }, { message -> pairingStatus = message }).also {
-                it.start(deviceId, android.os.Build.MODEL ?: "Bridge Android", fingerprint)
-            }
-            pairingStatus = "Identity protected by Android Keystore · Noise XX ready."
-        } catch (error: Exception) {
-            pairingStatus = "Secure pairing unavailable: ${error.message}"
-        }
+
+        // Show the native UI immediately; Keystore and JNI initialization may
+        // take time on first launch and must not block Android's main thread.
         setContent {
             BridgeApp(
                 discoveredPeers = discoveredPeers,
@@ -135,6 +109,59 @@ class MainActivity : ComponentActivity() {
                 }
             )
         }
+
+        Thread({
+            try {
+                val privateKey = BridgeIdentityStore.loadOrCreate(this)
+                val keyHex = privateKey.joinToString("") { "%02x".format(it.toInt() and 0xff) }
+                val fingerprintResult = org.json.JSONObject(BridgeNative.identityFingerprint(keyHex))
+                check(fingerprintResult.optBoolean("ok")) { fingerprintResult.optString("error") }
+                val fingerprint = fingerprintResult.getString("fingerprint")
+                val identityPreferences = getSharedPreferences("bridge_secure_identity", MODE_PRIVATE)
+                val deviceId = identityPreferences.getString("device_id", null) ?: java.util.UUID.randomUUID().toString().also {
+                    check(identityPreferences.edit().putString("device_id", it).commit())
+                }
+
+                val controller = BridgePairingController(
+                    this, privateKey, fingerprint, deviceId,
+                    onPending = { pendingPairings.add(it) },
+                    onStatus = { pairingStatus = it }
+                )
+                val restoredDevices = controller.trustedDevices()
+                if (destroyed) {
+                    controller.stop()
+                    return@Thread
+                }
+                pairingController = controller
+                controller.start()
+
+                val networkDiscovery = BridgeDiscovery(this, { peer ->
+                    if (peer.deviceId != deviceId && discoveredPeers.none { it.deviceId == peer.deviceId }) {
+                        discoveredPeers.add(peer)
+                    }
+                }, { message -> pairingStatus = message })
+                if (destroyed) {
+                    controller.stop()
+                    return@Thread
+                }
+                discovery = networkDiscovery
+                networkDiscovery.start(deviceId, android.os.Build.MODEL ?: "Bridge Android", fingerprint)
+
+                runOnUiThread {
+                    if (!destroyed) {
+                        trustedDevices.addAll(restoredDevices)
+                        pairingStatus = "Identity protected by Android Keystore · Noise XX ready."
+                    }
+                }
+            } catch (error: Throwable) {
+                runOnUiThread {
+                    if (!destroyed) {
+                        val detail = error.message?.takeIf { it.isNotBlank() } ?: error.javaClass.simpleName
+                        pairingStatus = "Startup failed (${error.javaClass.simpleName}): $detail"
+                    }
+                }
+            }
+        }, "BridgeStartup").apply { isDaemon = true; start() }
     }
 
     private fun scanInvitation() {
