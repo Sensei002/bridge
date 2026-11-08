@@ -43,12 +43,13 @@ struct PairResult {
     remote_fingerprint: Option<String>,
     remote_device: Option<DeviceDescriptor>,
     error: Option<String>,
+    role: Option<String>,
 }
 
 fn result_error(error: impl ToString) -> PairResult {
     PairResult {
         ok: false, handle: None, sas: None, remote_fingerprint: None,
-        remote_device: None, error: Some(error.to_string()),
+        remote_device: None, error: Some(error.to_string()), role: None,
     }
 }
 
@@ -65,6 +66,7 @@ fn register(
     mut connection: NoiseConnection,
     local: &DeviceDescriptor,
     expected_device_id: Option<&DeviceId>,
+    role: &'static str,
 ) -> Result<PairResult, String> {
     let remote = connection.exchange_descriptors(local).map_err(|e: bridge_network::NetworkError| e.to_string())?;
     if expected_device_id.is_some_and(|expected| *expected != remote.id) {
@@ -82,6 +84,7 @@ fn register(
         remote_fingerprint: Some(connection.remote_fingerprint.clone()),
         remote_device: Some(remote),
         error: None,
+        role: Some(role.into()),
     };
     registry.insert(handle, connection);
     Ok(result)
@@ -101,7 +104,7 @@ fn pair_connect(request: PairRequest) -> Result<PairResult, String> {
         Ok(connection) => connection,
         Err(error) => return Err(error.to_string()),
     };
-    register(connection, &request.local_device, request.expected_device_id.as_ref())
+    register(connection, &request.local_device, request.expected_device_id.as_ref(), "initiator")
 }
 
 fn pair_accept(request: PairRequest) -> Result<PairResult, String> {
@@ -132,7 +135,7 @@ fn pair_accept(request: PairRequest) -> Result<PairResult, String> {
         Ok(connection) => connection,
         Err(error) => return Err(format!("{error}")),
     };
-    register(connection, &request.local_device, None)
+    register(connection, &request.local_device, None, "responder")
 }
 
 /// Derive the SHA-256 fingerprint for a 32-byte Noise private key encoded as hex.
@@ -278,7 +281,7 @@ pub unsafe extern "C" fn bridge_session_send(handle: u64, message: *const c_char
         });
     let response = result.map(|()| PairResult {
         ok: true, handle: Some(handle), sas: None, remote_fingerprint: None,
-        remote_device: None, error: None,
+        remote_device: None, error: None, role: None,
     });
     to_json(response).into_raw()
 }
