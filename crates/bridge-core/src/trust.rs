@@ -61,6 +61,14 @@ impl SasConfirmation {
         validate_fingerprint(remote_fingerprint)?;
         Ok(Self { fingerprint: remote_fingerprint.to_ascii_lowercase() })
     }
+
+    /// Create trust after the receiving device explicitly approves the authenticated
+    /// Noise peer. This is trust-on-first-use: the remote identity is cryptographically
+    /// bound to this session, while the user confirms the device name/platform in UI.
+    pub fn user_approved(remote_fingerprint: &str) -> Result<Self, TrustStoreError> {
+        validate_fingerprint(remote_fingerprint)?;
+        Ok(Self { fingerprint: remote_fingerprint.to_ascii_lowercase() })
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
