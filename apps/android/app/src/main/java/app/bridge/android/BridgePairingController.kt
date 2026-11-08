@@ -73,11 +73,11 @@ internal class BridgePairingController(
         postStatus("Authenticated Noise XX pairing listener is ready.")
     }
 
-    fun pair(peer: BridgePeer) {
+    fun pair(peer: BridgePeer, expectedFingerprint: String? = null) {
         Thread({
             try {
                 val trusted = trustedDevices().firstOrNull { it.deviceId == peer.deviceId }
-                val expected = trusted?.fingerprint
+                val expected = expectedFingerprint ?: trusted?.fingerprint
                 val response = JSONObject(
                     BridgeNative.pairConnect(request(host = peer.host, expectedFingerprint = expected))
                 )
@@ -86,6 +86,28 @@ internal class BridgePairingController(
                 postStatus("Secure pairing failed: ${error.message}")
             }
         }, "BridgeNoiseConnect").apply { isDaemon = true; start() }
+    }
+
+    /** Consume a scanned invitation once, then pin its fingerprint in the Noise XX handshake. */
+    fun pairFromInvitation(uri: String) {
+        try {
+            val response = JSONObject(BridgeNative.qrInvitationConsume(uri, System.currentTimeMillis()))
+            check(response.optBoolean("ok")) {
+                response.optString("error", "QR invitation is invalid, expired, or already used.")
+            }
+            val invite = response.getJSONObject("invitation")
+            val peer = BridgePeer(
+                name = invite.getString("display_name"),
+                host = invite.getString("host"),
+                port = invite.getInt("port"),
+                deviceId = invite.getString("device_id"),
+                fingerprint = invite.getString("fingerprint"),
+                platform = invite.getString("platform")
+            )
+            pair(peer, peer.fingerprint)
+        } catch (error: Exception) {
+            postStatus("QR invitation rejected: ${error.message}")
+        }
     }
 
     fun approve(pending: BridgePendingPairing, otherScreenCode: String): Boolean {
