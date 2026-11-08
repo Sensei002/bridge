@@ -150,8 +150,41 @@ impl TrustStore {
         Ok(())
     }
 
+    /// Trust a device and persist the updated registry as one operation.
+    /// In-memory state is rolled back if the durable write fails.
+    pub fn trust_and_save(
+        &mut self,
+        descriptor: DeviceDescriptor,
+        confirmation: SasConfirmation,
+        now_ms: u64,
+        path: impl AsRef<Path>,
+    ) -> Result<(), TrustStoreError> {
+        let previous = self.devices.clone();
+        self.trust(descriptor, confirmation, now_ms)?;
+        if let Err(error) = self.save(path) {
+            self.devices = previous;
+            return Err(error);
+        }
+        Ok(())
+    }
+
     pub fn revoke(&mut self, id: &bridge_protocol::DeviceId) -> Result<TrustedDevice, TrustStoreError> {
         self.devices.remove(id).ok_or(TrustStoreError::NotTrusted)
+    }
+
+    /// Revoke a device and persist the change; restore it in memory on failure.
+    pub fn revoke_and_save(
+        &mut self,
+        id: &bridge_protocol::DeviceId,
+        path: impl AsRef<Path>,
+    ) -> Result<TrustedDevice, TrustStoreError> {
+        let previous = self.devices.clone();
+        let removed = self.revoke(id)?;
+        if let Err(error) = self.save(path) {
+            self.devices = previous;
+            return Err(error);
+        }
+        Ok(removed)
     }
 
     pub fn get(&self, id: &bridge_protocol::DeviceId) -> Option<&TrustedDevice> {
@@ -251,6 +284,19 @@ mod tests {
         assert!(!loaded.is_trusted(&id));
         loaded.save(&path).unwrap();
         assert!(TrustStore::load(&path).unwrap().list().is_empty());
+    }
+
+    #[test]
+    fn trust_and_revoke_are_durable_operations() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("trusted-devices.json");
+        let mut store = TrustStore::new();
+        let descriptor = device();
+        let id = descriptor.id;
+        store.trust_and_save(descriptor, confirmation(), 500, &path).unwrap();
+        assert!(TrustStore::load(&path).unwrap().is_trusted(&id));
+        store.revoke_and_save(&id, &path).unwrap();
+        assert!(!TrustStore::load(&path).unwrap().is_trusted(&id));
     }
 
     #[test]

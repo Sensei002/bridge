@@ -346,6 +346,35 @@ mod tests {
     }
 
     #[test]
+    fn noise_handshake_rejects_wrong_pinned_fingerprint() {
+        let params = NOISE_PATTERN.parse().unwrap();
+        let a = Builder::new(params).generate_keypair().unwrap();
+        let params = NOISE_PATTERN.parse().unwrap();
+        let b = Builder::new(params).generate_keypair().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let b_private = b.private.clone();
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            accept_noise_xx(stream, &b_private, None)
+        });
+        let stream = TcpStream::connect(address).unwrap();
+        assert!(matches!(
+            connect_noise_xx(stream, &a.private, Some(&fingerprint(b"not the peer key"))),
+            Err(NetworkError::IdentityMismatch)
+        ));
+        let _ = server.join().unwrap();
+    }
+
+    #[test]
+    fn local_key_fingerprint_matches_handshake_identity() {
+        let params = NOISE_PATTERN.parse().unwrap();
+        let pair = Builder::new(params).generate_keypair().unwrap();
+        assert_eq!(local_key_fingerprint(&pair.private).unwrap(), fingerprint(&pair.public));
+        assert!(matches!(local_key_fingerprint(&[0; 31]), Err(NetworkError::InvalidPrivateKey)));
+    }
+
+    #[test]
     fn noise_handshake_verifies_fingerprint_and_encrypts() {
         let params = NOISE_PATTERN.parse().unwrap();
         let a = Builder::new(params).generate_keypair().unwrap();
@@ -372,5 +401,6 @@ mod tests {
         let mut plaintext = vec![0_u8; 128];
         let length = responder.read_message(&received, &mut plaintext).unwrap();
         assert_eq!(&plaintext[..length], b"private hello");
+        assert!(responder.read_message(&received, &mut plaintext).is_err(), "replayed transport messages must be rejected");
     }
 }

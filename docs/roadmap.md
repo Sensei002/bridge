@@ -15,9 +15,13 @@
 - [x] SHA-256 public-key fingerprints and symmetric six-digit short authentication strings
 - [x] Expected-fingerprint verification before a session is returned
 - [x] Initial OS-backed identity storage adapters (Windows Credential Manager, Android Keystore-wrapped storage, Apple Keychain)
-- [ ] Windows UI integration for live discovery and user-confirmed SAS
-- [ ] Android NSD discovery + Keystore-backed Noise client integration
-- [ ] iOS Bonjour discovery + Keychain-backed Noise client integration
+- [x] Windows desktop mDNS/DNS-SD service advertisement and unverified candidate reporting
+- [x] Android NSD and iOS Bonjour browsing for Bridge service candidates
+- [x] Durable trust/revocation transaction APIs with rollback on storage failure
+- [x] Replay rejection and pinned-fingerprint negative-path tests
+- [ ] Windows UI integration for Noise handshake, matching SAS display, and user-confirmed trust
+- [ ] Android NSD candidate selection + Keystore-backed Noise client integration
+- [ ] iOS Bonjour candidate selection + Keychain-backed Noise client integration
 - [ ] Persist trusted peers and revocation on each platform
 - [ ] Cross-platform end-to-end tests on physical devices
 
