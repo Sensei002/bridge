@@ -72,6 +72,105 @@ impl PairingCoordinator {
     pub fn is_trusted(&self, id: &DeviceId) -> bool { self.trusted.contains_key(id) }
 }
 
+
+/// QR invitations are short-lived endpoint hints, never authentication credentials.
+/// The peer fingerprint is supplied as the expected Noise XX identity during
+/// connection; users must still compare the SAS and approve explicitly.
+pub const QR_INVITATION_TTL_MS: u64 = 120_000;
+const QR_INVITATION_MAX_BYTES: usize = 2_048;
+const QR_INVITATION_CLOCK_SKEW_MS: u64 = 15_000;
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct QrInvitation {
+    pub version: u8,
+    pub device_id: DeviceId,
+    pub display_name: String,
+    pub host: String,
+    pub port: u16,
+    pub fingerprint: String,
+    pub nonce: Uuid,
+    pub created_at_ms: u64,
+    pub expires_at_ms: u64,
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum QrInvitationError {
+    #[error("QR invitation payload is too large")]
+    TooLarge,
+    #[error("QR invitation payload is invalid")]
+    InvalidPayload,
+    #[error("QR invitation version is unsupported")]
+    UnsupportedVersion,
+    #[error("QR invitation has expired or its clock is invalid")]
+    Expired,
+    #[error("QR invitation endpoint is invalid")]
+    InvalidEndpoint,
+    #[error("QR invitation fingerprint is invalid")]
+    InvalidFingerprint,
+}
+
+impl QrInvitation {
+    pub fn create(
+        device: &DeviceDescriptor,
+        host: &str,
+        port: u16,
+        fingerprint: &str,
+        now_ms: u64,
+    ) -> Result<Self, QrInvitationError> {
+        device.validate().map_err(|_| QrInvitationError::InvalidPayload)?;
+        let invitation = Self {
+            version: 1,
+            device_id: device.id,
+            display_name: device.display_name.clone(),
+            host: host.to_owned(),
+            port,
+            fingerprint: fingerprint.to_ascii_lowercase(),
+            nonce: Uuid::new_v4(),
+            created_at_ms: now_ms,
+            expires_at_ms: now_ms.saturating_add(QR_INVITATION_TTL_MS),
+        };
+        invitation.validate(now_ms)?;
+        Ok(invitation)
+    }
+
+    pub fn encode(&self) -> Result<String, QrInvitationError> {
+        let payload = serde_json::to_string(self).map_err(|_| QrInvitationError::InvalidPayload)?;
+        if payload.len() > QR_INVITATION_MAX_BYTES { return Err(QrInvitationError::TooLarge); }
+        Ok(format!("bridge://pair/{}", payload))
+    }
+
+    pub fn decode(uri: &str, now_ms: u64) -> Result<Self, QrInvitationError> {
+        let payload = uri.strip_prefix("bridge://pair/")
+            .ok_or(QrInvitationError::InvalidPayload)?;
+        if payload.len() > QR_INVITATION_MAX_BYTES { return Err(QrInvitationError::TooLarge); }
+        let invitation: Self = serde_json::from_str(payload)
+            .map_err(|_| QrInvitationError::InvalidPayload)?;
+        invitation.validate(now_ms)?;
+        Ok(invitation)
+    }
+
+    pub fn validate(&self, now_ms: u64) -> Result<(), QrInvitationError> {
+        if self.version != 1 { return Err(QrInvitationError::UnsupportedVersion); }
+        if self.display_name.trim().is_empty() || self.display_name.len() > 64 {
+            return Err(QrInvitationError::InvalidPayload);
+        }
+        if self.port == 0 || self.host.parse::<std::net::IpAddr>().is_err() {
+            return Err(QrInvitationError::InvalidEndpoint);
+        }
+        if self.fingerprint.len() != 64
+            || !self.fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(QrInvitationError::InvalidFingerprint);
+        }
+        if self.expires_at_ms <= self.created_at_ms
+            || self.expires_at_ms - self.created_at_ms > QR_INVITATION_TTL_MS
+            || self.created_at_ms > now_ms.saturating_add(QR_INVITATION_CLOCK_SKEW_MS)
+            || now_ms >= self.expires_at_ms {
+            return Err(QrInvitationError::Expired);
+        }
+        Ok(())
+    }
+}
+
 pub fn create_pairing_request(initiator: DeviceDescriptor, now_ms: u64) -> Result<PairingRequest, PairingError> {
     initiator.validate()?;
     Ok(PairingRequest {
@@ -90,6 +189,52 @@ mod tests {
 
     fn device() -> DeviceDescriptor {
         DeviceDescriptor { id: DeviceId::new(), display_name: "Phone".into(), platform: Platform::Android, protocol_version: PROTOCOL_VERSION }
+    }
+
+
+    #[test]
+    fn qr_invitation_round_trips_and_expires() {
+        let device = device();
+        let invitation = QrInvitation::create(
+            &device, "192.168.1.25", 45821, &"ab".repeat(32), 10_000
+        ).unwrap();
+        let uri = invitation.encode().unwrap();
+        assert_eq!(QrInvitation::decode(&uri, 10_001).unwrap(), invitation);
+        assert_eq!(
+            QrInvitation::decode(&uri, 10_000 + QR_INVITATION_TTL_MS),
+            Err(QrInvitationError::Expired)
+        );
+    }
+
+    #[test]
+    fn qr_invitation_rejects_untrusted_endpoint_and_fingerprint() {
+        let device = device();
+        assert_eq!(
+            QrInvitation::create(&device, "attacker.example", 45821, &"ab".repeat(32), 1),
+            Err(QrInvitationError::InvalidEndpoint)
+        );
+        assert_eq!(
+            QrInvitation::create(&device, "192.168.1.25", 0, &"ab".repeat(32), 1),
+            Err(QrInvitationError::InvalidEndpoint)
+        );
+        assert_eq!(
+            QrInvitation::create(&device, "192.168.1.25", 45821, "not-a-fingerprint", 1),
+            Err(QrInvitationError::InvalidFingerprint)
+        );
+    }
+
+    #[test]
+    fn qr_invitation_rejects_future_and_oversized_payloads() {
+        let device = device();
+        let invitation = QrInvitation::create(
+            &device, "10.0.0.2", 45821, &"cd".repeat(32), 100_000
+        ).unwrap();
+        let uri = invitation.encode().unwrap();
+        assert_eq!(QrInvitation::decode(&uri, 1), Err(QrInvitationError::Expired));
+        assert_eq!(
+            QrInvitation::decode(&format!("bridge://pair/{}", "x".repeat(QR_INVITATION_MAX_BYTES + 1)), 100_000),
+            Err(QrInvitationError::TooLarge)
+        );
     }
 
     #[test]
