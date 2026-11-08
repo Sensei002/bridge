@@ -114,6 +114,49 @@ pub fn encode_chunk(chunk: &FileChunk) -> Result<Vec<u8>, TransferError> {
     Ok(encoded)
 }
 
+/// A transfer packet carried as one encrypted Noise application message.
+/// The leading discriminator prevents JSON control messages from being confused
+/// with binary file chunks while preserving the existing chunk wire format.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TransferPacket {
+    Control(TransferControl),
+    Chunk(FileChunk),
+}
+
+pub const CONTROL_PACKET_TAG: u8 = 0x01;
+pub const CHUNK_PACKET_TAG: u8 = 0x02;
+pub const MAX_PACKET_BYTES: usize = 65_519;
+
+pub fn encode_packet(packet: &TransferPacket) -> Result<Vec<u8>, TransferError> {
+    let mut encoded = match packet {
+        TransferPacket::Control(message) => {
+            let mut bytes = vec![CONTROL_PACKET_TAG];
+            bytes.extend_from_slice(&encode_control(message)?);
+            bytes
+        }
+        TransferPacket::Chunk(chunk) => {
+            let mut bytes = vec![CHUNK_PACKET_TAG];
+            bytes.extend_from_slice(&encode_chunk(chunk)?);
+            bytes
+        }
+    };
+    if encoded.len() > MAX_PACKET_BYTES {
+        return Err(TransferError::InvalidChunk("packet exceeds the encrypted transport limit".into()));
+    }
+    Ok(encoded)
+}
+
+pub fn decode_packet(bytes: &[u8]) -> Result<TransferPacket, TransferError> {
+    if bytes.len() < 2 || bytes.len() > MAX_PACKET_BYTES {
+        return Err(TransferError::InvalidChunk("packet size is invalid".into()));
+    }
+    match bytes[0] {
+        CONTROL_PACKET_TAG => Ok(TransferPacket::Control(decode_control(&bytes[1..])?)),
+        CHUNK_PACKET_TAG => Ok(TransferPacket::Chunk(decode_chunk(&bytes[1..])?)),
+        _ => Err(TransferError::InvalidChunk("unknown transfer packet type".into())),
+    }
+}
+
 pub fn decode_chunk(bytes: &[u8]) -> Result<FileChunk, TransferError> {
     if bytes.len() <= CHUNK_HEADER_BYTES || bytes.len() > CHUNK_HEADER_BYTES + CHUNK_DATA_BYTES {
         return Err(TransferError::InvalidChunk("encoded chunk size is invalid".into()));
@@ -302,6 +345,20 @@ mod tests {
         let chunk = FileChunk { transfer_id: Uuid::new_v4(), offset: 4096, data: vec![7; CHUNK_DATA_BYTES] };
         assert_eq!(decode_chunk(&encode_chunk(&chunk).unwrap()).unwrap(), chunk);
         assert!(encode_chunk(&FileChunk { data: vec![0; CHUNK_DATA_BYTES + 1], ..chunk }).is_err());
+    }
+
+    #[test]
+    fn transfer_packets_keep_control_and_binary_chunks_unambiguous() {
+        let offer = offer(b"packet", "packet.bin");
+        let control = TransferPacket::Control(TransferControl::FileOffer { offer });
+        assert_eq!(decode_packet(&encode_packet(&control).unwrap()).unwrap(), control);
+
+        let chunk = TransferPacket::Chunk(FileChunk {
+            transfer_id: Uuid::new_v4(), offset: 0, data: vec![0, 0xff, 0x42, 0x7f],
+        });
+        assert_eq!(decode_packet(&encode_packet(&chunk).unwrap()).unwrap(), chunk);
+        assert!(decode_packet(&[0xff, 0x00]).is_err());
+        assert!(decode_packet(&[CONTROL_PACKET_TAG]).is_err());
     }
 
     #[test]
