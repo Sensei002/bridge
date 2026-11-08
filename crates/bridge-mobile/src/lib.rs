@@ -10,12 +10,14 @@ use std::{
 };
 
 use bridge_network::{accept_noise_xx, connect_noise_xx, NoiseConnection};
+use bridge_core::pairing::{QrInvitation, QrInvitationReplayGuard};
 use bridge_protocol::DeviceDescriptor;
 use serde::{Deserialize, Serialize};
 
 const MAX_ACTIVE_SESSIONS: usize = 32;
 static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
 static SESSIONS: OnceLock<Mutex<HashMap<u64, NoiseConnection>>> = OnceLock::new();
+static QR_REPLAY_GUARD: OnceLock<Mutex<QrInvitationReplayGuard>> = OnceLock::new();
 
 fn sessions() -> &'static Mutex<HashMap<u64, NoiseConnection>> {
     SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
@@ -184,6 +186,59 @@ pub unsafe extern "C" fn bridge_pair_accept(request_json: *const c_char) -> *mut
     to_json(pair_accept(request)).into_raw()
 }
 
+
+#[derive(Deserialize)]
+struct QrCreateRequest {
+    device: DeviceDescriptor,
+    host: String,
+    port: u16,
+    fingerprint: String,
+    now_ms: u64,
+}
+
+fn qr_json(value: serde_json::Value) -> *mut c_char {
+    CString::new(value.to_string()).unwrap_or_else(|_| CString::new("{\"ok\":false,\"error\":\"invalid QR response\"}").unwrap()).into_raw()
+}
+
+/// Create a validated, short-lived QR invitation URI from a local device descriptor.
+#[no_mangle]
+pub unsafe extern "C" fn bridge_qr_invitation_create(request_json: *const c_char) -> *mut c_char {
+    if request_json.is_null() { return qr_json(serde_json::json!({"ok":false,"error":"null request"})); }
+    let result = CStr::from_ptr(request_json).to_str()
+        .map_err(|e| e.to_string())
+        .and_then(|raw| serde_json::from_str::<QrCreateRequest>(raw).map_err(|e| e.to_string()))
+        .and_then(|request| {
+            QrInvitation::create(&request.device, &request.host, request.port, &request.fingerprint, request.now_ms)
+                .map_err(|e| e.to_string())
+        });
+    match result {
+        Ok(invitation) => match invitation.encode() {
+            Ok(uri) => qr_json(serde_json::json!({"ok":true,"uri":uri,"expires_at_ms":invitation.expires_at_ms})),
+            Err(error) => qr_json(serde_json::json!({"ok":false,"error":error.to_string()})),
+        },
+        Err(error) => qr_json(serde_json::json!({"ok":false,"error":error})),
+    }
+}
+
+/// Validate and consume a QR invitation nonce once per process before starting Noise XX.
+#[no_mangle]
+pub unsafe extern "C" fn bridge_qr_invitation_consume(uri: *const c_char, now_ms: u64) -> *mut c_char {
+    if uri.is_null() { return qr_json(serde_json::json!({"ok":false,"error":"null invitation"})); }
+    let result = CStr::from_ptr(uri).to_str()
+        .map_err(|e| e.to_string())
+        .and_then(|value| QrInvitation::decode(value, now_ms).map_err(|e| e.to_string()))
+        .and_then(|invitation| {
+            let guard = QR_REPLAY_GUARD.get_or_init(|| Mutex::new(QrInvitationReplayGuard::default()));
+            let mut guard = guard.lock().map_err(|_| "QR replay guard poisoned".to_string())?;
+            guard.consume(&invitation, now_ms).map_err(|e| e.to_string())?;
+            Ok(invitation)
+        });
+    match result {
+        Ok(invitation) => qr_json(serde_json::json!({"ok":true,"invitation":invitation})),
+        Err(error) => qr_json(serde_json::json!({"ok":false,"error":error})),
+    }
+}
+
 /// Encrypt and send one UTF-8 application message on an established session.
 ///
 /// # Safety
@@ -282,6 +337,31 @@ mod android_jni {
     pub extern "system" fn Java_app_bridge_android_BridgeNative_pairAccept(
         env: JNIEnv, _class: JClass, request: JString
     ) -> jstring { invoke(env, request, true) }
+
+
+    #[no_mangle]
+    pub extern "system" fn Java_app_bridge_android_BridgeNative_qrInvitationCreate(
+        mut env: JNIEnv, _class: JClass, request: JString
+    ) -> jstring {
+        let text: String = env.get_string(&request).map(|v| v.into()).unwrap_or_default();
+        let input = CString::new(text).unwrap_or_default();
+        let output = unsafe { bridge_qr_invitation_create(input.as_ptr()) };
+        let response = unsafe { CStr::from_ptr(output).to_string_lossy().into_owned() };
+        unsafe { bridge_string_free(output); }
+        env.new_string(response).map(|value| value.into_raw()).unwrap_or(std::ptr::null_mut())
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_app_bridge_android_BridgeNative_qrInvitationConsume(
+        mut env: JNIEnv, _class: JClass, uri: JString, now_ms: jni::sys::jlong
+    ) -> jstring {
+        let text: String = env.get_string(&uri).map(|v| v.into()).unwrap_or_default();
+        let input = CString::new(text).unwrap_or_default();
+        let output = unsafe { bridge_qr_invitation_consume(input.as_ptr(), now_ms.max(0) as u64) };
+        let response = unsafe { CStr::from_ptr(output).to_string_lossy().into_owned() };
+        unsafe { bridge_string_free(output); }
+        env.new_string(response).map(|value| value.into_raw()).unwrap_or(std::ptr::null_mut())
+    }
 
     #[no_mangle]
     pub extern "system" fn Java_app_bridge_android_BridgeNative_sessionSend(
