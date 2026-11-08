@@ -88,6 +88,19 @@ internal class BridgePairingController(
         }, "BridgeNoiseConnect").apply { isDaemon = true; start() }
     }
 
+    /** Build a signed-by-Noise invitation URI for a caller-supplied local IPv4 address. */
+    fun createInvitation(host: String): String {
+        val request = JSONObject()
+            .put("device", localDescriptor)
+            .put("host", host)
+            .put("port", 45821)
+            .put("fingerprint", fingerprint)
+            .put("now_ms", System.currentTimeMillis())
+        val response = JSONObject(BridgeNative.qrInvitationCreate(request.toString()))
+        check(response.optBoolean("ok")) { response.optString("error", "Could not create QR invitation.") }
+        return response.getString("uri")
+    }
+
     /** Consume a scanned invitation once, then pin its fingerprint in the Noise XX handshake. */
     fun pairFromInvitation(uri: String) {
         try {

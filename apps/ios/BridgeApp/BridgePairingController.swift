@@ -71,6 +71,26 @@ final class BridgePairingController: ObservableObject {
         }
     }
 
+    /// Create a short-lived invitation for a caller-supplied local IPv4 address.
+    func createInvitation(host: String) throws -> String {
+        let request: [String: Any] = [
+            "device": localDescriptor,
+            "host": host,
+            "port": 45821,
+            "fingerprint": try BridgeNativeClient.identityFingerprint(privateKeyHex: privateKeyHex),
+            "now_ms": UInt64(max(0, Date().timeIntervalSince1970 * 1000))
+        ]
+        let data = try JSONSerialization.data(withJSONObject: request)
+        let response = BridgeNativeClient.qrInvitationCreate(request: String(decoding: data, as: UTF8.self))
+        guard let responseData = response.data(using: .utf8),
+              let root = try JSONSerialization.jsonObject(with: responseData) as? [String: Any],
+              root["ok"] as? Bool == true,
+              let uri = root["uri"] as? String else {
+            throw NSError(domain: "BridgePairing", code: 1, userInfo: [NSLocalizedDescriptionKey: "Could not create a valid QR invitation."])
+        }
+        return uri
+    }
+
     /// Consume a scanned QR nonce before using its endpoint; pin the fingerprint in Noise XX.
     func pairFromInvitation(_ uri: String) {
         let response = BridgeNativeClient.qrInvitationConsume(
