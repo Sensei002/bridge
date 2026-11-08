@@ -1,6 +1,7 @@
 import SwiftUI
 import CoreImage.CIFilterBuiltins
 import VisionKit
+import UIKit
 
 private let accent = Color(red: 0.13, green: 0.83, blue: 0.93)
 private let amber = Color(red: 0.98, green: 0.75, blue: 0.14)
@@ -44,7 +45,7 @@ struct BridgeHomeView: View {
                         HStack(spacing: 10) {
                             Button("Show my QR") {
                                 do { invitation = try pairing.createInvitation(host: BridgePairingController.localIPv4Address()); showInvitation = true }
-                                catch { pairing.report("Could not create QR invitation: \\(error.localizedDescription)") }
+                                catch { pairing.report("Could not create QR invitation: \(error.localizedDescription)") }
                             }
                             .buttonStyle(.borderedProminent).tint(accent)
                             Button("Scan QR") { showScanner = true }
@@ -219,7 +220,17 @@ private final class BridgeQRScannerController: UIViewController, DataScannerView
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = UIColor(red: 0.04, green: 0.045, blue: 0.06, alpha: 1)
-        guard DataScannerViewController.isSupported, DataScannerViewController.isAvailable else { return }
+        guard DataScannerViewController.isSupported, DataScannerViewController.isAvailable else {
+            let message = UILabel()
+            message.text = "QR scanning is unavailable on this device. Check camera permission and try again."
+            message.textColor = .white
+            message.textAlignment = .center
+            message.numberOfLines = 0
+            message.translatesAutoresizingMaskIntoConstraints = false
+            view.addSubview(message)
+            NSLayoutConstraint.activate([message.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 24), message.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -24), message.centerYAnchor.constraint(equalTo: view.centerYAnchor)])
+            return
+        }
         let scanner = DataScannerViewController(
             recognizedDataTypes: [.barcode(symbologies: [.qr])],
             qualityLevel: .balanced,
@@ -238,6 +249,11 @@ private final class BridgeQRScannerController: UIViewController, DataScannerView
         ])
         scanner.didMove(toParent: self)
         do { try scanner.startScanning() } catch { }
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        scanner?.stopScanning()
     }
 
     func dataScanner(_ dataScanner: DataScannerViewController, didAdd addedItems: [RecognizedItem], allItems: [RecognizedItem]) {
