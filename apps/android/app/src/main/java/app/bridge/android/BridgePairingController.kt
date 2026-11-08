@@ -137,12 +137,16 @@ internal class BridgePairingController(
         }
     }
 
-    fun stop() { stopped = true }
+    fun stop() {
+        stopped = true
+        activeSessions.values.forEach(BridgeNative::sessionClose)
+        activeSessions.clear()
+    }
 
     private fun handleResult(response: JSONObject) {
         if (!response.optBoolean("ok")) {
             val error = response.optString("error", "Unknown pairing error")
-            if (!stopped) postStatus(error)
+            if (!stopped && error != "pairing listener timed out") postStatus(error)
             return
         }
         val remote = response.getJSONObject("remote_device")
