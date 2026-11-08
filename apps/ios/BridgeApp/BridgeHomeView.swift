@@ -1,4 +1,6 @@
 import SwiftUI
+import CoreImage.CIFilterBuiltins
+import VisionKit
 
 private let accent = Color(red: 0.13, green: 0.83, blue: 0.93)
 private let amber = Color(red: 0.98, green: 0.75, blue: 0.14)
@@ -9,6 +11,9 @@ struct BridgeHomeView: View {
     @StateObject private var pairing = BridgePairingController()
     @State private var identityStatus = "Preparing secure device identity…"
     @State private var remoteCodes: [UInt64: String] = [:]
+    @State private var invitation = ""
+    @State private var showInvitation = false
+    @State private var showScanner = false
 
     var body: some View {
         ZStack {
@@ -36,6 +41,17 @@ struct BridgeHomeView: View {
                         Text(identityStatus).font(.system(size: 11, weight: .medium)).foregroundStyle(accent).padding(.top, 8)
                         Text(pairing.status).font(.system(size: 11, weight: .medium)).foregroundStyle(amber).padding(.top, 4)
 
+                        HStack(spacing: 10) {
+                            Button("Show my QR") {
+                                do { invitation = try pairing.createInvitation(host: BridgePairingController.localIPv4Address()); showInvitation = true }
+                                catch { pairing.report("Could not create QR invitation: \\(error.localizedDescription)") }
+                            }
+                            .buttonStyle(.borderedProminent).tint(accent)
+                            Button("Scan QR") { showScanner = true }
+                                .buttonStyle(.bordered).tint(accent)
+                        }
+                        Text("QR invitations expire after two minutes. Scanning only supplies an endpoint; Noise XX identity verification and approval are still required.")
+                            .font(.system(size: 10)).foregroundStyle(.white.opacity(0.55))
                         Text("NEARBY DEVICES").font(.system(size: 9, weight: .bold)).tracking(1.2).foregroundStyle(accent).padding(.top, 12)
                         if discovery.peers.isEmpty {
                             Text("Searching for Bridge devices on your local network…").font(.system(size: 11)).foregroundStyle(.white.opacity(0.55))
@@ -121,6 +137,24 @@ struct BridgeHomeView: View {
                 }.padding(.horizontal, 24).padding(.bottom, 32)
             }
         }
+        .sheet(isPresented: $showInvitation) {
+            VStack(spacing: 16) {
+                Text("Pair with Bridge").font(.system(size: 22, weight: .bold))
+                if let image = makeQRCode(from: invitation) {
+                    Image(uiImage: image).interpolation(.none).resizable().scaledToFit().frame(maxWidth: 280).padding(12).background(.white, in: RoundedRectangle(cornerRadius: 12))
+                }
+                Text("Scan this code on the other device. It expires in two minutes. Compare the six-digit code on both screens before trusting.")
+                    .font(.system(size: 12)).multilineTextAlignment(.center).foregroundStyle(.secondary)
+                Button("Done") { showInvitation = false }.buttonStyle(.borderedProminent).tint(accent)
+            }.padding(24).presentationDetents([.medium, .large])
+        }
+        .sheet(isPresented: $showScanner) {
+            BridgeQRScanner { value in
+                showScanner = false
+                pairing.pairFromInvitation(value)
+            }
+            .ignoresSafeArea()
+        }
         .task {
             do {
                 let privateKey = try BridgeIdentityStore.loadOrCreate()
@@ -142,6 +176,15 @@ struct BridgeHomeView: View {
             pairing.stop()
         }
     }
+    private func makeQRCode(from value: String) -> UIImage? {
+        let filter = CIFilter.qrCodeGenerator()
+        filter.message = Data(value.utf8)
+        filter.correctionLevel = "M"
+        guard let output = filter.outputImage,
+              let cgImage = CIContext().createCGImage(output.transformed(by: CGAffineTransform(scaleX: 12, y: 12)), from: output.extent.applying(CGAffineTransform(scaleX: 12, y: 12))) else { return nil }
+        return UIImage(cgImage: cgImage)
+    }
+
     private func eyebrow(_ title: String) -> some View {
         Text(title).font(.system(size: 10, weight: .bold)).tracking(1.8).foregroundStyle(accent)
     }
@@ -151,5 +194,59 @@ struct BridgeHomeView: View {
             Spacer()
             Text("PLANNED").font(.system(size: 9, weight: .bold)).tracking(1).foregroundStyle(accent)
         }.padding(.vertical, 5)
+    }
+}
+
+
+private struct BridgeQRScanner: UIViewControllerRepresentable {
+    let onScan: (String) -> Void
+
+    func makeUIViewController(context: Context) -> BridgeQRScannerController {
+        let controller = BridgeQRScannerController()
+        controller.onScan = onScan
+        return controller
+    }
+
+    func updateUIViewController(_ uiViewController: BridgeQRScannerController, context: Context) {
+        uiViewController.onScan = onScan
+    }
+}
+
+private final class BridgeQRScannerController: UIViewController, DataScannerViewControllerDelegate {
+    var onScan: ((String) -> Void)?
+    private var scanner: DataScannerViewController?
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = UIColor(red: 0.04, green: 0.045, blue: 0.06, alpha: 1)
+        guard DataScannerViewController.isSupported, DataScannerViewController.isAvailable else { return }
+        let scanner = DataScannerViewController(
+            recognizedDataTypes: [.barcode(symbologies: [.qr])],
+            qualityLevel: .balanced,
+            isHighlightingEnabled: true
+        )
+        scanner.delegate = self
+        self.scanner = scanner
+        addChild(scanner)
+        scanner.view.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(scanner.view)
+        NSLayoutConstraint.activate([
+            scanner.view.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            scanner.view.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            scanner.view.topAnchor.constraint(equalTo: view.topAnchor),
+            scanner.view.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+        ])
+        scanner.didMove(toParent: self)
+        do { try scanner.startScanning() } catch { }
+    }
+
+    func dataScanner(_ dataScanner: DataScannerViewController, didAdd addedItems: [RecognizedItem], allItems: [RecognizedItem]) {
+        for item in addedItems {
+            if case .barcode(let barcode) = item, let value = barcode.payloadStringValue, value.hasPrefix("bridge://pair/") {
+                dataScanner.stopScanning()
+                onScan?(value)
+                return
+            }
+        }
     }
 }
