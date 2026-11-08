@@ -18,18 +18,6 @@ enum BridgeNativeClient {
         return fingerprint
     }
 
-    static func qrInvitationCreate(request: String) -> String {
-        invoke(request, bridge_qr_invitation_create)
-    }
-
-    static func qrInvitationConsume(uri: String, nowMs: UInt64) -> String {
-        let pointer = uri.withCString { bridge_qr_invitation_consume($0, nowMs) }
-        guard let pointer else { return #"{\"ok\":false,\"error\":\"native library returned no response\"}"# }
-        let response = String(cString: pointer)
-        bridge_string_free(pointer)
-        return response
-    }
-
     static func pairConnect(request: String) -> String {
         invoke(request, bridge_pair_connect)
     }
