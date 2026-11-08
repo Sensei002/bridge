@@ -5,9 +5,6 @@ import android.os.Handler
 import android.os.Looper
 import org.json.JSONArray
 import org.json.JSONObject
-import java.util.UUID
-import java.net.Inet4Address
-import java.net.NetworkInterface
 import java.util.concurrent.ConcurrentHashMap
 
 internal data class BridgePeer(
@@ -89,53 +86,6 @@ internal class BridgePairingController(
                 postStatus("Secure pairing failed: ${error.message}")
             }
         }, "BridgeNoiseConnect").apply { isDaemon = true; start() }
-    }
-
-    /** Build a signed-by-Noise invitation URI for a caller-supplied local IPv4 address. */
-    fun createInvitation(host: String = localIpv4Address()): String {
-        val request = JSONObject()
-            .put("device", localDescriptor)
-            .put("host", host)
-            .put("port", 45821)
-            .put("fingerprint", fingerprint)
-            .put("now_ms", System.currentTimeMillis())
-        val response = JSONObject(BridgeNative.qrInvitationCreate(request.toString()))
-        check(response.optBoolean("ok")) { response.optString("error", "Could not create QR invitation.") }
-        return response.getString("uri")
-    }
-
-    private fun localIpv4Address(): String {
-        val interfaces = NetworkInterface.getNetworkInterfaces()?.toList().orEmpty()
-        return interfaces
-            .filter { it.isUp && !it.isLoopback }
-            .sortedBy { if (it.name.startsWith("wlan")) 0 else 1 }
-            .flatMap { it.inetAddresses.toList() }
-            .filterIsInstance<Inet4Address>()
-            .firstOrNull { it.isSiteLocalAddress && !it.isLoopbackAddress }
-            ?.hostAddress
-            ?: error("No private IPv4 address is available. Connect to the same Wi-Fi network and try again.")
-    }
-
-    /** Consume a scanned invitation once, then pin its fingerprint in the Noise XX handshake. */
-    fun pairFromInvitation(uri: String) {
-        try {
-            val response = JSONObject(BridgeNative.qrInvitationConsume(uri, System.currentTimeMillis()))
-            check(response.optBoolean("ok")) {
-                response.optString("error", "QR invitation is invalid, expired, or already used.")
-            }
-            val invite = response.getJSONObject("invitation")
-            val peer = BridgePeer(
-                name = invite.getString("display_name"),
-                host = invite.getString("host"),
-                port = invite.getInt("port"),
-                deviceId = invite.getString("device_id"),
-                fingerprint = invite.getString("fingerprint"),
-                platform = invite.getString("platform")
-            )
-            pair(peer, peer.fingerprint)
-        } catch (error: Exception) {
-            postStatus("QR invitation rejected: ${error.message}")
-        }
     }
 
     fun approve(pending: BridgePendingPairing): Boolean {
