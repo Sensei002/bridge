@@ -1,15 +1,15 @@
-# Secure pairing status
+# Bridge pairing
 
-## Direct local-network pairing
+## Automatic local-network discovery
 
-Direct pairing from the discovered-device list is implemented on Windows, Android, and iOS. It uses the shared Rust Noise XX handshake, authenticated descriptor exchange, six-digit SAS comparison, explicit approval, fingerprint pinning for known devices, and persistent trust/revocation.
+Bridge clients advertise and browse for peers using mDNS/DNS-SD (Windows), Android NSD, and iOS Bonjour. Devices on the same local network appear automatically in the **Devices** section. Discovery metadata is only a candidate hint; it is not trusted identity.
 
-Discovery is only a bootstrap mechanism. Service names, addresses, TXT records, and advertised fingerprints are untrusted until the handshake authenticates the peer.
+## One-tap pairing
 
-## QR invitation
+1. Select a nearby device and tap **Connect**.
+2. The clients establish an encrypted Noise XX session and exchange authenticated device descriptors.
+3. The receiving device shows a popup with the requesting device name and platform. The user can **Accept** or **Reject**.
+4. The decision is sent inside the encrypted session. The initiating device saves trust only after it receives an authenticated acceptance response.
+5. Previously trusted devices reconnect automatically using their pinned Noise fingerprint. Revocation removes trust and closes the active session.
 
-QR pairing is enabled through the versioned `bridge://pair/` invitation format. The previous BRIDGE_PAIR/1 QR exchange was an unauthenticated prototype and must never be restored.
-
-A shared Rust QR invitation codec is implemented and tested. It emits a versioned `bridge://pair/` payload with a literal IP endpoint, port, device ID, display name, platform, 64-character Noise fingerprint, random nonce, and a two-minute expiry. Decoding rejects malformed/oversized payloads, hostnames, invalid ports, invalid fingerprints, unsupported versions, expired invitations, and timestamps too far in the future. Native QR display is integrated into Windows egui, Android Compose, and iOS SwiftUI. Android uses Google Code Scanner and iOS uses VisionKit to scan; both pass the raw URI to the Rust one-time nonce consumer, then connect using both the invitation fingerprint and device ID as expected identities. The authenticated Noise descriptor must match the invited device ID before a session is registered. Windows displays a QR invitation for mobile devices to scan. The QR payload remains only an endpoint hint. Both screens must still display the same SAS and both users must explicitly approve before a trust record is written. The scanner and QR UI require physical-device validation across all three platform pairings; this cannot be inferred from CI compilation.
-
-The TCP ping/pong endpoint remains a connectivity diagnostic only; it is not an authenticated session.
+First-time approval is trust-on-first-use. Because the user no longer compares a SAS or scans a pinned invitation, this is less resistant to an active first-connection man-in-the-middle than out-of-band verification. The receiving user should accept only a device they recognize. The TCP ping/pong endpoint remains a connectivity diagnostic only; it is not an authenticated session.
