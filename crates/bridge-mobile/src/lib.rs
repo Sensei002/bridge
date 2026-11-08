@@ -4,7 +4,7 @@ use std::{
     ffi::{CStr, CString},
     net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs},
     os::raw::c_char,
-    sync::{Mutex, OnceLock, atomic::{AtomicU64, Ordering}},
+    sync::{Arc, Mutex, OnceLock, atomic::{AtomicU64, Ordering}},
     thread,
     time::{Duration, Instant},
 };
@@ -15,9 +15,9 @@ use serde::{Deserialize, Serialize};
 
 const MAX_ACTIVE_SESSIONS: usize = 32;
 static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
-static SESSIONS: OnceLock<Mutex<HashMap<u64, NoiseConnection>>> = OnceLock::new();
+static SESSIONS: OnceLock<Mutex<HashMap<u64, Arc<Mutex<NoiseConnection>>>>> = OnceLock::new();
 
-fn sessions() -> &'static Mutex<HashMap<u64, NoiseConnection>> {
+fn sessions() -> &'static Mutex<HashMap<u64, Arc<Mutex<NoiseConnection>>>> {
     SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -82,7 +82,7 @@ fn register(
         error: None,
         role: Some(role.into()),
     };
-    registry.insert(handle, connection);
+    registry.insert(handle, Arc::new(Mutex::new(connection)));
     Ok(result)
 }
 
@@ -206,15 +206,20 @@ pub unsafe extern "C" fn bridge_session_send(handle: u64, message: *const c_char
         Ok(value) => value.as_bytes(),
         Err(error) => return to_json(Err(error.to_string())).into_raw(),
     };
-    let result: Result<(), String> = sessions().lock().map_err(|_| "session registry poisoned".to_string())
-        .and_then(|mut map| {
-            let connection = map.get_mut(&handle).ok_or_else(|| "session not found".to_string())?;
-            let mut encrypted = vec![0_u8; 65_535];
-            let length = connection.transport.write_message(message, &mut encrypted)
-                .map_err(|e: snow::Error| e.to_string())?;
-            bridge_network::write_frame(&mut connection.stream, &encrypted[..length])
-                .map_err(|e: bridge_network::NetworkError| e.to_string())
-        });
+    // Clone the per-session handle while holding the registry lock briefly.
+    // Never hold the global registry while doing socket I/O: a receive waiting
+    // on one peer must not prevent the accept loop from registering another.
+    let session = sessions().lock()
+        .map_err(|_| "session registry poisoned".to_string())
+        .and_then(|map| map.get(&handle).cloned().ok_or_else(|| "session not found".to_string()));
+    let result: Result<(), String> = session.and_then(|session| {
+        let mut connection = session.lock().map_err(|_| "session lock poisoned".to_string())?;
+        let mut encrypted = vec![0_u8; 65_535];
+        let length = connection.transport.write_message(message, &mut encrypted)
+            .map_err(|e: snow::Error| e.to_string())?;
+        bridge_network::write_frame(&mut connection.stream, &encrypted[..length])
+            .map_err(|e: bridge_network::NetworkError| e.to_string())
+    });
     let response = result.map(|()| PairResult {
         ok: true, handle: Some(handle), remote_fingerprint: None,
         remote_device: None, error: None, role: None,
@@ -224,22 +229,25 @@ pub unsafe extern "C" fn bridge_session_send(handle: u64, message: *const c_char
 
 #[no_mangle]
 pub extern "C" fn bridge_session_receive(handle: u64) -> *mut c_char {
-    let result: Result<String, String> = sessions().lock().map_err(|_| "session registry poisoned".to_string())
-        .and_then(|mut map| {
-            let connection = map.get_mut(&handle).ok_or_else(|| "session not found".to_string())?;
-            connection.stream.set_read_timeout(Some(Duration::from_secs(120)))
-                .map_err(|e| e.to_string())?;
-            let received = (|| {
-                let encrypted = bridge_network::read_frame(&mut connection.stream)
-                    .map_err(|e: bridge_network::NetworkError| e.to_string())?;
-                let mut plaintext = vec![0_u8; 65_535];
-                let length = connection.transport.read_message(&encrypted, &mut plaintext)
-                    .map_err(|e: snow::Error| e.to_string())?;
-                String::from_utf8(plaintext[..length].to_vec()).map_err(|e: std::string::FromUtf8Error| e.to_string())
-            })();
-            let _ = connection.stream.set_read_timeout(Some(Duration::from_secs(10)));
-            received
-        });
+    // The registry lock is released before the potentially long blocking read.
+    let session = sessions().lock()
+        .map_err(|_| "session registry poisoned".to_string())
+        .and_then(|map| map.get(&handle).cloned().ok_or_else(|| "session not found".to_string()));
+    let result: Result<String, String> = session.and_then(|session| {
+        let mut connection = session.lock().map_err(|_| "session lock poisoned".to_string())?;
+        connection.stream.set_read_timeout(Some(Duration::from_secs(120)))
+            .map_err(|e| e.to_string())?;
+        let received = (|| {
+            let encrypted = bridge_network::read_frame(&mut connection.stream)
+                .map_err(|e: bridge_network::NetworkError| e.to_string())?;
+            let mut plaintext = vec![0_u8; 65_535];
+            let length = connection.transport.read_message(&encrypted, &mut plaintext)
+                .map_err(|e: snow::Error| e.to_string())?;
+            String::from_utf8(plaintext[..length].to_vec()).map_err(|e: std::string::FromUtf8Error| e.to_string())
+        })();
+        let _ = connection.stream.set_read_timeout(Some(Duration::from_secs(10)));
+        received
+    });
     let json = serde_json::json!({"ok": result.is_ok(), "message": result.as_ref().ok(), "error": result.err()});
     CString::new(json.to_string()).unwrap().into_raw()
 }
