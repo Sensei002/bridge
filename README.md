@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/bridge-mark.svg" alt="Bridge — Connect, Share, Beyond" width="560" />
+  <img src="assets/Bridge%20%E2%80%94%20Connect,%20Share,%20Beyond.png" alt="Bridge — Connect, Share, Beyond" width="760" />
 </p>
 
 <h1 align="center">Bridge</h1>
@@ -25,6 +25,8 @@ Bridge is an open-source, local-first device interoperability project for Window
 - `apps/desktop` — native Rust + egui Windows desktop app.
 - `apps/android` — Android app.
 - `apps/ios` — iOS app.
+- `assets/Bridge — Connect, Share, Beyond.png` — original master brand artwork.
+- `scripts/generate_brand_assets.py` — deterministic platform icon generation from the master artwork.
 - `docs/` — architecture, protocol, security model, and roadmap.
 - `.github/workflows/` — CI and tag-based release automation.
 

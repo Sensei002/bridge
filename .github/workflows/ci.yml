@@ -33,6 +33,13 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Generate exact-brand app icons
+        run: |
+          python -m pip install Pillow
+          python scripts/generate_brand_assets.py
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build native Windows app
@@ -47,6 +54,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Generate exact-brand Android launcher icons
+        run: |
+          python -m pip install Pillow
+          python scripts/generate_brand_assets.py
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -72,6 +86,13 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Generate exact-brand iOS assets
+        run: |
+          python -m pip install Pillow
+          python scripts/generate_brand_assets.py
       - name: Install XcodeGen
         run: brew install xcodegen
       - name: Generate Xcode project
