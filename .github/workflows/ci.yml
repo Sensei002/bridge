@@ -105,12 +105,18 @@ jobs:
           rustup target add aarch64-apple-ios aarch64-apple-ios-sim
           cargo build --release --target aarch64-apple-ios -p bridge-mobile
           cargo build --release --target aarch64-apple-ios-sim -p bridge-mobile
-          mkdir -p apps/ios/BridgeApp/Frameworks
-          lipo -create target/aarch64-apple-ios/release/libbridge_mobile.a target/aarch64-apple-ios-sim/release/libbridge_mobile.a -output apps/ios/BridgeApp/Frameworks/libbridge_mobile.a
+          mkdir -p apps/ios/BridgeApp/Frameworks/Headers
+          cp apps/ios/BridgeApp/BridgeNative.h apps/ios/BridgeApp/Frameworks/Headers/BridgeMobile.h
+          xcodebuild -create-xcframework \
+            -library target/aarch64-apple-ios/release/libbridge_mobile.a \
+            -headers apps/ios/BridgeApp/Frameworks/Headers \
+            -library target/aarch64-apple-ios-sim/release/libbridge_mobile.a \
+            -headers apps/ios/BridgeApp/Frameworks/Headers \
+            -output apps/ios/BridgeApp/Frameworks/BridgeMobile.xcframework
       - name: Install XcodeGen
         run: brew install xcodegen
       - name: Verify shared Rust library
-        run: test -f apps/ios/BridgeApp/Frameworks/libbridge_mobile.a
+        run: test -d apps/ios/BridgeApp/Frameworks/BridgeMobile.xcframework
       - name: Generate Xcode project
         working-directory: apps/ios
         run: xcodegen generate
