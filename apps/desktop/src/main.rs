@@ -206,7 +206,13 @@ fn start_secure_listener(status: Sender<String>, pending: Sender<PendingApproval
                             });
                         match result {
                             Ok((connection, descriptor)) => {
-                                let store = TrustStore::load(trust_store_path()).unwrap_or_default();
+                                let store = match TrustStore::load(trust_store_path()) {
+                                    Ok(store) => store,
+                                    Err(error) => {
+                                        let _ = status.send(format!("Trust registry unavailable; rejecting pairing: {error}"));
+                                        return;
+                                    }
+                                };
                                 let already_trusted = if let Some(trusted) = store.get(&descriptor.id) {
                                     if !trusted.public_key_fingerprint.eq_ignore_ascii_case(&connection.remote_fingerprint) {
                                         let _ = status.send(format!("Rejected identity change for trusted device {}", descriptor.display_name));

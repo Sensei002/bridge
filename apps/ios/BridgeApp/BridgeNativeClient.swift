@@ -33,4 +33,13 @@ enum BridgeNativeClient {
     static func sessionSend(_ handle: UInt64, message: String) -> String {
         invoke(message) { bridge_session_send(handle, $0) }
     }
+
+    static func sessionReceive(_ handle: UInt64) -> String {
+        guard let pointer = bridge_session_receive(handle) else {
+            return #"{"ok":false,"error":"native library returned no response"}"#
+        }
+        let response = String(cString: pointer)
+        bridge_string_free(pointer)
+        return response
+    }
 }
