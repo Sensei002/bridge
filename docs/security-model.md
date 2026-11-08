@@ -13,14 +13,13 @@ Bridge is local-first and permission-first. Discovery is never proof of identity
 - Trusted-device records and revocation persist on each platform: Windows stores public fingerprints in an app-local trust registry; Android encrypts the registry with an Android Keystore AES-GCM key; iOS stores it in Keychain with device-only accessibility. Revocation closes active sessions.
 - The Rust mobile FFI has loopback integration tests covering pairing and encrypted message exchange. CI builds the native Windows app, Android APK, iOS Simulator app, and shared Rust workspace.
 
-## Remaining before Milestone 1 can be called complete
+## Milestone 1 validation status
 
-1. Physical-device end-to-end pairing and trusted reconnection/revocation tests for Windows ↔ Android, Windows ↔ iOS, and Android ↔ iOS. CI loopback tests and simulator builds do not replace this.
-2. Physical network/lifecycle validation across router vendors, client isolation, IPv4/IPv6, sleep/resume, app backgrounding, and network changes.
-3. Final connection lifecycle, resource-limit, shutdown, and platform permission/error-path validation on real devices.
-4. Independent security review of discovery parsing, first-use trust approval, Noise identity pinning, trust persistence, and revocation.
+The Windows + Android target has passed user-reported physical-device testing for discovery, bidirectional pairing, receiver approval, trusted reconnection, app restart/reconnection, Wi-Fi disconnect/reconnect, and firewall/network permissions. iOS Simulator CI builds pass, but iOS physical-device interoperability is unverified. Linux desktop testing is deferred until a Linux environment is available.
 
-Private keys must never leave their device. Discovery names, addresses, TXT records, and advertised fingerprints are attacker-controlled. Noise XX encrypts and authenticates the session key, but without an out-of-band comparison it does not independently prove that a first-time peer is the physical device the user intended. First-time pairing therefore uses trust-on-first-use: the receiver must recognize the device shown in the approval popup before accepting. This is simpler than SAS entry but provides less protection against an active first-connection man-in-the-middle than comparing a SAS or verifying a fingerprint through a separate trusted channel.
+The following remain recommended follow-up work before a broad public release: broader router/AP-isolation and IPv6 coverage, lifecycle/resource-limit stress testing, and an independent security review of discovery parsing, first-use trust approval, Noise identity pinning, trust persistence, and revocation.
+
+Private keys must never leave their device. Discovery names, addresses, TXT records, and advertised fingerprints are attacker-controlled. Noise XX encrypts and authenticates the session key, but without an out-of-band comparison it does not independently prove that a first-time peer is the physical device the user intended. First-time pairing therefore uses trust-on-first-use: the receiver must recognize the device shown in the approval popup before accepting. This is simpler than SAS entry but provides less protection against an active first-connection man-in-the-middle than comparing a SAS or verifying a fingerprint through a separate trusted channel. Users should accept only devices they can independently identify.
 
 ## Legacy prototype pairing disabled
 
