@@ -623,68 +623,76 @@ impl eframe::App for BridgeApp {
                             });
                         });
                         ui.add_space(16.0);
-                        panel(ui, |ui| {
-                            eyebrow(ui, "DISCOVERED ON YOUR NETWORK");
-                            ui.add_space(8.0);
-                            if self.discovered_peers.is_empty() {
-                                muted(ui, "Searching for Bridge devices… Discovery results are unverified until Noise authentication completes.");
-                            } else {
-                                let mut pair_target = None;
-                                for (index, peer) in self.discovered_peers.iter().enumerate() {
-                                    ui.horizontal(|ui| {
-                                        ui.vertical(|ui| {
-                                            ui.label(egui::RichText::new(&peer.record.display_name).color(TEXT).strong());
-                                            muted(ui, &format!("{} · {}", peer.address, &peer.record.public_key_fingerprint[..8]));
+                        #[cfg(windows)]
+                        {
+                            panel(ui, |ui| {
+                                eyebrow(ui, "DISCOVERED ON YOUR NETWORK");
+                                ui.add_space(8.0);
+                                if self.discovered_peers.is_empty() {
+                                    muted(ui, "Searching for Bridge devices… Discovery results are unverified until Noise authentication completes.");
+                                } else {
+                                    let mut pair_target = None;
+                                    for (index, peer) in self.discovered_peers.iter().enumerate() {
+                                        ui.horizontal(|ui| {
+                                            ui.vertical(|ui| {
+                                                ui.label(egui::RichText::new(&peer.record.display_name).color(TEXT).strong());
+                                                muted(ui, &format!("{} · {}", peer.address, &peer.record.public_key_fingerprint[..8]));
+                                            });
+                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                if primary_button(ui, "Pair") { pair_target = Some(index); }
+                                                muted(ui, "UNVERIFIED");
+                                            });
                                         });
-                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                            if primary_button(ui, "Pair") { pair_target = Some(index); }
-                                            muted(ui, "UNVERIFIED");
-                                        });
-                                    });
-                                    ui.add_space(6.0);
+                                        ui.add_space(6.0);
+                                    }
+                                    if let Some(index) = pair_target {
+                                        let peer = self.discovered_peers[index].clone();
+                                        let expected = self.trust_store.list().into_iter()
+                                            .find(|device| device.public_key_fingerprint.eq_ignore_ascii_case(&peer.record.public_key_fingerprint))
+                                            .map(|device| device.public_key_fingerprint.clone());
+                                        start_pairing(peer, expected, self.network_tx.clone(), self.pairing_tx.clone());
+                                        self.network_status = "Starting authenticated Noise XX pairing…".into();
+                                    }
                                 }
-                                if let Some(index) = pair_target {
-                                    let peer = self.discovered_peers[index].clone();
-                                    let expected = self.trust_store.list().into_iter()
-                                        .find(|device| device.public_key_fingerprint.eq_ignore_ascii_case(&peer.record.public_key_fingerprint))
-                                        .map(|device| device.public_key_fingerprint.clone());
-                                    start_pairing(peer, expected, self.network_tx.clone(), self.pairing_tx.clone());
-                                    self.network_status = "Starting authenticated Noise XX pairing…".into();
-                                }
-                            }
-                        });
+                            });
+    
+                        }
                         ui.add_space(16.0);
-                        let mut revoke_device = None;
-                        panel(ui, |ui| {
-                            eyebrow(ui, "TRUSTED DEVICES");
-                            let devices = self.trust_store.list();
-                            if devices.is_empty() {
-                                muted(ui, "No trusted devices yet. Pairing requires matching verification codes and approval on both devices.");
-                            } else {
-                                for device in devices {
-                                    ui.horizontal(|ui| {
-                                        ui.vertical(|ui| {
-                                            ui.label(egui::RichText::new(&device.descriptor.display_name).strong().color(TEXT));
-                                            muted(ui, &format!("{:?} · {}", device.descriptor.platform, &device.public_key_fingerprint[..16]));
+                        #[cfg(windows)]
+                        {
+                            let mut revoke_device = None;
+                            panel(ui, |ui| {
+                                eyebrow(ui, "TRUSTED DEVICES");
+                                let devices = self.trust_store.list();
+                                if devices.is_empty() {
+                                    muted(ui, "No trusted devices yet. Pairing requires matching verification codes and approval on both devices.");
+                                } else {
+                                    for device in devices {
+                                        ui.horizontal(|ui| {
+                                            ui.vertical(|ui| {
+                                                ui.label(egui::RichText::new(&device.descriptor.display_name).strong().color(TEXT));
+                                                muted(ui, &format!("{:?} · {}", device.descriptor.platform, &device.public_key_fingerprint[..16]));
+                                            });
+                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                if ui.button(egui::RichText::new("Revoke").color(egui::Color32::from_rgb(239, 68, 68))).clicked() {
+                                                    revoke_device = Some(device.descriptor.id);
+                                                }
+                                            });
                                         });
-                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                            if ui.button(egui::RichText::new("Revoke").color(egui::Color32::from_rgb(239, 68, 68))).clicked() {
-                                                revoke_device = Some(device.descriptor.id);
-                                            }
-                                        });
-                                    });
-                                    ui.add_space(5.0);
+                                        ui.add_space(5.0);
+                                    }
+                                }
+                            });
+                            if let Some(id) = revoke_device {
+                                match self.trust_store.revoke_and_save(&id, trust_store_path()) {
+                                    Ok(device) => {
+                                        self.active_sessions.retain(|session| session.remote_fingerprint != device.public_key_fingerprint);
+                                        self.network_status = format!("Trust revoked for {}. Its active session was closed.", device.descriptor.display_name);
+                                    }
+                                    Err(error) => self.network_status = format!("Could not revoke device: {error}"),
                                 }
                             }
-                        });
-                        if let Some(id) = revoke_device {
-                            match self.trust_store.revoke_and_save(&id, trust_store_path()) {
-                                Ok(device) => {
-                                    self.active_sessions.retain(|session| session.remote_fingerprint != device.public_key_fingerprint);
-                                    self.network_status = format!("Trust revoked for {}. Its active session was closed.", device.descriptor.display_name);
-                                }
-                                Err(error) => self.network_status = format!("Could not revoke device: {error}"),
-                            }
+    
                         }
                         ui.add_space(16.0);
                         panel(ui, |ui| {

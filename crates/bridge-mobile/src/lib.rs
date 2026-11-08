@@ -134,9 +134,9 @@ pub unsafe extern "C" fn bridge_session_send(handle: u64, message: *const c_char
         Ok(value) => value.as_bytes(),
         Err(error) => return to_json(Err(error.to_string())).into_raw(),
     };
-    let result = sessions().lock().map_err(|_| "session registry poisoned")
+    let result: Result<(), String> = sessions().lock().map_err(|_| "session registry poisoned".to_string())
         .and_then(|mut map| {
-            let connection = map.get_mut(&handle).ok_or("session not found")?;
+            let connection = map.get_mut(&handle).ok_or_else(|| "session not found".to_string())?;
             let mut encrypted = vec![0_u8; 65_535];
             let length = connection.transport.write_message(message, &mut encrypted)
                 .map_err(|e| e.to_string())?;
@@ -152,9 +152,9 @@ pub unsafe extern "C" fn bridge_session_send(handle: u64, message: *const c_char
 
 #[no_mangle]
 pub unsafe extern "C" fn bridge_session_receive(handle: u64) -> *mut c_char {
-    let result = sessions().lock().map_err(|_| "session registry poisoned")
+    let result: Result<String, String> = sessions().lock().map_err(|_| "session registry poisoned".to_string())
         .and_then(|mut map| {
-            let connection = map.get_mut(&handle).ok_or("session not found")?;
+            let connection = map.get_mut(&handle).ok_or_else(|| "session not found".to_string())?;
             let encrypted = bridge_network::read_frame(&mut connection.stream)
                 .map_err(|e| e.to_string())?;
             let mut plaintext = vec![0_u8; 65_535];
