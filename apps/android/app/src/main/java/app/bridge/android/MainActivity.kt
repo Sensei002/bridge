@@ -1,10 +1,6 @@
 package app.bridge.android
 
 import android.os.Bundle
-import android.graphics.Bitmap
-import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
-import com.google.zxing.BarcodeFormat
-import com.google.zxing.qrcode.QRCodeWriter
 import android.os.Handler
 import android.os.Looper
 import java.net.ServerSocket
@@ -37,7 +33,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -71,7 +66,6 @@ class MainActivity : ComponentActivity() {
     private val pendingPairings = mutableStateListOf<BridgePendingPairing>()
     private val trustedDevices = mutableStateListOf<BridgeTrustedDevice>()
     private var pairingStatus by mutableStateOf("Preparing secure device identity…")
-    private var invitation by mutableStateOf<String?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -84,16 +78,9 @@ class MainActivity : ComponentActivity() {
                 pendingPairings = pendingPairings,
                 trustedDevices = trustedDevices,
                 pairingStatus = pairingStatus,
-                invitation = invitation,
-                onCreateInvitation = {
-                    try { invitation = pairingController?.createInvitation() }
-                    catch (error: Exception) { pairingStatus = "Could not create QR invitation: ${error.message}" }
-                },
-                onDismissInvitation = { invitation = null },
-                onScanInvitation = { scanInvitation() },
                 onPair = { peer -> pairingController?.pair(peer) },
-                onApprove = { pending, code ->
-                    if (pairingController?.approve(pending, code) == true) {
+                onApprove = { pending ->
+                    if (pairingController?.approve(pending) == true) {
                         pendingPairings.remove(pending)
                         trustedDevices.clear()
                         trustedDevices.addAll(pairingController?.trustedDevices().orEmpty())
@@ -163,17 +150,6 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }, "BridgeStartup").apply { isDaemon = true; start() }
-    }
-
-    private fun scanInvitation() {
-        GmsBarcodeScanning.getClient(this).startScan()
-            .addOnSuccessListener { barcode ->
-                val value = barcode.rawValue
-                if (value != null) pairingController?.pairFromInvitation(value)
-                else pairingStatus = "No QR content was found."
-            }
-            .addOnCanceledListener { pairingStatus = "QR scanning cancelled." }
-            .addOnFailureListener { error -> pairingStatus = "QR scanner unavailable: ${error.message}" }
     }
 
     override fun onDestroy() {
@@ -247,10 +223,6 @@ private fun BridgeApp(
     pendingPairings: List<BridgePendingPairing>,
     trustedDevices: List<BridgeTrustedDevice>,
     pairingStatus: String,
-    invitation: String?,
-    onCreateInvitation: () -> Unit,
-    onDismissInvitation: () -> Unit,
-    onScanInvitation: () -> Unit,
     onPair: (BridgePeer) -> Unit,
     onApprove: (BridgePendingPairing, String) -> Unit,
     onReject: (BridgePendingPairing) -> Unit,
@@ -284,8 +256,6 @@ private fun BridgeApp(
                             pending = pendingPairings,
                             trusted = trustedDevices,
                             pairingStatus = pairingStatus,
-                            onCreateInvitation = onCreateInvitation,
-                            onScanInvitation = onScanInvitation,
                             onPair = onPair,
                             onApprove = onApprove,
                             onReject = onReject,
@@ -310,28 +280,6 @@ private fun BridgeApp(
         }
     }
 
-    if (invitation != null) {
-        AlertDialog(
-            onDismissRequest = onDismissInvitation,
-            containerColor = PanelAlt,
-            title = { Text("Pair with this device", color = Color.White, fontWeight = FontWeight.Bold) },
-            text = {
-                Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    val qrBitmap = remember(invitation) {
-                        val matrix = QRCodeWriter().encode(invitation, BarcodeFormat.QR_CODE, 720, 720)
-                        Bitmap.createBitmap(720, 720, Bitmap.Config.ARGB_8888).also { bitmap ->
-                            for (x in 0 until 720) for (y in 0 until 720) bitmap.setPixel(x, y, if (matrix[x, y]) android.graphics.Color.BLACK else android.graphics.Color.WHITE)
-                        }
-                    }
-                    Image(bitmap = qrBitmap.asImageBitmap(), contentDescription = "Short-lived Bridge pairing QR code", modifier = Modifier.size(240.dp))
-                    Text("Scan this code on the other device. It expires after two minutes and still requires matching Noise verification codes on both screens.", color = Muted, fontSize = 12.sp)
-                    Text("Do not share this code publicly.", color = Amber, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                }
-            },
-            confirmButton = { Button(onClick = onDismissInvitation) { Text("Close") } }
-        )
-    }
-
     if (showPairDialog) {
         AlertDialog(
             onDismissRequest = { showPairDialog = false },
@@ -341,7 +289,7 @@ private fun BridgeApp(
             title = { Text("Pair a device", fontWeight = FontWeight.Bold) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text("Select a discovered device from the Devices tab. Bridge authenticates it with Noise XX, then asks you to compare the six-digit code on both screens before trusting it.", color = Color.White, fontSize = 13.sp, lineHeight = 19.sp)
+                    Text("Choose a nearby Bridge device. It will receive a secure pairing request and can accept or reject it on that device.", color = Color.White, fontSize = 13.sp, lineHeight = 19.sp)
                     Surface(color = Panel, shape = RoundedCornerShape(14.dp), modifier = Modifier.fillMaxWidth()) {
                         Column(modifier = Modifier.padding(18.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                             Text("▦", color = Accent, fontSize = 34.sp)
@@ -536,66 +484,41 @@ private fun DevicesScreen(
     pending: List<BridgePendingPairing>,
     trusted: List<BridgeTrustedDevice>,
     pairingStatus: String,
-    onCreateInvitation: () -> Unit,
-    onScanInvitation: () -> Unit,
     onPair: (BridgePeer) -> Unit,
-    onApprove: (BridgePendingPairing, String) -> Unit,
+    onApprove: (BridgePendingPairing) -> Unit,
     onReject: (BridgePendingPairing) -> Unit,
     onRevoke: (String) -> Unit
 ) {
     ScreenContent {
-        ScreenHeading("YOUR ECOSYSTEM", "Devices", "Find and manage the devices you choose to trust.")
+        ScreenHeading("YOUR ECOSYSTEM", "Devices", "Nearby Bridge devices appear here automatically.")
         Panel {
-            Eyebrow("SECURE QR PAIRING")
-            Text("Connect without browsing the device list", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-            Text("Create a short-lived invitation on this device, or scan one from another Bridge device. QR data only bootstraps the connection; Noise XX and matching codes still authenticate both peers.", color = Muted, fontSize = 11.sp, lineHeight = 16.sp)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                PrimaryAction("Show my QR", onCreateInvitation, Modifier.weight(1f))
-                Button(onClick = onScanInvitation, modifier = Modifier.weight(1f).height(46.dp), colors = ButtonDefaults.buttonColors(containerColor = PanelAlt, contentColor = Accent)) { Text("Scan QR", fontWeight = FontWeight.Bold) }
-            }
-        }
-        Panel {
-            Eyebrow("DEVICE DISCOVERY")
-            Text("Nearby Bridge devices", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-            Text("Discovery metadata is unverified. A device becomes trusted only after Noise XX authentication, matching codes, and explicit approval.", color = Muted, fontSize = 12.sp, lineHeight = 18.sp)
+            Eyebrow("NEARBY DEVICES")
+            Text("Available on your network", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+            Text("Keep Bridge open on both devices and connect them to the same Wi-Fi network.", color = Muted, fontSize = 12.sp, lineHeight = 18.sp)
             if (peers.isEmpty()) {
-                Text("Searching for Bridge devices on this network…", color = Muted, fontSize = 11.sp)
+                Text("Searching for Bridge devices…", color = Muted, fontSize = 11.sp)
             } else {
                 peers.forEach { peer ->
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
+                    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                             Text(peer.name, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                            Text("${peer.host}:${peer.port} · ${peer.platform}", color = Muted, fontSize = 10.sp)
-                            Text("UNVERIFIED · ${peer.fingerprint.take(16)}", color = Amber, fontSize = 9.sp)
+                            Text("${peer.platform} · Nearby", color = Muted, fontSize = 10.sp)
                         }
-                        PrimaryAction("Pair", { onPair(peer) })
+                        PrimaryAction("Connect", { onPair(peer) })
                     }
                 }
             }
         }
         if (pending.isNotEmpty()) {
             pending.forEach { request ->
-                var remoteCode by remember(request.handle) { mutableStateOf("") }
                 Panel {
-                    Eyebrow("VERIFY IDENTITY · NOISE XX")
-                    Text(request.name, color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.Bold)
-                    Text("${request.platform} · fingerprint ${request.fingerprint.take(24)}", color = Muted, fontSize = 10.sp)
-                    Text(request.sas, color = Accent, fontSize = 34.sp, fontWeight = FontWeight.Black, letterSpacing = 4.sp)
-                    Text("Compare this code with the other device. Enter the code shown there; do not approve if the codes differ.", color = Muted, fontSize = 11.sp, lineHeight = 16.sp)
-                    androidx.compose.material3.OutlinedTextField(
-                        value = remoteCode,
-                        onValueChange = { if (it.length <= 6 && it.all { character -> character.isDigit() }) remoteCode = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        label = { Text("Code on the other device") },
-                        placeholder = { Text("000000") }
-                    )
+                    Eyebrow("PAIRING REQUEST")
+                    Text("Allow this device to connect?", color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                    Text("${request.name} wants to pair with this device.", color = Muted, fontSize = 12.sp)
+                    Text("${request.platform} · authenticated device identity", color = Muted, fontSize = 10.sp)
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        PrimaryAction("Confirm and trust", { onApprove(request, remoteCode) }, Modifier.weight(1f))
+                        PrimaryAction("Accept", { onApprove(request) }, Modifier.weight(1f))
                         Button(onClick = { onReject(request) }, colors = ButtonDefaults.buttonColors(containerColor = PanelAlt, contentColor = Amber)) {
                             Text("Reject")
                         }
@@ -609,14 +532,11 @@ private fun DevicesScreen(
                 Text("No trusted devices yet.", color = Muted, fontSize = 12.sp)
             } else {
                 trusted.forEach { device ->
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
+                    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                             Text(device.name, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                            Text("${device.platform} · ${device.fingerprint.take(16)}", color = Muted, fontSize = 10.sp)
+                            Text("${device.platform} · ${device.fingerprint.take(12)}", color = Muted, fontSize = 10.sp)
                         }
                         Button(onClick = { onRevoke(device.deviceId) }, colors = ButtonDefaults.buttonColors(containerColor = PanelAlt, contentColor = Amber)) {
                             Text("Revoke")
@@ -626,7 +546,6 @@ private fun DevicesScreen(
             }
         }
         Text(pairingStatus, color = Amber, fontSize = 11.sp, lineHeight = 16.sp)
-        Text("QR invitations are short-lived endpoint hints. Every scanned invitation is consumed once and its fingerprint is pinned in the shared Rust Noise XX handshake.", color = Muted, fontSize = 10.sp, lineHeight = 15.sp)
     }
 }
 
