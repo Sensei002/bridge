@@ -70,7 +70,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         try {
             val privateKey = BridgeIdentityStore.loadOrCreate(this)
-            val keyHex = privateKey.joinToString("") { "%02x".format(it) }
+            val keyHex = privateKey.joinToString("") { "%02x".format(it.toInt() and 0xff) }
             val fingerprintResult = org.json.JSONObject(BridgeNative.identityFingerprint(keyHex))
             check(fingerprintResult.optBoolean("ok")) { fingerprintResult.optString("error") }
             val fingerprint = fingerprintResult.getString("fingerprint")
@@ -496,7 +496,7 @@ private fun DevicesScreen(
                     Text("Compare this code with the other device. Enter the code shown there; do not approve if the codes differ.", color = Muted, fontSize = 11.sp, lineHeight = 16.sp)
                     androidx.compose.material3.OutlinedTextField(
                         value = remoteCode,
-                        onValueChange = { if (it.length <= 6 && it.all(Char::isDigit)) remoteCode = it },
+                        onValueChange = { if (it.length <= 6 && it.all { character -> character.isDigit() }) remoteCode = it },
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true,
                         label = { Text("Code on the other device") },
