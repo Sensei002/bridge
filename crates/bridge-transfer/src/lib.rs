@@ -161,7 +161,7 @@ fn validate_file_name(name: &str) -> Result<(), TransferError> {
     if name.is_empty() || name.len() > MAX_FILENAME_BYTES || name == "." || name == ".." {
         return Err(TransferError::InvalidOffer("file name is empty, too long, or reserved".into()));
     }
-    if name.chars().any(|ch| ch.is_control() || ch == '/' || ch == '\\\\' || ch == ':' ) {
+    if name.chars().any(|ch| ch.is_control() || ch == '/' || ch == '\\' || ch == ':' ) {
         return Err(TransferError::InvalidOffer("file name contains a path separator or control character".into()));
     }
     if name.trim() != name || name.ends_with('.') || name.ends_with(' ') {
