@@ -80,11 +80,10 @@ class MainActivity : ComponentActivity() {
                 pairingStatus = pairingStatus,
                 onPair = { peer -> pairingController?.pair(peer) },
                 onApprove = { pending ->
-                    if (pairingController?.approve(pending) == true) {
-                        pendingPairings.remove(pending)
-                        trustedDevices.clear()
-                        trustedDevices.addAll(pairingController?.trustedDevices().orEmpty())
-                    }
+                    pairingController?.approve(pending)
+                    pendingPairings.remove(pending)
+                    trustedDevices.clear()
+                    trustedDevices.addAll(pairingController?.trustedDevices().orEmpty())
                 },
                 onReject = { pending ->
                     pairingController?.reject(pending)
