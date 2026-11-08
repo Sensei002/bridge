@@ -58,6 +58,7 @@ internal class BridgePairingController(
         .put("platform", "android")
         .put("protocol_version", 1)
     private val activeSessions = ConcurrentHashMap<String, Long>()
+    private val pendingSessions = ConcurrentHashMap<Long, Boolean>()
     @Volatile private var stopped = false
 
     fun start() {
@@ -81,7 +82,7 @@ internal class BridgePairingController(
                 val trusted = trustedDevices().firstOrNull { it.deviceId == peer.deviceId }
                 val expected = expectedFingerprint ?: trusted?.fingerprint
                 val response = JSONObject(
-                    BridgeNative.pairConnect(request(host = peer.host, expectedFingerprint = expected, port = peer.port))
+                    BridgeNative.pairConnect(request(host = peer.host, expectedFingerprint = expected, expectedDeviceId = peer.deviceId, port = peer.port))
                 )
                 handleResult(response)
             } catch (error: Exception) {
@@ -144,6 +145,7 @@ internal class BridgePairingController(
         }
         val existing = trustedDevices().firstOrNull { it.deviceId == pending.deviceId }
         if (existing != null && existing.fingerprint != pending.fingerprint) {
+            pendingSessions.remove(pending.handle)
             BridgeNative.sessionClose(pending.handle)
             postStatus("Identity changed for a previously trusted device. Pairing blocked.")
             return false
@@ -151,16 +153,19 @@ internal class BridgePairingController(
         val all = trustedDevices().filterNot { it.deviceId == pending.deviceId }.toMutableList()
         all += BridgeTrustedDevice(pending.deviceId, pending.name, pending.platform, pending.fingerprint, System.currentTimeMillis())
         if (!saveTrusted(all)) {
+            pendingSessions.remove(pending.handle)
             BridgeNative.sessionClose(pending.handle)
             postStatus("Could not persist trusted-device approval.")
             return false
         }
-        activeSessions[pending.deviceId] = pending.handle
+        pendingSessions.remove(pending.handle)
+        activeSessions.put(pending.deviceId, pending.handle)?.let(BridgeNative::sessionClose)
         postStatus("${pending.name} is trusted. Encrypted Noise session established.")
         return true
     }
 
     fun reject(pending: BridgePendingPairing) {
+        pendingSessions.remove(pending.handle)
         BridgeNative.sessionClose(pending.handle)
         postStatus("Pairing rejected. No trust record was created.")
     }
@@ -209,6 +214,8 @@ internal class BridgePairingController(
         stopped = true
         activeSessions.values.forEach(BridgeNative::sessionClose)
         activeSessions.clear()
+        pendingSessions.keys.toList().forEach(BridgeNative::sessionClose)
+        pendingSessions.clear()
     }
 
     private fun handleResult(response: JSONObject) {
@@ -232,6 +239,7 @@ internal class BridgePairingController(
             }
             return
         }
+        pendingSessions[handle] = true
         val pending = BridgePendingPairing(
             handle = handle,
             sas = response.getString("sas"),
@@ -240,13 +248,19 @@ internal class BridgePairingController(
             name = remote.getString("display_name"),
             platform = remote.getString("platform")
         )
-        mainHandler.post { if (!stopped) onPending(pending) else BridgeNative.sessionClose(handle) }
+        mainHandler.post {
+            if (!stopped) onPending(pending) else {
+                pendingSessions.remove(handle)
+                BridgeNative.sessionClose(handle)
+            }
+        }
     }
 
     private fun request(
         host: String? = null,
         bindIp: String? = null,
         expectedFingerprint: String? = null,
+        expectedDeviceId: String? = null,
         port: Int = 45821
     ): String {
         val json = JSONObject()
@@ -255,6 +269,7 @@ internal class BridgePairingController(
             .put("private_key_hex", keyHex)
             .put("local_device", localDescriptor)
             .put("expected_fingerprint", expectedFingerprint ?: JSONObject.NULL)
+            .put("expected_device_id", expectedDeviceId ?: JSONObject.NULL)
         if (host != null) json.put("host", host)
         if (bindIp != null) json.put("bind_ip", bindIp)
         return json.toString()
