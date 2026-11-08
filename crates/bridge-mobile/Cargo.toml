@@ -9,6 +9,7 @@ description = "C ABI and JNI bridge for the native Bridge mobile clients"
 crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
+bridge-core = { path = "../bridge-core" }
 bridge-network = { path = "../bridge-network" }
 bridge-protocol = { path = "../bridge-protocol" }
 bridge-security = { path = "../bridge-security" }
