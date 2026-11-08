@@ -53,12 +53,12 @@ fn decode_hex(value: &str) -> Result<Vec<u8>, String> {
         return Err("Noise private key must be 64 hexadecimal characters".into());
     }
     (0..value.len()).step_by(2)
-        .map(|i| u8::from_str_radix(&value[i..i + 2], 16).map_err(|e| e.to_string()))
+        .map(|i| u8::from_str_radix(&value[i..i + 2], 16).map_err(|e: std::num::ParseIntError| e.to_string()))
         .collect()
 }
 
 fn register(mut connection: NoiseConnection, local: &DeviceDescriptor) -> Result<PairResult, String> {
-    let remote = connection.exchange_descriptors(local).map_err(|e| e.to_string())?;
+    let remote = connection.exchange_descriptors(local).map_err(|e: bridge_network::NetworkError| e.to_string())?;
     let handle = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
     let result = PairResult {
         ok: true,
@@ -73,14 +73,14 @@ fn register(mut connection: NoiseConnection, local: &DeviceDescriptor) -> Result
 }
 
 fn pair_connect(request: PairRequest) -> Result<PairResult, String> {
-    request.local_device.validate().map_err(|e| e.to_string())?;
+    request.local_device.validate().map_err(|e: bridge_protocol::ProtocolValidationError| e.to_string())?;
     let key = decode_hex(&request.private_key_hex)?;
     let host = request.host.ok_or("missing peer host")?;
     let address = (host.as_str(), request.port).to_socket_addrs()
-        .map_err(|e| e.to_string())?
+        .map_err(|e: std::io::Error| e.to_string())?
         .next().ok_or("peer host did not resolve")?;
     let stream = TcpStream::connect_timeout(&address, Duration::from_secs(5))
-        .map_err(|e| e.to_string())?;
+        .map_err(|e: std::io::Error| e.to_string())?;
     let connection = match connect_noise_xx(stream, &key, request.expected_fingerprint.as_deref()) {
         Ok(connection) => connection,
         Err(error) => return Err(error.to_string()),
@@ -89,12 +89,12 @@ fn pair_connect(request: PairRequest) -> Result<PairResult, String> {
 }
 
 fn pair_accept(request: PairRequest) -> Result<PairResult, String> {
-    request.local_device.validate().map_err(|e| e.to_string())?;
+    request.local_device.validate().map_err(|e: bridge_protocol::ProtocolValidationError| e.to_string())?;
     let key = decode_hex(&request.private_key_hex)?;
     let ip = request.bind_ip.unwrap_or_else(|| "0.0.0.0".into());
-    let address: SocketAddr = format!("{ip}:{}", request.port).parse().map_err(|e| e.to_string())?;
-    let listener = TcpListener::bind(address).map_err(|e| e.to_string())?;
-    listener.set_nonblocking(true).map_err(|e| e.to_string())?;
+    let address: SocketAddr = format!("{ip}:{}", request.port).parse().map_err(|e: std::net::AddrParseError| e.to_string())?;
+    let listener = TcpListener::bind(address).map_err(|e: std::io::Error| e.to_string())?;
+    listener.set_nonblocking(true).map_err(|e: std::io::Error| e.to_string())?;
     let timeout = Duration::from_millis(request.timeout_ms.unwrap_or(1_000).clamp(250, 30_000));
     let started = Instant::now();
     let stream = loop {
@@ -124,7 +124,7 @@ pub unsafe extern "C" fn bridge_identity_fingerprint(private_key_hex: *const c_c
     let result: Result<String, String> = CStr::from_ptr(private_key_hex).to_str()
         .map_err(|e: std::str::Utf8Error| e.to_string())
         .and_then(decode_hex)
-        .and_then(|key| bridge_network::local_key_fingerprint(&key).map_err(|e| e.to_string()));
+        .and_then(|key| bridge_network::local_key_fingerprint(&key).map_err(|e: bridge_network::NetworkError| e.to_string()));
     let json = match result {
         Ok(fingerprint) => serde_json::json!({"ok": true, "fingerprint": fingerprint}),
         Err(error) => serde_json::json!({"ok": false, "error": error}),
@@ -142,8 +142,8 @@ fn to_json(result: Result<PairResult, String>) -> CString {
 pub unsafe extern "C" fn bridge_pair_connect(request_json: *const c_char) -> *mut c_char {
     if request_json.is_null() { return to_json(Err("null request".into())).into_raw(); }
     let request = match CStr::from_ptr(request_json).to_str()
-        .map_err(|e| e.to_string())
-        .and_then(|s| serde_json::from_str::<PairRequest>(s).map_err(|e| e.to_string())) {
+        .map_err(|e: std::str::Utf8Error| e.to_string())
+        .and_then(|s| serde_json::from_str::<PairRequest>(s).map_err(|e: serde_json::Error| e.to_string())) {
         Ok(request) => request,
         Err(error) => return to_json(Err(error)).into_raw(),
     };
@@ -154,8 +154,8 @@ pub unsafe extern "C" fn bridge_pair_connect(request_json: *const c_char) -> *mu
 pub unsafe extern "C" fn bridge_pair_accept(request_json: *const c_char) -> *mut c_char {
     if request_json.is_null() { return to_json(Err("null request".into())).into_raw(); }
     let request = match CStr::from_ptr(request_json).to_str()
-        .map_err(|e| e.to_string())
-        .and_then(|s| serde_json::from_str::<PairRequest>(s).map_err(|e| e.to_string())) {
+        .map_err(|e: std::str::Utf8Error| e.to_string())
+        .and_then(|s| serde_json::from_str::<PairRequest>(s).map_err(|e: serde_json::Error| e.to_string())) {
         Ok(request) => request,
         Err(error) => return to_json(Err(error)).into_raw(),
     };
@@ -174,9 +174,9 @@ pub unsafe extern "C" fn bridge_session_send(handle: u64, message: *const c_char
             let connection = map.get_mut(&handle).ok_or_else(|| "session not found".to_string())?;
             let mut encrypted = vec![0_u8; 65_535];
             let length = connection.transport.write_message(message, &mut encrypted)
-                .map_err(|e| e.to_string())?;
+                .map_err(|e: snow::Error| e.to_string())?;
             bridge_network::write_frame(&mut connection.stream, &encrypted[..length])
-                .map_err(|e| e.to_string())
+                .map_err(|e: bridge_network::NetworkError| e.to_string())
         });
     let response = result.map(|()| PairResult {
         ok: true, handle: Some(handle), sas: None, remote_fingerprint: None,
@@ -191,11 +191,11 @@ pub unsafe extern "C" fn bridge_session_receive(handle: u64) -> *mut c_char {
         .and_then(|mut map| {
             let connection = map.get_mut(&handle).ok_or_else(|| "session not found".to_string())?;
             let encrypted = bridge_network::read_frame(&mut connection.stream)
-                .map_err(|e| e.to_string())?;
+                .map_err(|e: bridge_network::NetworkError| e.to_string())?;
             let mut plaintext = vec![0_u8; 65_535];
             let length = connection.transport.read_message(&encrypted, &mut plaintext)
-                .map_err(|e| e.to_string())?;
-            String::from_utf8(plaintext[..length].to_vec()).map_err(|e| e.to_string())
+                .map_err(|e: snow::Error| e.to_string())?;
+            String::from_utf8(plaintext[..length].to_vec()).map_err(|e: std::string::FromUtf8Error| e.to_string())
         });
     let json = serde_json::json!({"ok": result.is_ok(), "message": result.as_ref().ok(), "error": result.err()});
     CString::new(json.to_string()).unwrap().into_raw()
