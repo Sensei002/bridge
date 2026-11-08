@@ -1,0 +1,19 @@
+[package]
+name = "bridge-mobile"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "C ABI and JNI bridge for the native Bridge mobile clients"
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+bridge-network = { path = "../bridge-network" }
+bridge-protocol = { path = "../bridge-protocol" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
