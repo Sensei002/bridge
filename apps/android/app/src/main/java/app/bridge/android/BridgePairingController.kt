@@ -103,6 +103,18 @@ internal class BridgePairingController(
         return response.getString("uri")
     }
 
+    private fun localIpv4Address(): String {
+        val interfaces = NetworkInterface.getNetworkInterfaces()?.toList().orEmpty()
+        return interfaces
+            .filter { it.isUp && !it.isLoopback }
+            .sortedBy { if (it.name.startsWith("wlan")) 0 else 1 }
+            .flatMap { it.inetAddresses.toList() }
+            .filterIsInstance<Inet4Address>()
+            .firstOrNull { it.isSiteLocalAddress && !it.isLoopbackAddress }
+            ?.hostAddress
+            ?: error("No private IPv4 address is available. Connect to the same Wi-Fi network and try again.")
+    }
+
     /** Consume a scanned invitation once, then pin its fingerprint in the Noise XX handshake. */
     fun pairFromInvitation(uri: String) {
         try {
