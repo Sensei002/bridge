@@ -1,3 +1,6 @@
+#[cfg(windows)]
+mod identity_store;
+
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use eframe::egui;
@@ -66,6 +69,7 @@ struct BridgeApp {
 impl Default for BridgeApp {
     fn default() -> Self {
         let (network_tx, network_rx) = mpsc::channel();
+        let identity_status = secure_identity_status();
         let pairing_code = Arc::new(Mutex::new(String::new()));
         start_network_listener(network_tx.clone(), pairing_code.clone());
         Self {
@@ -76,7 +80,7 @@ impl Default for BridgeApp {
             notifications: true,
             auto_accept: false,
             network_ip: String::new(),
-            network_status: "Listening for Bridge test connections on port 45821".into(),
+            network_status: identity_status,
             network_rx,
             network_tx,
             pairing_code,
@@ -618,4 +622,18 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
     eframe::run_native("Bridge", options, Box::new(|_cc| Ok(Box::<BridgeApp>::default())))
+}
+
+fn secure_identity_status() -> String {
+    #[cfg(windows)]
+    {
+        return match identity_store::load_or_create() {
+            Ok(()) => "Device identity protected by Windows Credential Manager".into(),
+            Err(error) => format!("Secure device identity unavailable: {error}"),
+        };
+    }
+    #[cfg(not(windows))]
+    {
+        "Secure device identity is available in the Windows build".into()
+    }
 }
