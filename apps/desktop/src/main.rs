@@ -15,6 +15,8 @@ use std::net::TcpListener;
 #[cfg(windows)]
 use std::path::PathBuf;
 use std::sync::Arc;
+#[cfg(windows)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver};
 #[cfg(windows)]
 use std::sync::mpsc::Sender;
@@ -65,6 +67,16 @@ struct PendingApproval {
     descriptor: DeviceDescriptor,
     remote_code: String,
     already_trusted: bool,
+}
+
+#[cfg(windows)]
+struct ConnectionPermit(Arc<AtomicUsize>);
+
+#[cfg(windows)]
+impl Drop for ConnectionPermit {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 struct BridgeApp {
@@ -207,14 +219,26 @@ fn start_secure_listener(status: Sender<String>, pending: Sender<PendingApproval
             Err(error) => { let _ = status.send(format!("Secure listener could not bind: {error}")); return; }
         };
         let _ = status.send(format!("Secure pairing listener ready · identity {}", &fingerprint[..8]));
+        // Bound concurrent unauthenticated handshakes to prevent thread exhaustion.
+        const MAX_PENDING_HANDSHAKES: usize = 8;
+        let active = Arc::new(AtomicUsize::new(0));
         for incoming in listener.incoming() {
             match incoming {
                 Ok(stream) => {
+                    if active.fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                        (count < MAX_PENDING_HANDSHAKES).then_some(count + 1)
+                    }).is_err() {
+                        let _ = status.send("Pairing busy · rejected an additional incoming connection".into());
+                        drop(stream);
+                        continue;
+                    }
+                    let permit = ConnectionPermit(Arc::clone(&active));
                     let key = private_key.clone();
                     let local = local.clone();
                     let status = status.clone();
                     let pending = pending.clone();
                     thread::spawn(move || {
+                        let _permit = permit;
                         let result = accept_noise_xx(stream, &key, None)
                             .and_then(|mut connection| {
                                 let descriptor = connection.exchange_descriptors(&local)?;

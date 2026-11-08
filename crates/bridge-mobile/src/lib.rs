@@ -13,6 +13,7 @@ use bridge_network::{accept_noise_xx, connect_noise_xx, NoiseConnection};
 use bridge_protocol::DeviceDescriptor;
 use serde::{Deserialize, Serialize};
 
+const MAX_ACTIVE_SESSIONS: usize = 32;
 static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
 static SESSIONS: OnceLock<Mutex<HashMap<u64, NoiseConnection>>> = OnceLock::new();
 
@@ -59,6 +60,10 @@ fn decode_hex(value: &str) -> Result<Vec<u8>, String> {
 
 fn register(mut connection: NoiseConnection, local: &DeviceDescriptor) -> Result<PairResult, String> {
     let remote = connection.exchange_descriptors(local).map_err(|e: bridge_network::NetworkError| e.to_string())?;
+    let mut registry = sessions().lock().map_err(|_| "session registry poisoned")?;
+    if registry.len() >= MAX_ACTIVE_SESSIONS {
+        return Err("active session limit reached".into());
+    }
     let handle = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
     let result = PairResult {
         ok: true,
@@ -68,12 +73,13 @@ fn register(mut connection: NoiseConnection, local: &DeviceDescriptor) -> Result
         remote_device: Some(remote),
         error: None,
     };
-    sessions().lock().map_err(|_| "session registry poisoned")?.insert(handle, connection);
+    registry.insert(handle, connection);
     Ok(result)
 }
 
 fn pair_connect(request: PairRequest) -> Result<PairResult, String> {
     request.local_device.validate().map_err(|e: bridge_protocol::ProtocolValidationError| e.to_string())?;
+    if request.port == 0 { return Err("peer port must be non-zero".into()); }
     let key = decode_hex(&request.private_key_hex)?;
     let host = request.host.ok_or("missing peer host")?;
     let address = (host.as_str(), request.port).to_socket_addrs()
@@ -90,6 +96,7 @@ fn pair_connect(request: PairRequest) -> Result<PairResult, String> {
 
 fn pair_accept(request: PairRequest) -> Result<PairResult, String> {
     request.local_device.validate().map_err(|e: bridge_protocol::ProtocolValidationError| e.to_string())?;
+    if request.port == 0 { return Err("listener port must be non-zero".into()); }
     let key = decode_hex(&request.private_key_hex)?;
     let ip = request.bind_ip.unwrap_or_else(|| "0.0.0.0".into());
     let address: SocketAddr = format!("{ip}:{}", request.port).parse().map_err(|e: std::net::AddrParseError| e.to_string())?;
