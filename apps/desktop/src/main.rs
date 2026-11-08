@@ -108,8 +108,6 @@ struct BridgeApp {
     network_tx: Sender<String>,
     brand_texture: Option<egui::TextureHandle>,
     #[cfg(windows)]
-    invitation_uri: Option<String>,
-    #[cfg(windows)]
     invitation_texture: Option<egui::TextureHandle>,
 }
 
@@ -167,8 +165,6 @@ impl Default for BridgeApp {
             #[cfg(windows)]
             network_tx,
             brand_texture: None,
-            #[cfg(windows)]
-            invitation_uri: None,
             #[cfg(windows)]
             invitation_texture: None,
         }
@@ -911,7 +907,6 @@ impl eframe::App for BridgeApp {
                     if primary_button(ui, "Generate pairing QR") {
                         match create_local_invitation() {
                             Ok((uri, pixels)) => {
-                                self.invitation_uri = Some(uri);
                                 self.invitation_texture = Some(ctx.load_texture("bridge-pairing-qr", pixels, egui::TextureOptions::NEAREST));
                                 self.network_status = "Short-lived QR invitation created. It expires in two minutes.".into();
                             }
@@ -926,7 +921,6 @@ impl eframe::App for BridgeApp {
                             ui.image((texture.id(), egui::vec2(220.0, 220.0)));
                             muted(ui, "Scan with Bridge on Android or iOS. Expires after two minutes.");
                             if ui.button("Hide QR").clicked() {
-                                self.invitation_uri = None;
                                 self.invitation_texture = None;
                             }
                         });
