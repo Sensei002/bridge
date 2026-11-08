@@ -11,7 +11,7 @@ use std::{
 
 use bridge_network::{accept_noise_xx, connect_noise_xx, NoiseConnection};
 use bridge_core::pairing::{QrInvitation, QrInvitationReplayGuard};
-use bridge_protocol::DeviceDescriptor;
+use bridge_protocol::{DeviceDescriptor, DeviceId};
 use serde::{Deserialize, Serialize};
 
 const MAX_ACTIVE_SESSIONS: usize = 32;
@@ -31,6 +31,7 @@ struct PairRequest {
     private_key_hex: String,
     local_device: DeviceDescriptor,
     expected_fingerprint: Option<String>,
+    expected_device_id: Option<DeviceId>,
     timeout_ms: Option<u64>,
 }
 
@@ -60,8 +61,15 @@ fn decode_hex(value: &str) -> Result<Vec<u8>, String> {
         .collect()
 }
 
-fn register(mut connection: NoiseConnection, local: &DeviceDescriptor) -> Result<PairResult, String> {
+fn register(
+    mut connection: NoiseConnection,
+    local: &DeviceDescriptor,
+    expected_device_id: Option<&DeviceId>,
+) -> Result<PairResult, String> {
     let remote = connection.exchange_descriptors(local).map_err(|e: bridge_network::NetworkError| e.to_string())?;
+    if expected_device_id.is_some_and(|expected| *expected != remote.id) {
+        return Err("authenticated device ID does not match the selected peer or QR invitation".into());
+    }
     let mut registry = sessions().lock().map_err(|_| "session registry poisoned")?;
     if registry.len() >= MAX_ACTIVE_SESSIONS {
         return Err("active session limit reached".into());
@@ -93,7 +101,7 @@ fn pair_connect(request: PairRequest) -> Result<PairResult, String> {
         Ok(connection) => connection,
         Err(error) => return Err(error.to_string()),
     };
-    register(connection, &request.local_device)
+    register(connection, &request.local_device, request.expected_device_id.as_ref())
 }
 
 fn pair_accept(request: PairRequest) -> Result<PairResult, String> {
@@ -124,7 +132,7 @@ fn pair_accept(request: PairRequest) -> Result<PairResult, String> {
         Ok(connection) => connection,
         Err(error) => return Err(format!("{error}")),
     };
-    register(connection, &request.local_device)
+    register(connection, &request.local_device, None)
 }
 
 /// Derive the SHA-256 fingerprint for a 32-byte Noise private key encoded as hex.
@@ -420,7 +428,8 @@ mod tests {
             "timeout_ms": 5000,
             "private_key_hex": private_key.iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
             "local_device": device,
-            "expected_fingerprint": null
+            "expected_fingerprint": null,
+            "expected_device_id": null
         });
         value.to_string()
     }
