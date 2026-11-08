@@ -906,7 +906,7 @@ impl eframe::App for BridgeApp {
                     #[cfg(windows)]
                     if primary_button(ui, "Generate pairing QR") {
                         match create_local_invitation() {
-                            Ok((uri, pixels)) => {
+                            Ok((_uri, pixels)) => {
                                 self.invitation_texture = Some(ctx.load_texture("bridge-pairing-qr", pixels, egui::TextureOptions::NEAREST));
                                 self.network_status = "Short-lived QR invitation created. It expires in two minutes.".into();
                             }
@@ -957,15 +957,15 @@ fn create_local_invitation() -> Result<(String, egui::ColorImage), String> {
     let modules = code.width();
     let quiet = 4usize;
     let side = modules + quiet * 2;
-    let mut pixels = vec![egui::Color32::WHITE; side * side];
+    let mut pixels = vec![255u8; side * side];
     for y in 0..modules {
         for x in 0..modules {
             if code[(x, y)] == qrcode::Color::Dark {
-                pixels[(y + quiet) * side + x + quiet] = egui::Color32::BLACK;
+                pixels[(y + quiet) * side + x + quiet] = 0;
             }
         }
     }
-    Ok((invitation, egui::ColorImage::new([side, side], pixels)))
+    Ok((invitation, egui::ColorImage::from_gray([side, side], &pixels)))
 }
 
 #[cfg(windows)]
