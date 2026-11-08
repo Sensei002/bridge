@@ -492,6 +492,13 @@ mod tests {
         assert_eq!(parsed_decision["type"], "pairing_decision");
         assert_eq!(parsed_decision["decision"], "accepted");
 
+        // The background reader must not hold the Noise session lock while
+        // waiting for inbound data: a simultaneous outbound send must proceed.
+        let waiting_receiver = thread::spawn(move || session_receive_payload(initiator_handle).unwrap());
+        session_send_payload(initiator_handle, b"full-duplex request").unwrap();
+        assert_eq!(session_receive_payload(responder_handle).unwrap(), b"full-duplex request");
+        session_send_payload(responder_handle, b"full-duplex response").unwrap();
+        assert_eq!(waiting_receiver.join().unwrap(), b"full-duplex response");
         let binary_payload = vec![0x00, 0xff, 0x42, 0x00, 0x80, 0x7f];
         session_send_payload(initiator_handle, &binary_payload).unwrap();
         assert_eq!(session_receive_payload(responder_handle).unwrap(), binary_payload);
