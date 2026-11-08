@@ -82,7 +82,27 @@ fn register(
         error: None,
         role: Some(role.into()),
     };
-    registry.insert(handle, Arc::new(Mutex::new(connection)));
+    let reader_stream = connection.stream.try_clone().map_err(|error| error.to_string())?;
+    let connection = Arc::new(Mutex::new(connection));
+    let (sender, incoming) = mpsc::channel();
+    let stop = Arc::new(AtomicBool::new(false));
+    let reader_connection = Arc::clone(&connection);
+    let reader_stop = Arc::clone(&stop);
+    thread::Builder::new().name(format!("bridge-session-reader-{handle}")).spawn(move || {
+        while !reader_stop.load(Ordering::Acquire) {
+            let encrypted = match bridge_network::read_frame(&mut &reader_stream) { Ok(frame) => frame, Err(_) => break };
+            let plaintext = {
+                let mut guard = match reader_connection.lock() { Ok(guard) => guard, Err(_) => break };
+                let mut plaintext = vec![0_u8; MAX_APPLICATION_BYTES];
+                match guard.transport.read_message(&encrypted, &mut plaintext) {
+                    Ok(length) => { plaintext.truncate(length); plaintext },
+                    Err(_) => break,
+                }
+            };
+            if sender.send(plaintext).is_err() { break; }
+        }
+    }).map_err(|error| error.to_string())?;
+    registry.insert(handle, Arc::new(SessionEntry { connection, incoming: Mutex::new(incoming), stop }));
     Ok(result)
 }
 
