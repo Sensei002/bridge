@@ -2,7 +2,7 @@
 //!
 //! This store intentionally contains public identity metadata only. Private
 //! device keys belong in each platform's secure storage (DPAPI/Keychain/Keystore).
-use std::{collections::HashMap, fs, io, path::{Path, PathBuf}};
+use std::{collections::HashMap, fs, io, path::Path};
 
 use bridge_protocol::DeviceDescriptor;
 use serde::{Deserialize, Serialize};
@@ -28,6 +28,10 @@ pub enum TrustStoreError {
     AlreadyTrusted,
     #[error("device is not trusted")]
     NotTrusted,
+    #[error("duplicate device ID in trust store")]
+    DuplicateDeviceId,
+    #[error("peer identity does not match the pinned fingerprint")]
+    IdentityMismatch,
 }
 
 /// Created only after the user confirms that both devices display the same SAS.
@@ -95,10 +99,7 @@ impl TrustStore {
                 .map_err(|error| TrustStoreError::InvalidDevice(error.to_string()))?;
             validate_fingerprint(&device.public_key_fingerprint)?;
             if store.devices.insert(device.descriptor.id, device).is_some() {
-                return Err(TrustStoreError::Serialization(
-                    serde_json::from_str("duplicate device ID in trust store")
-                        .expect_err("invalid JSON must produce a parse error")
-                ));
+                return Err(TrustStoreError::DuplicateDeviceId);
             }
         }
         Ok(store)
@@ -169,7 +170,7 @@ impl TrustStore {
         if trusted.public_key_fingerprint.eq_ignore_ascii_case(observed_fingerprint) {
             Ok(())
         } else {
-            Err(TrustStoreError::InvalidFingerprint)
+            Err(TrustStoreError::IdentityMismatch)
         }
     }
 
@@ -195,6 +196,7 @@ fn validate_fingerprint(value: &str) -> Result<(), TrustStoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use bridge_protocol::{DeviceId, Platform, PROTOCOL_VERSION};
 
     fn device() -> DeviceDescriptor {
