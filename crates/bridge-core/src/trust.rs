@@ -247,6 +247,15 @@ mod tests {
         }
     }
 
+    fn device_with_id(id: DeviceId) -> DeviceDescriptor {
+        DeviceDescriptor {
+            id,
+            display_name: "Bridge phone".into(),
+            platform: Platform::Android,
+            protocol_version: PROTOCOL_VERSION,
+        }
+    }
+
     fn confirmation() -> SasConfirmation {
         SasConfirmation::user_confirmed("042681", "042681", "042681", &"ab".repeat(32)).unwrap()
     }
@@ -297,6 +306,23 @@ mod tests {
         assert!(TrustStore::load(&path).unwrap().is_trusted(&id));
         store.revoke_and_save(&id, &path).unwrap();
         assert!(!TrustStore::load(&path).unwrap().is_trusted(&id));
+    }
+
+    #[test]
+    fn failed_durable_trust_and_revoke_roll_back_memory() {
+        let directory = tempfile::tempdir().unwrap();
+        let invalid_target = directory.path();
+        let descriptor = device();
+        let id = descriptor.id;
+        let mut store = TrustStore::new();
+
+        assert!(store.trust_and_save(descriptor, confirmation(), 100, invalid_target).is_err());
+        assert!(!store.is_trusted(&id));
+
+        let valid_path = directory.path().join("trusted-devices.json");
+        store.trust_and_save(device_with_id(id), confirmation(), 100, &valid_path).unwrap();
+        assert!(store.revoke_and_save(&id, invalid_target).is_err());
+        assert!(store.is_trusted(&id));
     }
 
     #[test]
