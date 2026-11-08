@@ -914,16 +914,18 @@ impl eframe::App for BridgeApp {
                         }
                     }
                     #[cfg(windows)]
-                    let invitation_texture = self.invitation_texture.clone();
-                    if let Some(texture) = invitation_texture {
-                        ui.add_space(8.0);
-                        ui.vertical_centered(|ui| {
-                            ui.image((texture.id(), egui::vec2(220.0, 220.0)));
-                            muted(ui, "Scan with Bridge on Android or iOS. Expires after two minutes.");
-                            if ui.button("Hide QR").clicked() {
-                                self.invitation_texture = None;
-                            }
-                        });
+                    {
+                        let invitation_texture = self.invitation_texture.clone();
+                        if let Some(texture) = invitation_texture {
+                            ui.add_space(8.0);
+                            ui.vertical_centered(|ui| {
+                                ui.image((texture.id(), egui::vec2(220.0, 220.0)));
+                                muted(ui, "Scan with Bridge on Android or iOS. Expires after two minutes.");
+                                if ui.button("Hide QR").clicked() {
+                                    self.invitation_texture = None;
+                                }
+                            });
+                        }
                     }
                     ui.add_space(12.0);
                     if ui.button("Close").clicked() { self.show_pair_dialog = false; }
