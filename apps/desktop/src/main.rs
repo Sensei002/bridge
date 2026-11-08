@@ -64,6 +64,7 @@ struct PendingApproval {
     connection: NoiseConnection,
     descriptor: DeviceDescriptor,
     remote_code: String,
+    already_trusted: bool,
 }
 
 struct BridgeApp {
@@ -205,8 +206,23 @@ fn start_secure_listener(status: Sender<String>, pending: Sender<PendingApproval
                             });
                         match result {
                             Ok((connection, descriptor)) => {
-                                let _ = status.send(format!("Authenticated handshake from {} · awaiting matching code and approval", descriptor.display_name));
-                                if pending.send(PendingApproval { connection, descriptor, remote_code: String::new() }).is_err() {
+                                let store = TrustStore::load(trust_store_path()).unwrap_or_default();
+                                let already_trusted = if let Some(trusted) = store.get(&descriptor.id) {
+                                    if !trusted.public_key_fingerprint.eq_ignore_ascii_case(&connection.remote_fingerprint) {
+                                        let _ = status.send(format!("Rejected identity change for trusted device {}", descriptor.display_name));
+                                        return;
+                                    }
+                                    true
+                                } else { false };
+                                let message = if already_trusted {
+                                    format!("Secure session re-established with {}", descriptor.display_name)
+                                } else {
+                                    format!("Authenticated handshake from {} · awaiting matching code and approval", descriptor.display_name)
+                                };
+                                let _ = status.send(message);
+                                if pending.send(PendingApproval {
+                                    connection, descriptor, remote_code: String::new(), already_trusted
+                                }).is_err() {
                                     let _ = status.send("Pairing window closed; pending session discarded".into());
                                 }
                             }
@@ -236,7 +252,14 @@ fn start_pairing(peer: DiscoveredPeer, expected: Option<String>, status: Sender<
                     protocol_version: PROTOCOL_VERSION,
                 };
                 let descriptor = connection.exchange_descriptors(&local).map_err(|error| error.to_string())?;
-                Ok(PendingApproval { connection, descriptor, remote_code: String::new() })
+                let store = TrustStore::load(trust_store_path()).map_err(|error| error.to_string())?;
+                let already_trusted = if let Some(trusted) = store.get(&descriptor.id) {
+                    if !trusted.public_key_fingerprint.eq_ignore_ascii_case(&connection.remote_fingerprint) {
+                        return Err("trusted peer fingerprint mismatch".into());
+                    }
+                    true
+                } else { false };
+                Ok(PendingApproval { connection, descriptor, remote_code: String::new(), already_trusted })
             });
         match result {
             Ok(approval) => {
@@ -368,7 +391,14 @@ impl eframe::App for BridgeApp {
                     self.discovered_peers.push(peer);
                 }
             }
-            self.pending_pairings.extend(self.pairing_rx.try_iter());
+            for pairing in self.pairing_rx.try_iter() {
+                if pairing.already_trusted {
+                    self.network_status = format!("Secure session re-established with {}.", pairing.descriptor.display_name);
+                    self.active_sessions.push(pairing.connection);
+                } else {
+                    self.pending_pairings.push(pairing);
+                }
+            }
         }
         ctx.request_repaint_after(Duration::from_millis(250));
         if self.brand_texture.is_none() {
