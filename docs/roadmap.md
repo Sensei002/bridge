@@ -26,7 +26,8 @@
 - [x] CI builds for Windows native app, Android APK, iOS Simulator app, and Rust workspace
 - [x] Secure QR invitation data model, strict validation, expiry, bounded one-time nonce replay guard, and URI codec
 - [x] Rust FFI/JNI/Swift entry points for QR invitation creation and consumption
-- [x] Scanned invitation endpoint and expected Noise fingerprint are passed into the mobile pairing controllers
+- [x] Scanned invitation endpoint, expected Noise fingerprint, and expected device ID are passed into the mobile pairing controllers; the authenticated descriptor ID is checked before session registration
+- [x] Mobile pending sessions are closed on rejection, persistence failure, app shutdown, and late completion after shutdown
 
 ### Remaining completion gates
 - [x] Native QR code rendering and invitation display in Windows egui, Android Compose, and iOS SwiftUI pairing UI
