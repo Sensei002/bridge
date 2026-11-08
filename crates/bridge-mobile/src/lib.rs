@@ -201,6 +201,10 @@ fn qr_json(value: serde_json::Value) -> *mut c_char {
 }
 
 /// Create a validated, short-lived QR invitation URI from a local device descriptor.
+///
+/// # Safety
+/// `request_json` must be null or point to a valid NUL-terminated UTF-8 JSON C string.
+/// The returned allocation must be released with `bridge_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn bridge_qr_invitation_create(request_json: *const c_char) -> *mut c_char {
     if request_json.is_null() { return qr_json(serde_json::json!({"ok":false,"error":"null request"})); }
@@ -221,6 +225,10 @@ pub unsafe extern "C" fn bridge_qr_invitation_create(request_json: *const c_char
 }
 
 /// Validate and consume a QR invitation nonce once per process before starting Noise XX.
+///
+/// # Safety
+/// `uri` must be null or point to a valid NUL-terminated UTF-8 C string.
+/// The returned allocation must be released with `bridge_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn bridge_qr_invitation_consume(uri: *const c_char, now_ms: u64) -> *mut c_char {
     if uri.is_null() { return qr_json(serde_json::json!({"ok":false,"error":"null invitation"})); }
