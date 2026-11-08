@@ -48,7 +48,7 @@ struct BridgeHomeView: View {
                                             .font(.system(size: 9)).foregroundStyle(.white.opacity(0.55))
                                     }
                                     Spacer()
-                                    Button("Pair") { pairing.pair(peer) }
+                                    Button("Connect") { pairing.pair(peer) }
                                         .font(.system(size: 11, weight: .bold))
                                         .foregroundStyle(bridgeBackground)
                                         .padding(.horizontal, 12).padding(.vertical, 7)
