@@ -273,3 +273,80 @@ mod android_jni {
         _env: JNIEnv, _class: JClass, handle: jni::sys::jlong
     ) { bridge_session_close(handle as u64); }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bridge_protocol::{DeviceId, Platform, PROTOCOL_VERSION};
+    use bridge_security::generate_static_keypair;
+    use std::{ffi::{CStr, CString}, net::TcpListener, thread};
+
+    fn request(
+        host: Option<&str>,
+        bind_ip: Option<&str>,
+        port: u16,
+        private_key: &[u8],
+        device: DeviceDescriptor,
+    ) -> String {
+        let value = serde_json::json!({
+            "host": host,
+            "bind_ip": bind_ip,
+            "port": port,
+            "timeout_ms": 5000,
+            "private_key_hex": private_key.iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
+            "local_device": device,
+            "expected_fingerprint": null
+        });
+        value.to_string()
+    }
+
+    unsafe fn take_json(pointer: *mut c_char) -> serde_json::Value {
+        let value = CStr::from_ptr(pointer).to_string_lossy().into_owned();
+        bridge_string_free(pointer);
+        serde_json::from_str(&value).unwrap()
+    }
+
+    #[test]
+    fn native_ffi_pairing_and_encrypted_transport_round_trip() {
+        let initiator_key = generate_static_keypair().unwrap();
+        let responder_key = generate_static_keypair().unwrap();
+        let initiator_device = DeviceDescriptor {
+            id: DeviceId::new(), display_name: "Bridge iPhone".into(),
+            platform: Platform::Ios, protocol_version: PROTOCOL_VERSION,
+        };
+        let responder_device = DeviceDescriptor {
+            id: DeviceId::new(), display_name: "Bridge Android".into(),
+            platform: Platform::Android, protocol_version: PROTOCOL_VERSION,
+        };
+        let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let accept_request = request(None, Some("127.0.0.1"), port, &responder_key.private, responder_device);
+        let responder = thread::spawn(move || {
+            let input = CString::new(accept_request).unwrap();
+            unsafe { take_json(bridge_pair_accept(input.as_ptr())) }
+        });
+        thread::sleep(Duration::from_millis(150));
+
+        let connect_request = request(Some("127.0.0.1"), None, port, &initiator_key.private, initiator_device);
+        let input = CString::new(connect_request).unwrap();
+        let initiator = unsafe { take_json(bridge_pair_connect(input.as_ptr())) };
+        let responder = responder.join().unwrap();
+
+        assert_eq!(initiator["ok"], true);
+        assert_eq!(responder["ok"], true);
+        assert_eq!(initiator["sas"], responder["sas"]);
+        assert_eq!(initiator["remote_device"]["platform"], "android");
+        assert_eq!(responder["remote_device"]["platform"], "ios");
+
+        let initiator_handle = initiator["handle"].as_u64().unwrap();
+        let responder_handle = responder["handle"].as_u64().unwrap();
+        let message = CString::new("encrypted native bridge payload").unwrap();
+        let sent = unsafe { take_json(bridge_session_send(initiator_handle, message.as_ptr())) };
+        assert_eq!(sent["ok"], true);
+        let received = unsafe { take_json(bridge_session_receive(responder_handle)) };
+        assert_eq!(received["ok"], true);
+        assert_eq!(received["message"], "encrypted native bridge payload");
+
+        bridge_session_close(initiator_handle);
+        bridge_session_close(responder_handle);
+    }
+}

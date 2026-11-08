@@ -11,6 +11,7 @@ crate-type = ["cdylib", "staticlib"]
 [dependencies]
 bridge-network = { path = "../bridge-network" }
 bridge-protocol = { path = "../bridge-protocol" }
+bridge-security = { path = "../bridge-security" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
