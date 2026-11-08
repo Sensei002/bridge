@@ -10,14 +10,12 @@ use std::{
 };
 
 use bridge_network::{accept_noise_xx, connect_noise_xx, NoiseConnection};
-use bridge_core::pairing::{QrInvitation, QrInvitationReplayGuard};
 use bridge_protocol::{DeviceDescriptor, DeviceId};
 use serde::{Deserialize, Serialize};
 
 const MAX_ACTIVE_SESSIONS: usize = 32;
 static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
 static SESSIONS: OnceLock<Mutex<HashMap<u64, NoiseConnection>>> = OnceLock::new();
-static QR_REPLAY_GUARD: OnceLock<Mutex<QrInvitationReplayGuard>> = OnceLock::new();
 
 fn sessions() -> &'static Mutex<HashMap<u64, NoiseConnection>> {
     SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
@@ -70,7 +68,7 @@ fn register(
 ) -> Result<PairResult, String> {
     let remote = connection.exchange_descriptors(local).map_err(|e: bridge_network::NetworkError| e.to_string())?;
     if expected_device_id.is_some_and(|expected| *expected != remote.id) {
-        return Err("authenticated device ID does not match the selected peer or QR invitation".into());
+        return Err("authenticated device ID does not match the selected peer".into());
     }
     let mut registry = sessions().lock().map_err(|_| "session registry poisoned")?;
     if registry.len() >= MAX_ACTIVE_SESSIONS {
@@ -198,66 +196,6 @@ pub unsafe extern "C" fn bridge_pair_accept(request_json: *const c_char) -> *mut
 }
 
 
-#[derive(Deserialize)]
-struct QrCreateRequest {
-    device: DeviceDescriptor,
-    host: String,
-    port: u16,
-    fingerprint: String,
-    now_ms: u64,
-}
-
-fn qr_json(value: serde_json::Value) -> *mut c_char {
-    CString::new(value.to_string()).unwrap_or_else(|_| CString::new("{\"ok\":false,\"error\":\"invalid QR response\"}").unwrap()).into_raw()
-}
-
-/// Create a validated, short-lived QR invitation URI from a local device descriptor.
-///
-/// # Safety
-/// `request_json` must be null or point to a valid NUL-terminated UTF-8 JSON C string.
-/// The returned allocation must be released with `bridge_string_free`.
-#[no_mangle]
-pub unsafe extern "C" fn bridge_qr_invitation_create(request_json: *const c_char) -> *mut c_char {
-    if request_json.is_null() { return qr_json(serde_json::json!({"ok":false,"error":"null request"})); }
-    let result = CStr::from_ptr(request_json).to_str()
-        .map_err(|e| e.to_string())
-        .and_then(|raw| serde_json::from_str::<QrCreateRequest>(raw).map_err(|e| e.to_string()))
-        .and_then(|request| {
-            QrInvitation::create(&request.device, &request.host, request.port, &request.fingerprint, request.now_ms)
-                .map_err(|e| e.to_string())
-        });
-    match result {
-        Ok(invitation) => match invitation.encode() {
-            Ok(uri) => qr_json(serde_json::json!({"ok":true,"uri":uri,"expires_at_ms":invitation.expires_at_ms})),
-            Err(error) => qr_json(serde_json::json!({"ok":false,"error":error.to_string()})),
-        },
-        Err(error) => qr_json(serde_json::json!({"ok":false,"error":error})),
-    }
-}
-
-/// Validate and consume a QR invitation nonce once per process before starting Noise XX.
-///
-/// # Safety
-/// `uri` must be null or point to a valid NUL-terminated UTF-8 C string.
-/// The returned allocation must be released with `bridge_string_free`.
-#[no_mangle]
-pub unsafe extern "C" fn bridge_qr_invitation_consume(uri: *const c_char, now_ms: u64) -> *mut c_char {
-    if uri.is_null() { return qr_json(serde_json::json!({"ok":false,"error":"null invitation"})); }
-    let result = CStr::from_ptr(uri).to_str()
-        .map_err(|e| e.to_string())
-        .and_then(|value| QrInvitation::decode(value, now_ms).map_err(|e| e.to_string()))
-        .and_then(|invitation| {
-            let guard = QR_REPLAY_GUARD.get_or_init(|| Mutex::new(QrInvitationReplayGuard::default()));
-            let mut guard = guard.lock().map_err(|_| "QR replay guard poisoned".to_string())?;
-            guard.consume(&invitation, now_ms).map_err(|e| e.to_string())?;
-            Ok(invitation)
-        });
-    match result {
-        Ok(invitation) => qr_json(serde_json::json!({"ok":true,"invitation":invitation})),
-        Err(error) => qr_json(serde_json::json!({"ok":false,"error":error})),
-    }
-}
-
 /// Encrypt and send one UTF-8 application message on an established session.
 ///
 /// # Safety
@@ -363,30 +301,6 @@ mod android_jni {
         env: JNIEnv, _class: JClass, request: JString
     ) -> jstring { invoke(env, request, true) }
 
-
-    #[no_mangle]
-    pub extern "system" fn Java_app_bridge_android_BridgeNative_qrInvitationCreate(
-        mut env: JNIEnv, _class: JClass, request: JString
-    ) -> jstring {
-        let text: String = env.get_string(&request).map(|v| v.into()).unwrap_or_default();
-        let input = CString::new(text).unwrap_or_default();
-        let output = unsafe { bridge_qr_invitation_create(input.as_ptr()) };
-        let response = unsafe { CStr::from_ptr(output).to_string_lossy().into_owned() };
-        unsafe { bridge_string_free(output); }
-        env.new_string(response).map(|value| value.into_raw()).unwrap_or(std::ptr::null_mut())
-    }
-
-    #[no_mangle]
-    pub extern "system" fn Java_app_bridge_android_BridgeNative_qrInvitationConsume(
-        mut env: JNIEnv, _class: JClass, uri: JString, now_ms: jni::sys::jlong
-    ) -> jstring {
-        let text: String = env.get_string(&uri).map(|v| v.into()).unwrap_or_default();
-        let input = CString::new(text).unwrap_or_default();
-        let output = unsafe { bridge_qr_invitation_consume(input.as_ptr(), now_ms.max(0) as u64) };
-        let response = unsafe { CStr::from_ptr(output).to_string_lossy().into_owned() };
-        unsafe { bridge_string_free(output); }
-        env.new_string(response).map(|value| value.into_raw()).unwrap_or(std::ptr::null_mut())
-    }
 
     #[no_mangle]
     pub extern "system" fn Java_app_bridge_android_BridgeNative_sessionSend(
@@ -495,57 +409,5 @@ mod tests {
         bridge_session_close(responder_handle);
     }
 
-    #[test]
-    fn qr_invitation_ffi_preserves_platform_and_rejects_replay() {
-        let device = DeviceDescriptor {
-            id: DeviceId::new(), display_name: "Bridge Windows".into(),
-            platform: Platform::Windows, protocol_version: PROTOCOL_VERSION,
-        };
-        let request = serde_json::json!({
-            "device": device, "host": "192.168.1.25", "port": 45821,
-            "fingerprint": "ab".repeat(32), "now_ms": 50_000
-        }).to_string();
-        let input = CString::new(request).unwrap();
-        let created = unsafe { take_json(bridge_qr_invitation_create(input.as_ptr())) };
-        assert_eq!(created["ok"], true);
-        let uri = created["uri"].as_str().unwrap();
-        let uri_input = CString::new(uri).unwrap();
-        let consumed = unsafe { take_json(bridge_qr_invitation_consume(uri_input.as_ptr(), 50_001)) };
-        assert_eq!(consumed["ok"], true);
-        assert_eq!(consumed["invitation"]["platform"], "windows");
-        let replayed = unsafe { take_json(bridge_qr_invitation_consume(uri_input.as_ptr(), 50_002)) };
-        assert_eq!(replayed["ok"], false);
-        assert!(replayed["error"].as_str().unwrap().contains("already been consumed"));
-    }
-
-    #[test]
-    fn qr_pairing_rejects_authenticated_device_id_mismatch() {
-        let initiator_key = generate_static_keypair().unwrap();
-        let responder_key = generate_static_keypair().unwrap();
-        let initiator_device = DeviceDescriptor {
-            id: DeviceId::new(), display_name: "Bridge iOS".into(),
-            platform: Platform::Ios, protocol_version: PROTOCOL_VERSION,
-        };
-        let responder_device = DeviceDescriptor {
-            id: DeviceId::new(), display_name: "Bridge Windows".into(),
-            platform: Platform::Windows, protocol_version: PROTOCOL_VERSION,
-        };
-        let wrong_expected_id = DeviceId::new();
-        let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-        let accept_request = request(None, Some("127.0.0.1"), port, &responder_key.private, responder_device, None);
-        let responder = thread::spawn(move || {
-            let input = CString::new(accept_request).unwrap();
-            unsafe { take_json(bridge_pair_accept(input.as_ptr())) }
-        });
-        thread::sleep(Duration::from_millis(150));
-        let connect_request = request(Some("127.0.0.1"), None, port, &initiator_key.private, initiator_device, Some(wrong_expected_id));
-        let input = CString::new(connect_request).unwrap();
-        let initiator = unsafe { take_json(bridge_pair_connect(input.as_ptr())) };
-        let responder = responder.join().unwrap();
-        assert_eq!(responder["ok"], true);
-        assert_eq!(initiator["ok"], false);
-        assert!(initiator["error"].as_str().unwrap().contains("device ID does not match"));
-        bridge_session_close(responder["handle"].as_u64().unwrap());
-    }
 
 }
