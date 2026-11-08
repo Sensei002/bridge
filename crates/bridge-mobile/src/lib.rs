@@ -251,9 +251,17 @@ pub unsafe extern "C" fn bridge_session_send(handle: u64, message: *const c_char
     to_json(response).into_raw()
 }
 
+/// Encrypt and send one bounded binary application message on an established session.
+///
+/// # Safety
+/// `data` must point to `length` readable bytes, or be null only when rejected.
+/// The returned allocation must be released with `bridge_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn bridge_session_send_bytes(handle: u64, data: *const u8, length: usize) -> *mut c_char {
     if data.is_null() { return to_json(Err("null byte payload".into())).into_raw(); }
+    if length == 0 || length > MAX_APPLICATION_BYTES {
+        return to_json(Err(format!("application message length must be 1..={MAX_APPLICATION_BYTES} bytes"))).into_raw();
+    }
     let result = session_send_payload(handle, std::slice::from_raw_parts(data, length));
     let response = result.map(|()| PairResult {
         ok: true, handle: Some(handle), remote_fingerprint: None,
