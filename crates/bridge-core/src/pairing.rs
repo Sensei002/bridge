@@ -187,9 +187,9 @@ impl QrInvitationReplayGuard {
     pub const MAX_TRACKED_NONCES: usize = 4_096;
 
     pub fn consume(&mut self, invitation: &QrInvitation, now_ms: u64) -> Result<(), QrInvitationError> {
-        invitation.validate(now_ms)?;
         self.expirations.retain(|_, expires_at| *expires_at > now_ms);
         self.consumed.retain(|nonce| self.expirations.contains_key(nonce));
+        invitation.validate(now_ms)?;
         if self.consumed.contains(&invitation.nonce) {
             return Err(QrInvitationError::Replayed);
         }
