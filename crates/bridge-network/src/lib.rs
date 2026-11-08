@@ -125,6 +125,7 @@ pub fn peer_from_event(event: &ServiceEvent) -> Option<DiscoveredPeer> {
     let address = service.get_addresses().iter().find_map(|ip| match ip {
         mdns_sd::ScopedIp::V4(v4) => Some(IpAddr::V4(*v4.addr())),
         mdns_sd::ScopedIp::V6(v6) => Some(IpAddr::V6(*v6.addr())),
+        _ => None,
     })?;
     Some(DiscoveredPeer {
         record,
