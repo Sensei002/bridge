@@ -15,6 +15,7 @@ bridge-security = { path = "../bridge-security" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+snow = "0.9.6"
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.21"
