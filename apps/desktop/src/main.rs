@@ -2,8 +2,12 @@
 
 #[cfg(windows)]
 mod identity_store;
+#[cfg(windows)]
+mod updater;
 
 use eframe::egui;
+#[cfg(windows)]
+use updater::{UpdateEvent, check_for_update};
 #[cfg(windows)]
 use bridge_network::{accept_noise_xx, connect_noise_xx, connect_to_peer, local_key_fingerprint, peer_from_event, DiscoveredPeer, DiscoveryRecord, LocalDiscovery, NoiseConnection};
 #[cfg(windows)]
@@ -421,6 +425,16 @@ struct BridgeApp {
     trust_store: TrustStore,
     #[cfg(windows)]
     trust_store_error: Option<String>,
+    #[cfg(windows)]
+    update_channel: String,
+    #[cfg(windows)]
+    update_status: String,
+    #[cfg(windows)]
+    update_available: Option<(String, PathBuf)>,
+    #[cfg(windows)]
+    update_tx: Sender<UpdateEvent>,
+    #[cfg(windows)]
+    update_rx: Receiver<UpdateEvent>,
     network_rx: Receiver<String>,
     #[cfg(windows)]
     network_tx: Sender<String>,
@@ -437,6 +451,10 @@ impl Default for BridgeApp {
         let (pairing_tx, pairing_rx) = mpsc::channel();
         #[cfg(windows)]
         let (transfer_tx, transfer_rx) = mpsc::channel();
+        #[cfg(windows)]
+        let (update_tx, update_rx) = mpsc::channel();
+        #[cfg(windows)]
+        let update_channel = load_update_channel();
         #[cfg(windows)]
         let (trust_store, trust_store_error) = match TrustStore::load(trust_store_path()) {
             Ok(store) => (store, None),
@@ -497,6 +515,16 @@ impl Default for BridgeApp {
             trust_store,
             #[cfg(windows)]
             trust_store_error,
+            #[cfg(windows)]
+            update_channel,
+            #[cfg(windows)]
+            update_status: "Choose a channel and check for updates.".into(),
+            #[cfg(windows)]
+            update_available: None,
+            #[cfg(windows)]
+            update_tx,
+            #[cfg(windows)]
+            update_rx,
             network_rx,
             #[cfg(windows)]
             network_tx,
@@ -834,6 +862,16 @@ impl eframe::App for BridgeApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         for message in self.network_rx.try_iter() {
             self.network_status = message;
+        }
+        #[cfg(windows)]
+        for event in self.update_rx.try_iter() {
+            match event {
+                UpdateEvent::Status(message) => self.update_status = message,
+                UpdateEvent::Available { version, installer } => {
+                    self.update_status = format!("Bridge {version} is ready to install.");
+                    self.update_available = Some((version, installer));
+                }
+            }
         }
         #[cfg(windows)]
         {
@@ -1449,9 +1487,52 @@ impl eframe::App for BridgeApp {
                         });
                         ui.add_space(14.0);
                         panel(ui, |ui| {
+                            eyebrow(ui, "Software updates");
+                            ui.add_space(6.0);
+                            ui.horizontal(|ui| {
+                                ui.label("Update channel");
+                                if ui.selectable_label(self.update_channel == "development", "Development").clicked() {
+                                    self.update_channel = "development".into();
+                                    save_update_channel(&self.update_channel);
+                                    self.update_available = None;
+                                    self.update_status = "Development channel selected.".into();
+                                }
+                                if ui.selectable_label(self.update_channel == "stable", "Stable").clicked() {
+                                    self.update_channel = "stable".into();
+                                    save_update_channel(&self.update_channel);
+                                    self.update_available = None;
+                                    self.update_status = "Stable channel selected.".into();
+                                }
+                            });
+                            muted(ui, if self.update_channel == "stable" {
+                                "Stable releases will appear when the Stable channel launches."
+                            } else {
+                                "Development builds include the newest features and may be less stable."
+                            });
+                            if primary_button(ui, "Check for updates") {
+                                self.update_available = None;
+                                check_for_update(self.update_channel.clone(), self.update_tx.clone());
+                            }
+                            muted(ui, &self.update_status);
+                            if let Some((version, installer)) = self.update_available.clone() {
+                                if primary_button(ui, &format!("Install Bridge {version} and restart")) {
+                                    let launched = std::process::Command::new("msiexec")
+                                        .arg("/i").arg(&installer)
+                                        .args(["/passive", "/norestart"])
+                                        .spawn().is_ok();
+                                    if launched {
+                                        std::process::exit(0);
+                                    } else {
+                                        self.update_status = "Could not launch the Windows installer.".into();
+                                    }
+                                }
+                            }
+                        });
+                        ui.add_space(14.0);
+                        panel(ui, |ui| {
                             eyebrow(ui, "About");
                             ui.label(egui::RichText::new("Bridge for Windows").strong());
-                            muted(ui, "Version 0.3 preview · Native Rust interface");
+                            muted(ui, &format!("Version {} · Native Rust interface", env!("CARGO_PKG_VERSION")));
                         });
                     }
                 }
