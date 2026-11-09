@@ -45,6 +45,7 @@ internal class BridgePairingController(
     private val onPending: (BridgePendingPairing) -> Unit,
     private val onStatus: (String) -> Unit
 ) {
+    @Volatile var onSessionReady: ((String, Long) -> Unit)? = null
     private val appContext = context.applicationContext
     private val preferences = appContext.getSharedPreferences("bridge_trusted_devices", Context.MODE_PRIVATE)
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -120,6 +121,7 @@ internal class BridgePairingController(
         }
         pendingSessions.remove(pending.handle)
         activeSessions.put(pending.deviceId, pending.handle)?.let(BridgeNative::sessionClose)
+        onSessionReady?.invoke(pending.deviceId, pending.handle)
         postStatus("${pending.name} is now connected and trusted.")
         return true
     }
@@ -147,6 +149,7 @@ internal class BridgePairingController(
             all += BridgeTrustedDevice(peerId, remote.getString("display_name"), remote.getString("platform"), fingerprint, System.currentTimeMillis())
             check(saveTrusted(all)) { "Could not save the trusted device." }
             activeSessions.put(peerId, handle)?.let(BridgeNative::sessionClose)
+            onSessionReady?.invoke(peerId, handle)
             postStatus("${remote.getString("display_name")} accepted. Device connected.")
         } catch (error: Exception) {
             BridgeNative.sessionClose(handle)
@@ -238,6 +241,7 @@ internal class BridgePairingController(
                     }
                 }
                 activeSessions.put(peerId, handle)?.let(BridgeNative::sessionClose)
+                onSessionReady?.invoke(peerId, handle)
                 postStatus("Secure session re-established with ${trusted.name}.")
             } else {
                 BridgeNative.sessionClose(handle)
