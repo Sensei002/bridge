@@ -24,7 +24,9 @@ use std::sync::mpsc::{self, Receiver};
 use std::sync::mpsc::Sender;
 #[cfg(windows)]
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(windows)]
+use std::time::Instant;
 
 const BG: egui::Color32 = egui::Color32::from_rgb(10, 11, 15);
 const SIDEBAR: egui::Color32 = egui::Color32::from_rgb(13, 15, 19);
