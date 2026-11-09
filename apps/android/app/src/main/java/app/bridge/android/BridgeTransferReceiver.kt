@@ -273,6 +273,9 @@ internal class BridgeTransferReceiver(
                     sendControl(offer.handle, JSONObject()
                         .put("type", "file_cancel")
                         .put("transfer_id", offer.transferId))
+                    // Drain queued chunks until the sender acknowledges cancellation.
+                    // A full queue must never leave the single session reader blocked.
+                    awaitPeerCancellation(queue, offer.transferId)
                 } catch (_: Exception) { }
                 postStatus("Could not receive ${offer.fileName}: ${error.message}")
             } finally {
@@ -280,6 +283,20 @@ internal class BridgeTransferReceiver(
             }
             }
         }, "BridgeFileReceive-${offer.transferId}").apply { isDaemon = true; start() }
+    }
+
+    private fun awaitPeerCancellation(queue: LinkedBlockingQueue<ByteArray>, transferId: String) {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+        while (System.nanoTime() < deadline) {
+            val packet = queue.poll(100, TimeUnit.MILLISECONDS) ?: continue
+            if (packet.isNotEmpty() && packet[0].toInt() == CONTROL_TAG) {
+                val control = try { parseControl(packet) } catch (_: Exception) { continue }
+                if (control.optString("type") == "file_cancel" &&
+                    control.optString("transfer_id") == transferId) return
+            }
+        }
+        // The sender may have disconnected; discard residual chunks before reuse.
+        queue.clear()
     }
 
     fun cancelAll() { cancellations.values.forEach { it.set(true) } }
