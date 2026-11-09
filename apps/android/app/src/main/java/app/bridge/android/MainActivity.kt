@@ -81,6 +81,7 @@ class MainActivity : ComponentActivity() {
     private var pendingExportFile: File? = null
     private lateinit var exportFileLauncher: ActivityResultLauncher<String>
     private lateinit var sendFileLauncher: ActivityResultLauncher<Array<String>>
+    private lateinit var notificationPermissionLauncher: ActivityResultLauncher<String>
     private var pendingSendHandle: Long? = null
     private var updateStatus by mutableStateOf("Not checked yet.")
 
@@ -91,6 +92,7 @@ class MainActivity : ComponentActivity() {
         // Starting it while the Activity is visible is allowed on modern Android.
         startForegroundService(android.content.Intent(this, BridgeConnectionService::class.java))
 
+        notificationPermissionLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
         sendFileLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
             val handle = pendingSendHandle
             pendingSendHandle = null
@@ -157,6 +159,13 @@ class MainActivity : ComponentActivity() {
                     trustedDevices.addAll(BridgeConnectionService.instance?.trustedDevices().orEmpty())
                 }
             )
+        }
+
+        // Ask for notification permission so Android can show the persistent
+        // foreground-service notification in the notification drawer.
+        if (android.os.Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
         }
     }
 
