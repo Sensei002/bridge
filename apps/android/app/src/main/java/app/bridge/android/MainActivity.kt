@@ -123,7 +123,7 @@ class MainActivity : ComponentActivity() {
                 )
                 transferReceiver = receiver
                 val controller = BridgePairingController(
-                    this, privateKey, fingerprint,
+                    this, privateKey, fingerprint, deviceId,
                     onPending = { pendingPairings.add(it) },
                     onStatus = { message ->
                         pairingStatus = message
