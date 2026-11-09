@@ -28,9 +28,11 @@ object BridgeUpdater {
         Thread({
             try {
                 val releases = fetchJsonArray(API)
+                val expectedTagPrefix = if (selectedChannel == "development") "dev-" else "stable-"
                 val release = (0 until releases.length()).map { releases.getJSONObject(it) }.firstOrNull {
                     !it.optBoolean("draft", true) &&
-                        it.optBoolean("prerelease", false) == (selectedChannel == "development")
+                        it.optBoolean("prerelease", false) == (selectedChannel == "development") &&
+                        it.optString("tag_name").startsWith(expectedTagPrefix)
                 } ?: throw IllegalStateException(
                     if (selectedChannel == "stable") "No Stable release is available yet." else "No Development release is available yet."
                 )
