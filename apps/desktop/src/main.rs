@@ -11,7 +11,7 @@ use bridge_core::trust::{SasConfirmation, TrustStore};
 #[cfg(windows)]
 use bridge_protocol::{DeviceDescriptor, DeviceId, Platform, PROTOCOL_VERSION};
 #[cfg(windows)]
-use bridge_transfer::{decode_packet, encode_packet, offer_for_file, OutgoingFile, TransferControl, TransferPacket};
+use bridge_transfer::{decode_packet, encode_packet, offer_for_file, FileOffer, IncomingFile, OutgoingFile, TransferControl, TransferPacket};
 #[cfg(windows)]
 use std::net::TcpListener;
 #[cfg(windows)]
@@ -76,6 +76,7 @@ struct PendingApproval {
 struct DesktopSession {
     connection: Arc<std::sync::Mutex<NoiseConnection>>,
     incoming: std::sync::Mutex<Receiver<Vec<u8>>>,
+    incoming_offers: std::sync::Mutex<Receiver<FileOffer>>,
     stop: Arc<std::sync::atomic::AtomicBool>,
     pub remote_fingerprint: String,
 }
@@ -91,6 +92,7 @@ impl DesktopSession {
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let reader_stop = Arc::clone(&stop);
         let (sender, incoming) = mpsc::channel();
+        let (offer_sender, incoming_offers) = mpsc::channel();
         thread::Builder::new()
             .name("bridge-desktop-session-reader".into())
             .spawn(move || {
@@ -110,11 +112,18 @@ impl DesktopSession {
                             Err(_) => break,
                         }
                     };
-                    if sender.send(plaintext).is_err() { break; }
+                    match decode_packet(&plaintext) {
+                        Ok(TransferPacket::Control(TransferControl::FileOffer { offer })) => {
+                            if offer_sender.send(offer).is_err() { break; }
+                        }
+                        _ => {
+                            if sender.send(plaintext).is_err() { break; }
+                        }
+                    }
                 }
             })
             .map_err(|error| error.to_string())?;
-        Ok(Arc::new(Self { connection, incoming: std::sync::Mutex::new(incoming), stop, remote_fingerprint }))
+        Ok(Arc::new(Self { connection, incoming: std::sync::Mutex::new(incoming), incoming_offers: std::sync::Mutex::new(incoming_offers), stop, remote_fingerprint }))
     }
 
     fn send(&self, payload: &[u8]) -> Result<(), String> {
@@ -131,6 +140,10 @@ impl DesktopSession {
         self.incoming.lock().map_err(|_| "session receiver lock poisoned")?
             .recv_timeout(timeout).map_err(|error| error.to_string())
     }
+
+    fn try_receive_offer(&self) -> Option<FileOffer> {
+        self.incoming_offers.lock().ok()?.try_recv().ok()
+    }
 }
 
 #[cfg(windows)]
@@ -144,11 +157,82 @@ impl Drop for DesktopSession {
 }
 
 #[cfg(windows)]
+struct PendingIncomingTransfer {
+    session: Arc<DesktopSession>,
+    offer: FileOffer,
+}
+
+#[cfg(windows)]
 enum TransferUiEvent {
     Status(String),
     Progress { sent: u64, total: u64 },
     Complete(String),
     Failed(String),
+}
+
+#[cfg(windows)]
+fn start_receive_file_transfer(
+    session: Arc<DesktopSession>,
+    offer: FileOffer,
+    destination: PathBuf,
+    events: Sender<TransferUiEvent>,
+) {
+    let worker_events = events.clone();
+    thread::Builder::new().name("bridge-file-receive".into()).spawn(move || {
+        let result = (|| -> Result<String, String> {
+            let mut accepted_offer = offer.clone();
+            if let Some(name) = destination.file_name().and_then(|value| value.to_str()) {
+                accepted_offer.file_name = name.to_owned();
+            }
+            let directory = destination.parent().ok_or("Choose a valid destination folder")?;
+            let packet = encode_packet(&TransferPacket::Control(
+                TransferControl::FileAccept { transfer_id: offer.transfer_id }
+            )).map_err(|error| error.to_string())?;
+            session.send(&packet)?;
+            let mut incoming = IncomingFile::create(directory, accepted_offer.clone()).map_err(|error| error.to_string())?;
+            let mut received = 0_u64;
+            while received < accepted_offer.file_size {
+                let packet = session.receive_timeout(Duration::from_secs(120))?;
+                match decode_packet(&packet).map_err(|error| error.to_string())? {
+                    TransferPacket::Chunk(chunk) => {
+                        received = received.saturating_add(chunk.data.len() as u64);
+                        incoming.write_chunk(chunk).map_err(|error| error.to_string())?;
+                        let _ = worker_events.send(TransferUiEvent::Progress { sent: received, total: accepted_offer.file_size });
+                    }
+                    _ => return Err("Unexpected packet while receiving file data.".into()),
+                }
+            }
+            let saved = incoming.finish().map_err(|error| error.to_string())?;
+            let packet = encode_packet(&TransferPacket::Control(
+                TransferControl::FileComplete { transfer_id: offer.transfer_id }
+            )).map_err(|error| error.to_string())?;
+            session.send(&packet)?;
+            Ok(format!("Received {} → {}", offer.file_name, saved.display()))
+        })();
+        match result {
+            Ok(message) => { let _ = worker_events.send(TransferUiEvent::Complete(message)); }
+            Err(error) => {
+                if let Ok(packet) = encode_packet(&TransferPacket::Control(
+                    TransferControl::FileCancel { transfer_id: offer.transfer_id }
+                )) {
+                    let _ = session.send(&packet);
+                }
+                let _ = worker_events.send(TransferUiEvent::Failed(error));
+            }
+        }
+    }).map_err(|error| {
+        let _ = events.send(TransferUiEvent::Failed(format!("Could not start receive worker: {error}")));
+    }).ok();
+}
+
+#[cfg(windows)]
+fn reject_incoming_transfer(session: &DesktopSession, offer: &FileOffer) {
+    if let Ok(packet) = encode_packet(&TransferPacket::Control(TransferControl::FileReject {
+        transfer_id: offer.transfer_id,
+        reason: "Declined on receiving device".into(),
+    })) {
+        let _ = session.send(&packet);
+    }
 }
 
 #[cfg(windows)]
@@ -236,6 +320,8 @@ struct BridgeApp {
     #[cfg(windows)]
     active_sessions: Vec<Arc<DesktopSession>>,
     #[cfg(windows)]
+    pending_incoming_transfers: Vec<PendingIncomingTransfer>,
+    #[cfg(windows)]
     selected_transfer_fingerprint: Option<String>,
     #[cfg(windows)]
     transfer_tx: Sender<TransferUiEvent>,
@@ -305,6 +391,8 @@ impl Default for BridgeApp {
             pending_pairings: Vec::new(),
             #[cfg(windows)]
             active_sessions: Vec::new(),
+            #[cfg(windows)]
+            pending_incoming_transfers: Vec::new(),
             #[cfg(windows)]
             selected_transfer_fingerprint: None,
             #[cfg(windows)]
@@ -640,6 +728,17 @@ impl eframe::App for BridgeApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         for message in self.network_rx.try_iter() {
             self.network_status = message;
+        }
+        #[cfg(windows)]
+        {
+            for session in &self.active_sessions {
+                while let Some(offer) = session.try_receive_offer() {
+                    self.pending_incoming_transfers.push(PendingIncomingTransfer {
+                        session: Arc::clone(session),
+                        offer,
+                    });
+                }
+            }
         }
         #[cfg(windows)]
         for event in self.transfer_rx.try_iter() {
