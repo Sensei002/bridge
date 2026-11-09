@@ -29,32 +29,46 @@ internal class BridgeDiscovery(
     private var localFingerprint: String? = null
     private val resolving = ConcurrentHashMap<String, NsdManager.ResolveListener>()
 
-    private val registrationListener = object : NsdManager.RegistrationListener {
+    @Volatile private var generation = 0
+    private var registrationListener: NsdManager.RegistrationListener? = null
+    private var discoveryListener: NsdManager.DiscoveryListener? = null
+
+    private fun createRegistrationListener(runId: Int) = object : NsdManager.RegistrationListener {
         override fun onServiceRegistered(serviceInfo: NsdServiceInfo) {
+            if (stopped || generation != runId) {
+                try { manager.unregisterService(this) } catch (_: IllegalArgumentException) { }
+                return
+            }
             registered = true
             onStatus("Bridge is visible on the local network.")
         }
         override fun onRegistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
-            onStatus("Could not advertise Bridge service (NSD error $errorCode).")
+            if (!stopped && generation == runId) {
+                onStatus("Could not advertise Bridge service (NSD error $errorCode).")
+            }
         }
-        override fun onServiceUnregistered(serviceInfo: NsdServiceInfo) { registered = false }
+        override fun onServiceUnregistered(serviceInfo: NsdServiceInfo) {
+            if (generation == runId) registered = false
+        }
         override fun onUnregistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
-            onStatus("Could not stop Bridge advertisement (NSD error $errorCode).")
+            if (!stopped && generation == runId) {
+                onStatus("Could not stop Bridge advertisement (NSD error $errorCode).")
+            }
         }
     }
 
-    private fun resolveListener(serviceName: String): NsdManager.ResolveListener =
+    private fun resolveListener(serviceName: String, runId: Int): NsdManager.ResolveListener =
         object : NsdManager.ResolveListener {
             override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
                 resolving.remove(serviceName, this)
-                if (!stopped) {
+                if (!stopped && generation == runId) {
                     onStatus("Found ${serviceName}, but Android could not resolve it (NSD error $errorCode).")
                 }
             }
 
             override fun onServiceResolved(serviceInfo: NsdServiceInfo) {
                 resolving.remove(serviceName, this)
-                if (stopped) return
+                if (stopped || generation != runId) return
                 val host = serviceInfo.host?.hostAddress
                 if (host.isNullOrBlank()) {
                     onStatus("Bridge service ${serviceInfo.serviceName} resolved without a usable network address.")
@@ -89,24 +103,23 @@ internal class BridgeDiscovery(
             }
         }
 
-    private val discoveryListener = object : NsdManager.DiscoveryListener {
+    private fun createDiscoveryListener(runId: Int) = object : NsdManager.DiscoveryListener {
         override fun onDiscoveryStarted(serviceType: String) = Unit
         override fun onDiscoveryStopped(serviceType: String) = Unit
         override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {
+            if (stopped || generation != runId) return
             onStatus("Bridge discovery failed to start (NSD error $errorCode).")
             stop()
         }
         override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) {
+            if (stopped || generation != runId) return
             onStatus("Bridge discovery failed to stop (NSD error $errorCode).")
             stop()
         }
         override fun onServiceFound(serviceInfo: NsdServiceInfo) {
-            if (stopped) return
-            // discoverServices() is already scoped to SERVICE_TYPE. Android
-            // versions differ in whether serviceType includes the local domain,
-            // so an exact string comparison here can hide valid peers.
+            if (stopped || generation != runId) return
             onStatus("Found Bridge service ${serviceInfo.serviceName}; resolving…")
-            val listener = resolveListener(serviceInfo.serviceName)
+            val listener = resolveListener(serviceInfo.serviceName, runId)
             if (resolving.putIfAbsent(serviceInfo.serviceName, listener) != null) return
             @Suppress("DEPRECATION")
             try {
@@ -118,13 +131,18 @@ internal class BridgeDiscovery(
         }
         override fun onServiceLost(serviceInfo: NsdServiceInfo) {
             resolving.remove(serviceInfo.serviceName)
-            if (!stopped) onPeerLost(serviceInfo.serviceName)
+            if (!stopped && generation == runId) onPeerLost(serviceInfo.serviceName)
         }
     }
 
     fun start(deviceId: String, displayName: String, fingerprint: String) {
         if (registered || localDeviceId != null) return
         stopped = false
+        val runId = ++generation
+        val registration = createRegistrationListener(runId)
+        val browser = createDiscoveryListener(runId)
+        registrationListener = registration
+        discoveryListener = browser
         try {
             if (!multicastLock.isHeld) multicastLock.acquire()
         } catch (error: SecurityException) {
@@ -143,8 +161,8 @@ internal class BridgeDiscovery(
             setAttribute("version", "1")
             setAttribute("fingerprint", fingerprint)
         }
-        manager.registerService(service, NsdManager.PROTOCOL_DNS_SD, registrationListener)
-        manager.discoverServices(SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, discoveryListener)
+        manager.registerService(service, NsdManager.PROTOCOL_DNS_SD, registration)
+        manager.discoverServices(SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, browser)
     }
 
     fun restart() {
@@ -152,18 +170,28 @@ internal class BridgeDiscovery(
         val name = localDisplayName ?: return
         val keyFingerprint = localFingerprint ?: return
         stop()
+        val restartGeneration = generation
+        // NSD stop/unregister callbacks are asynchronous. Give Android time to
+        // retire the previous listeners before registering fresh listener instances.
         android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-            start(id, name, keyFingerprint)
-        }, 1500)
+            if (generation == restartGeneration && localDeviceId == null && stopped) {
+                start(id, name, keyFingerprint)
+            }
+        }, 2500)
     }
 
     fun stop() {
         if (stopped) return
         stopped = true
+        generation++
         resolving.clear()
-        try { manager.stopServiceDiscovery(discoveryListener) } catch (_: IllegalArgumentException) { }
+        val oldBrowser = discoveryListener
+        val oldRegistration = registrationListener
+        discoveryListener = null
+        registrationListener = null
+        try { oldBrowser?.let { manager.stopServiceDiscovery(it) } } catch (_: IllegalArgumentException) { }
         if (registered) {
-            try { manager.unregisterService(registrationListener) } catch (_: IllegalArgumentException) { }
+            try { oldRegistration?.let { manager.unregisterService(it) } } catch (_: IllegalArgumentException) { }
         }
         registered = false
         if (multicastLock.isHeld) {
