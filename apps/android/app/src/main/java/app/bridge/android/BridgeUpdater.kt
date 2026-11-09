@@ -7,18 +7,21 @@ import android.os.Build
 import android.provider.Settings
 import android.os.Handler
 import android.os.Looper
+import android.util.Xml
 import androidx.core.content.FileProvider
-import org.json.JSONArray
 import org.json.JSONObject
+import org.xmlpull.v1.XmlPullParser
 import java.io.File
 import java.io.FileOutputStream
+import java.io.StringReader
 import java.net.HttpURLConnection
 import java.net.URL
 import java.security.MessageDigest
 
 /** Verifies a GitHub release APK before handing installation to Android. */
 object BridgeUpdater {
-    private const val API = "https://api.github.com/repos/Sensei002/bridge/releases?per_page=30"
+    private const val RELEASES_FEED = "https://github.com/Sensei002/bridge/releases.atom"
+    private const val RELEASE_PAGE_PREFIX = "https://github.com/Sensei002/bridge/releases/tag/"
     private const val RELEASE_PREFIX = "https://github.com/Sensei002/bridge/releases/download/"
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -27,28 +30,9 @@ object BridgeUpdater {
         onStatus("Checking the $selectedChannel channel…")
         Thread({
             try {
-                val releases = fetchJsonArray(API)
-                val expectedTagPrefix = if (selectedChannel == "development") "dev-" else "stable-"
-                val release = (0 until releases.length()).map { releases.getJSONObject(it) }.firstOrNull {
-                    !it.optBoolean("draft", true) &&
-                        it.optBoolean("prerelease", false) == (selectedChannel == "development") &&
-                        it.optString("tag_name").startsWith(expectedTagPrefix)
-                } ?: throw IllegalStateException(
-                    if (selectedChannel == "stable") "No Stable release is available yet." else "No Development release is available yet."
-                )
-
-                val assets = release.getJSONArray("assets")
-                var manifestUrl: String? = null
-                for (i in 0 until assets.length()) {
-                    val asset = assets.getJSONObject(i)
-                    if (asset.optString("name") == "bridge-update.json") {
-                        manifestUrl = asset.optString("browser_download_url")
-                        break
-                    }
-                }
-                val safeManifestUrl = manifestUrl?.takeIf { it.startsWith(RELEASE_PREFIX) }
-                    ?: throw IllegalStateException("No official Bridge update manifest was found.")
-                val manifest = fetchJson(safeManifestUrl)
+                val tag = latestReleaseTag(selectedChannel)
+                val manifestUrl = "${RELEASE_PREFIX}${tag}/bridge-update.json"
+                val manifest = fetchJson(manifestUrl)
                 require(manifest.optString("channel") == selectedChannel) { "Release channel mismatch." }
                 val android = manifest.optJSONObject("android")
                     ?: throw IllegalStateException("This release does not include an Android APK.")
@@ -61,7 +45,9 @@ object BridgeUpdater {
                     return@Thread
                 }
                 val downloadUrl = android.optString("download_url")
-                require(downloadUrl.startsWith(RELEASE_PREFIX)) { "APK URL is not an official Bridge release asset." }
+                require(downloadUrl.startsWith("${RELEASE_PREFIX}${tag}/")) {
+                    "APK URL is not an asset from the selected official Bridge release."
+                }
                 val expectedHash = android.optString("sha256").lowercase()
                 require(expectedHash.matches(Regex("[0-9a-f]{64}"))) { "Invalid APK checksum in release manifest." }
 
@@ -107,28 +93,45 @@ object BridgeUpdater {
         }, "BridgeUpdater").apply { isDaemon = true; start() }
     }
 
-    private fun fetchJsonArray(url: String): JSONArray {
+    private fun latestReleaseTag(channel: String): String {
+        val feed = fetchText(RELEASES_FEED)
+        val parser = Xml.newPullParser()
+        parser.setInput(StringReader(feed))
+        val expectedPrefix = if (channel == "development") "dev-" else "stable-"
+        var event = parser.eventType
+        while (event != XmlPullParser.END_DOCUMENT) {
+            if (event == XmlPullParser.START_TAG && parser.name == "link") {
+                val href = parser.getAttributeValue(null, "href") ?: ""
+                if (href.startsWith(RELEASE_PAGE_PREFIX)) {
+                    val tag = href.removePrefix(RELEASE_PAGE_PREFIX)
+                    if (tag.startsWith(expectedPrefix) &&
+                        tag.length > expectedPrefix.length &&
+                        tag.removePrefix(expectedPrefix).all { it in '0'..'9' }
+                    ) return tag
+                }
+            }
+            event = parser.next()
+        }
+        throw IllegalStateException("No $channel release is available yet.")
+    }
+
+    private fun fetchText(url: String): String {
         val connection = open(url)
-        return try { JSONArray(connection.inputStream.bufferedReader().use { it.readText() }) }
+        return try { connection.inputStream.bufferedReader().use { it.readText() } }
         finally { connection.disconnect() }
     }
 
-    private fun fetchJson(url: String): JSONObject {
-        val connection = open(url)
-        return try { JSONObject(connection.inputStream.bufferedReader().use { it.readText() }) }
-        finally { connection.disconnect() }
-    }
+    private fun fetchJson(url: String): JSONObject = JSONObject(fetchText(url))
 
     private fun open(url: String): HttpURLConnection {
         val parsed = URL(url)
-        require(parsed.protocol == "https" && parsed.host in setOf("api.github.com", "github.com")) {
+        require(parsed.protocol == "https" && parsed.host == "github.com") {
             "Only official GitHub HTTPS endpoints are allowed."
         }
         return (parsed.openConnection() as HttpURLConnection).apply {
             connectTimeout = 15000
             readTimeout = 30000
             setRequestProperty("User-Agent", "Bridge-Android-Updater")
-            setRequestProperty("Accept", "application/vnd.github+json")
             instanceFollowRedirects = true
             if (responseCode !in 200..299) {
                 disconnect()

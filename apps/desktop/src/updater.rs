@@ -1,3 +1,5 @@
+use quick_xml::events::Event;
+use quick_xml::Reader;
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
@@ -10,7 +12,8 @@ pub enum UpdateEvent {
     Available { version: String, installer: PathBuf },
 }
 
-const API: &str = "https://api.github.com/repos/Sensei002/bridge/releases?per_page=30";
+const RELEASES_FEED: &str = "https://github.com/Sensei002/bridge/releases.atom";
+const RELEASE_PAGE_PREFIX: &str = "https://github.com/Sensei002/bridge/releases/tag/";
 const RELEASE_PREFIX: &str = "https://github.com/Sensei002/bridge/releases/download/";
 
 pub fn check_for_update(channel: String, sender: Sender<UpdateEvent>) {
@@ -33,35 +36,50 @@ pub fn check_for_update(channel: String, sender: Sender<UpdateEvent>) {
         .ok();
 }
 
+fn latest_release_tag(channel: &str, client: &reqwest::blocking::Client) -> Result<String, String> {
+    let feed = client.get(RELEASES_FEED).send()
+        .map_err(|error| format!("Could not reach the Bridge releases feed: {error}"))?
+        .error_for_status().map_err(|error| format!("Bridge releases feed request failed: {error}"))?
+        .text().map_err(|error| error.to_string())?;
+    let mut reader = Reader::from_str(&feed);
+    reader.config_mut().trim_text(true);
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(element)) | Ok(Event::Empty(element)) if element.local_name().as_ref() == b"link" => {
+                for attribute in element.attributes().flatten() {
+                    if attribute.key.local_name().as_ref() == b"href" {
+                        let href = attribute.decode_and_unescape_value(reader.decoder())
+                            .map_err(|error| error.to_string())?;
+                        if let Some(tag) = href.strip_prefix(RELEASE_PAGE_PREFIX) {
+                            let expected = if channel == "development" { "dev-" } else { "stable-" };
+                            if tag.starts_with(expected)
+                                && tag[expected.len()..].bytes().all(|byte| byte.is_ascii_digit())
+                                && tag.len() > expected.len()
+                            {
+                                return Ok(tag.to_owned());
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(error) => return Err(format!("Could not parse Bridge releases feed: {error}")),
+        }
+    }
+    Err(format!("No {channel} release is available yet."))
+}
+
 fn check_and_download(channel: &str) -> Result<Option<(String, PathBuf)>, String> {
-    let development = channel == "development";
     let client = reqwest::blocking::Client::builder()
         .user_agent("Bridge-Windows-Updater")
         .timeout(Duration::from_secs(90))
         .build()
         .map_err(|error| error.to_string())?;
 
-    let releases: serde_json::Value = client.get(API).send()
-        .map_err(|error| error.to_string())?
-        .error_for_status().map_err(|error| error.to_string())?
-        .json().map_err(|error| error.to_string())?;
-    let release = releases.as_array()
-        .and_then(|items| items.iter().find(|item| {
-            !item["draft"].as_bool().unwrap_or(true)
-                && item["prerelease"].as_bool().unwrap_or(false) == development
-                && item["tag_name"].as_str().unwrap_or("").starts_with(if development { "dev-" } else { "stable-" })
-        }))
-        .ok_or_else(|| format!("No {channel} release is available yet."))?;
-
-    let assets = release["assets"].as_array().ok_or("Release assets are missing")?;
-    let manifest_url = assets.iter()
-        .find(|asset| asset["name"].as_str() == Some("bridge-update.json"))
-        .and_then(|asset| asset["browser_download_url"].as_str())
-        .ok_or("Release update manifest is missing")?;
-    if !manifest_url.starts_with(RELEASE_PREFIX) {
-        return Err("Manifest URL is not an official Bridge release asset".into());
-    }
-    let manifest: serde_json::Value = client.get(manifest_url).send()
+    let tag = latest_release_tag(channel, &client)?;
+    let manifest_url = format!("{RELEASE_PREFIX}{tag}/bridge-update.json");
+    let manifest: serde_json::Value = client.get(&manifest_url).send()
         .map_err(|error| error.to_string())?
         .error_for_status().map_err(|error| error.to_string())?
         .json().map_err(|error| error.to_string())?;
@@ -75,8 +93,8 @@ fn check_and_download(channel: &str) -> Result<Option<(String, PathBuf)>, String
         return Ok(None);
     }
     let download_url = windows["download_url"].as_str().ok_or("MSI download URL is missing")?;
-    if !download_url.starts_with(RELEASE_PREFIX) {
-        return Err("MSI URL is not an official Bridge release asset".into());
+    if !download_url.starts_with(&format!("{RELEASE_PREFIX}{tag}/")) {
+        return Err("MSI URL is not an asset from the selected official Bridge release".into());
     }
     let expected_hash = windows["sha256"].as_str().ok_or("MSI checksum is missing")?.to_ascii_lowercase();
     if expected_hash.len() != 64 || !expected_hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {

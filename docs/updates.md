@@ -2,7 +2,7 @@
 
 Bridge ships two update channels on Windows and Android:
 
-- **Development** follows the `development` branch and publishes prereleases for testing.
+- **Development** follows the `development` branch and publishes prereleases.
 - **Stable** follows the `stable` branch when that branch is introduced. Until its first release, selecting Stable correctly reports that no Stable release is available.
 
 ## Release contract
@@ -31,7 +31,7 @@ The channel release workflow builds a Windows x64 MSI and, when Android release 
 }
 ```
 
-The Android object is omitted until a persistently signed APK is available. The Android package identity is `app.bridge.android`; this must remain unchanged for in-place updates. Clients retrieve release metadata from the GitHub Releases API over HTTPS, require official Bridge release asset URLs, and verify the downloaded package against the manifest SHA-256 before handing it to the platform installer. Android's package installer additionally enforces the APK signing-certificate continuity.
+The Android object is omitted until a persistently signed APK is available. The Android package identity is `app.bridge.android`; this must remain unchanged for in-place updates. Clients discover release tags through GitHub's public Releases Atom feed (`https://github.com/Sensei002/bridge/releases.atom`) and fetch the manifest directly from the selected release's download URL. This avoids the unauthenticated GitHub REST API rate limit shared by users behind the same public IP. Clients require official Bridge release URLs and verify each downloaded package against the manifest SHA-256 before handing it to the platform installer. Android's package installer additionally enforces APK signing-certificate continuity.
 
 ## Android release signing (required for in-place updates)
 
@@ -68,7 +68,7 @@ Do not rotate or lose this key: Android will reject future APKs signed with a di
 - The selected channel is saved in the user's Bridge settings.
 - Bridge checks for updates on startup and offers a manual check in **Settings → Software updates**.
 - A newer MSI is downloaded to the user's temporary directory and verified before it is offered.
-- Choosing **Install and restart** launches Windows Installer in passive mode and exits Bridge so files can be replaced.
+- Choosing **Install and restart** launches Windows Installer in passive mode and exits Bridge so files can be replaced. Reopening from the Start menu may be necessary after setup finishes.
 
 ### Android
 
@@ -79,8 +79,8 @@ Do not rotate or lose this key: Android will reject future APKs signed with a di
 
 ## Security notes
 
-- Release discovery and manifest retrieval use GitHub's official HTTPS API and release-asset URLs.
-- The clients reject non-HTTPS endpoints and unexpected release asset locations.
+- Release discovery uses GitHub's public HTTPS Releases Atom feed; manifest and package downloads use official HTTPS release-asset URLs.
+- The feed is a GitHub-provided but undocumented endpoint, so the updater validates release tag formats and fails closed if the feed cannot be parsed.
 - SHA-256 detects corrupted or substituted downloads relative to the retrieved release manifest.
 - Android's installer enforces package signing identity; the permanent keystore must be protected.
 - Windows MSI Authenticode signing is not configured yet. Windows may show an unknown-publisher warning until a trusted code-signing certificate is added.
