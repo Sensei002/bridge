@@ -270,7 +270,15 @@ fn start_file_transfer(
             )).map_err(|error| error.to_string())?;
             session.send(&packet)?;
             let _ = events.send(TransferUiEvent::Status(format!("Waiting for {} to accept {file_name}…", session.remote_fingerprint[..8].to_owned())));
-            let response = session.receive_timeout(Duration::from_secs(600))?;
+            let approval_deadline = Instant::now() + Duration::from_secs(600);
+            let response = loop {
+                if cancel.load(Ordering::Acquire) { return Err("Transfer cancelled by you.".into()); }
+                match session.receive_timeout(Duration::from_secs(1)) {
+                    Ok(packet) => break packet,
+                    Err(error) if error.contains("timed out") && Instant::now() < approval_deadline => continue,
+                    Err(error) => return Err(error),
+                }
+            };
             match decode_packet(&response).map_err(|error| error.to_string())? {
                 TransferPacket::Control(TransferControl::FileAccept { transfer_id: accepted })
                     if accepted == transfer_id => {}
@@ -295,7 +303,15 @@ fn start_file_transfer(
                 last_bytes = sent;
                 let _ = events.send(TransferUiEvent::Progress { sent, total, speed_bytes_per_sec: speed });
             }
-            let response = session.receive_timeout(Duration::from_secs(120))?;
+            let completion_deadline = Instant::now() + Duration::from_secs(600);
+            let response = loop {
+                if cancel.load(Ordering::Acquire) { return Err("Transfer cancelled by you.".into()); }
+                match session.receive_timeout(Duration::from_secs(1)) {
+                    Ok(packet) => break packet,
+                    Err(error) if error.contains("timed out") && Instant::now() < completion_deadline => continue,
+                    Err(error) => return Err(error),
+                }
+            };
             match decode_packet(&response).map_err(|error| error.to_string())? {
                 TransferPacket::Control(TransferControl::FileComplete { transfer_id: completed })
                     if completed == transfer_id => Ok(format!("{file_name} sent successfully.")),
