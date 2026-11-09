@@ -270,7 +270,7 @@ fn start_file_transfer(
             )).map_err(|error| error.to_string())?;
             session.send(&packet)?;
             let _ = events.send(TransferUiEvent::Status(format!("Waiting for {} to accept {file_name}…", session.remote_fingerprint[..8].to_owned())));
-            let response = session.receive_timeout(Duration::from_secs(120))?;
+            let response = session.receive_timeout(Duration::from_secs(600))?;
             match decode_packet(&response).map_err(|error| error.to_string())? {
                 TransferPacket::Control(TransferControl::FileAccept { transfer_id: accepted })
                     if accepted == transfer_id => {}
