@@ -1,6 +1,10 @@
 package app.bridge.android
 
 import android.os.Bundle
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.os.Handler
 import android.os.Looper
 import java.net.ServerSocket
@@ -80,6 +84,49 @@ class MainActivity : ComponentActivity() {
     private var transferStatus by mutableStateOf("Waiting for a connected trusted device.")
     @Volatile private var transferReceiver: BridgeTransferReceiver? = null
     private var pairingStatus by mutableStateOf("Preparing secure device identity…")
+    private var wifiCallbackRegistered = false
+    private val wifiNetworkCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) {
+            runOnUiThread {
+                if (destroyed) return@runOnUiThread
+                pairingStatus = "Wi-Fi connected. Looking for trusted Bridge devices…"
+                discovery?.restart()
+            }
+        }
+
+        override fun onLost(network: Network) {
+            runOnUiThread {
+                if (destroyed) return@runOnUiThread
+                pairingController?.onNetworkLost()
+                transferReceiver?.cancelAll()
+                transferReceiver?.stop()
+                connectedSessionHandles.clear()
+                pairingStatus = "Wi-Fi disconnected. Waiting to reconnect…"
+            }
+        }
+    }
+
+    private fun registerWifiNetworkCallback() {
+        if (wifiCallbackRegistered) return
+        val manager = getSystemService(ConnectivityManager::class.java) ?: return
+        try {
+            manager.registerNetworkCallback(
+                NetworkRequest.Builder().addTransportType(NetworkCapabilities.TRANSPORT_WIFI).build(),
+                wifiNetworkCallback
+            )
+            wifiCallbackRegistered = true
+        } catch (error: Exception) {
+            pairingStatus = "Automatic Wi-Fi recovery unavailable: ${error.message}"
+        }
+    }
+
+    private fun unregisterWifiNetworkCallback() {
+        if (!wifiCallbackRegistered) return
+        try {
+            getSystemService(ConnectivityManager::class.java)?.unregisterNetworkCallback(wifiNetworkCallback)
+        } catch (_: Exception) { }
+        wifiCallbackRegistered = false
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -181,8 +228,14 @@ class MainActivity : ComponentActivity() {
                 }
                 pairingController = controller
                 controller.onSessionReady = { peerId, handle ->
-                    connectedSessionHandles[peerId] = handle
-                    receiver.attach(peerId, handle)
+                    runOnUiThread {
+                        if (!destroyed) {
+                            connectedSessionHandles[peerId] = handle
+                            receiver.attach(peerId, handle)
+                        } else {
+                            BridgeNative.sessionClose(handle)
+                        }
+                    }
                 }
                 controller.start()
 
@@ -190,6 +243,16 @@ class MainActivity : ComponentActivity() {
                     if (peer.deviceId != deviceId) {
                         val existing = discoveredPeers.indexOfFirst { it.deviceId == peer.deviceId }
                         if (existing >= 0) discoveredPeers[existing] = peer else discoveredPeers.add(peer)
+                        // Discovery is also the automatic reconnect trigger. Only
+                        // reconnect devices whose saved fingerprint still matches.
+                        val trustedPeer = try {
+                            controller.trustedDevices().firstOrNull { it.deviceId == peer.deviceId }
+                        } catch (_: Exception) { null }
+                        if (trustedPeer != null &&
+                            trustedPeer.fingerprint.equals(peer.fingerprint, ignoreCase = true) &&
+                            !connectedSessionHandles.containsKey(peer.deviceId)) {
+                            controller.pair(peer, trustedPeer.fingerprint)
+                        }
                     }
                 }, { serviceName ->
                     discoveredPeers.removeAll { it.serviceName == serviceName }
@@ -200,6 +263,7 @@ class MainActivity : ComponentActivity() {
                 }
                 discovery = networkDiscovery
                 networkDiscovery.start(deviceId, android.os.Build.MODEL ?: "Bridge Android", fingerprint)
+                registerWifiNetworkCallback()
 
                 runOnUiThread {
                     if (!destroyed) {
@@ -235,6 +299,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         destroyed = true
+        unregisterWifiNetworkCallback()
         pairingController?.stop()
         transferReceiver?.stop()
         transferReceiver = null
