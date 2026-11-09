@@ -447,7 +447,7 @@ mod android_jni {
             // Return an empty array for that timeout; reserve [0] for a closed reader.
             Err(error) if error == "session receive timed out" =>
                 env.byte_array_from_slice(&[]).map(|value| value.into_raw()).unwrap_or(std::ptr::null_mut()),
-            Err(_) => env.byte_array_from_slice(&[0_i8]).map(|value| value.into_raw()).unwrap_or(std::ptr::null_mut()),
+            Err(_) => env.byte_array_from_slice(&[0_u8]).map(|value| value.into_raw()).unwrap_or(std::ptr::null_mut()),
         }
     }
 
