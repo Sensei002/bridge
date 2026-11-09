@@ -42,6 +42,12 @@ const AMBER: egui::Color32 = egui::Color32::from_rgb(251, 191, 36);
 const TEXT: egui::Color32 = egui::Color32::from_rgb(239, 242, 235);
 const MUTED: egui::Color32 = egui::Color32::from_rgb(145, 154, 160);
 const GREEN: egui::Color32 = egui::Color32::from_rgb(119, 211, 151);
+#[cfg(windows)]
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+#[cfg(windows)]
+const HEARTBEAT_PING: &[u8] = b"\0BRIDGE_HEARTBEAT_PING_V1";
+#[cfg(windows)]
+const HEARTBEAT_PONG: &[u8] = b"\0BRIDGE_HEARTBEAT_PONG_V1";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Page { Overview, Devices, Transfers, Clipboard, Tools, Settings }
@@ -92,7 +98,7 @@ struct DesktopSession {
 impl DesktopSession {
     fn start(connection: NoiseConnection) -> Result<Arc<Self>, String> {
         let reader_stream = connection.stream.try_clone().map_err(|error| error.to_string())?;
-        reader_stream.set_read_timeout(None).map_err(|error| error.to_string())?;
+        reader_stream.set_read_timeout(Some(Duration::from_secs(15))).map_err(|error| error.to_string())?;
         let remote_fingerprint = connection.remote_fingerprint.clone();
         let connection = Arc::new(std::sync::Mutex::new(connection));
         let reader_connection = Arc::clone(&connection);
@@ -102,6 +108,7 @@ impl DesktopSession {
         let reader_alive = Arc::clone(&alive);
         let (sender, incoming) = mpsc::sync_channel(8);
         let (offer_sender, incoming_offers) = mpsc::channel();
+        let reader_connection_for_thread = Arc::clone(&reader_connection);
         thread::Builder::new()
             .name("bridge-desktop-session-reader".into())
             .spawn(move || {
@@ -121,6 +128,20 @@ impl DesktopSession {
                             Err(_) => break,
                         }
                     };
+                    if plaintext == HEARTBEAT_PING {
+                        let mut guard = match reader_connection.lock() {
+                            Ok(guard) => guard,
+                            Err(_) => break,
+                        };
+                        let mut response = vec![0_u8; bridge_network::MAX_FRAME_BYTES];
+                        let length = match guard.transport.write_message(HEARTBEAT_PONG, &mut response) {
+                            Ok(length) => length,
+                            Err(_) => break,
+                        };
+                        if bridge_network::write_frame(&mut guard.stream, &response[..length]).is_err() { break; }
+                        continue;
+                    }
+                    if plaintext == HEARTBEAT_PONG { continue; }
                     match decode_packet(&plaintext) {
                         Ok(TransferPacket::Control(TransferControl::FileOffer { offer })) => {
                             if offer_sender.send(offer).is_err() { break; }
@@ -130,7 +151,44 @@ impl DesktopSession {
                         }
                     }
                 }
+                reader_stop.store(true, Ordering::Release);
                 reader_alive.store(false, Ordering::Release);
+                if let Ok(guard) = reader_connection_for_thread.lock() {
+                    let _ = guard.stream.shutdown(std::net::Shutdown::Both);
+                }
+            })
+            .map_err(|error| error.to_string())?;
+
+        let heartbeat_connection = Arc::clone(&connection);
+        let heartbeat_stop = Arc::clone(&stop);
+        let heartbeat_alive = Arc::clone(&alive);
+        thread::Builder::new()
+            .name("bridge-desktop-session-heartbeat".into())
+            .spawn(move || {
+                while !heartbeat_stop.load(Ordering::Acquire) {
+                    thread::sleep(HEARTBEAT_INTERVAL);
+                    if heartbeat_stop.load(Ordering::Acquire) { break; }
+                    let mut guard = match heartbeat_connection.lock() {
+                        Ok(guard) => guard,
+                        Err(_) => break,
+                    };
+                    let mut encrypted = vec![0_u8; bridge_network::MAX_FRAME_BYTES];
+                    let length = match guard.transport.write_message(HEARTBEAT_PING, &mut encrypted) {
+                        Ok(length) => length,
+                        Err(_) => {
+                            heartbeat_alive.store(false, Ordering::Release);
+                            heartbeat_stop.store(true, Ordering::Release);
+                            let _ = guard.stream.shutdown(std::net::Shutdown::Both);
+                            break;
+                        }
+                    };
+                    if bridge_network::write_frame(&mut guard.stream, &encrypted[..length]).is_err() {
+                        heartbeat_alive.store(false, Ordering::Release);
+                        heartbeat_stop.store(true, Ordering::Release);
+                        let _ = guard.stream.shutdown(std::net::Shutdown::Both);
+                        break;
+                    }
+                }
             })
             .map_err(|error| error.to_string())?;
         Ok(Arc::new(Self { connection, incoming: std::sync::Mutex::new(incoming), incoming_offers: std::sync::Mutex::new(incoming_offers), stop, alive, remote_fingerprint }))
