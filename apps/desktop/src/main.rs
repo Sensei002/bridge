@@ -1561,7 +1561,7 @@ impl eframe::App for BridgeApp {
                         panel(ui, |ui| {
                             eyebrow(ui, "About");
                             ui.label(egui::RichText::new("Bridge for Windows").strong());
-                            muted(ui, &format!("Version {} · Native Rust interface", env!("CARGO_PKG_VERSION")));
+                            muted(ui, &format!("Version {} · Native Rust interface", option_env!("BRIDGE_BUILD_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))));
                         });
                     }
                 }
