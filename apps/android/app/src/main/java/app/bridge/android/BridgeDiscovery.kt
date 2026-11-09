@@ -19,6 +19,8 @@ internal class BridgeDiscovery(
     @Volatile private var stopped = false
     private var registered = false
     private var localDeviceId: String? = null
+    private var localDisplayName: String? = null
+    private var localFingerprint: String? = null
     private val resolving = ConcurrentHashMap<String, NsdManager.ResolveListener>()
 
     private val registrationListener = object : NsdManager.RegistrationListener {
@@ -90,6 +92,8 @@ internal class BridgeDiscovery(
         if (registered || localDeviceId != null) return
         stopped = false
         localDeviceId = deviceId
+        localDisplayName = displayName
+        localFingerprint = fingerprint
         val service = NsdServiceInfo().apply {
             serviceName = "Bridge-${deviceId.take(8)}"
             serviceType = SERVICE_TYPE
@@ -104,6 +108,16 @@ internal class BridgeDiscovery(
         manager.discoverServices(SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, discoveryListener)
     }
 
+    fun restart() {
+        val id = localDeviceId ?: return
+        val name = localDisplayName ?: return
+        val keyFingerprint = localFingerprint ?: return
+        stop()
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+            start(id, name, keyFingerprint)
+        }, 1500)
+    }
+
     fun stop() {
         if (stopped) return
         stopped = true
@@ -114,6 +128,8 @@ internal class BridgeDiscovery(
         }
         registered = false
         localDeviceId = null
+        localDisplayName = null
+        localFingerprint = null
     }
 
     private companion object {
