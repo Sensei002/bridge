@@ -1515,49 +1515,53 @@ impl eframe::App for BridgeApp {
                             feature_row(ui, "⚿", "Encrypted transport", "Secure channel foundation is in the shared core.", "FOUNDATION");
                         });
                         ui.add_space(14.0);
-                        panel(ui, |ui| {
-                            eyebrow(ui, "Software updates");
-                            ui.add_space(6.0);
-                            ui.horizontal(|ui| {
-                                ui.label("Update channel");
-                                if ui.selectable_label(self.update_channel == "development", "Development").clicked() {
-                                    self.update_channel = "development".into();
-                                    save_update_channel(&self.update_channel);
+                        #[cfg(windows)]
+                        {
+                            panel(ui, |ui| {
+                                eyebrow(ui, "Software updates");
+                                ui.add_space(6.0);
+                                ui.horizontal(|ui| {
+                                    ui.label("Update channel");
+                                    if ui.selectable_label(self.update_channel == "development", "Development").clicked() {
+                                        self.update_channel = "development".into();
+                                        save_update_channel(&self.update_channel);
+                                        self.update_available = None;
+                                        self.update_status = "Development channel selected.".into();
+                                    }
+                                    if ui.selectable_label(self.update_channel == "stable", "Stable").clicked() {
+                                        self.update_channel = "stable".into();
+                                        save_update_channel(&self.update_channel);
+                                        self.update_available = None;
+                                        self.update_status = "Stable channel selected.".into();
+                                    }
+                                });
+                                muted(ui, if self.update_channel == "stable" {
+                                    "Stable releases will appear when the Stable channel launches."
+                                } else {
+                                    "Development builds include the newest features and may be less stable."
+                                });
+                                if primary_button(ui, "Check for updates") {
                                     self.update_available = None;
-                                    self.update_status = "Development channel selected.".into();
+                                    check_for_update(self.update_channel.clone(), self.update_tx.clone());
                                 }
-                                if ui.selectable_label(self.update_channel == "stable", "Stable").clicked() {
-                                    self.update_channel = "stable".into();
-                                    save_update_channel(&self.update_channel);
-                                    self.update_available = None;
-                                    self.update_status = "Stable channel selected.".into();
-                                }
-                            });
-                            muted(ui, if self.update_channel == "stable" {
-                                "Stable releases will appear when the Stable channel launches."
-                            } else {
-                                "Development builds include the newest features and may be less stable."
-                            });
-                            if primary_button(ui, "Check for updates") {
-                                self.update_available = None;
-                                check_for_update(self.update_channel.clone(), self.update_tx.clone());
-                            }
-                            muted(ui, &self.update_status);
-                            if let Some((version, installer)) = self.update_available.clone() {
-                                if primary_button(ui, &format!("Install Bridge {version} and restart")) {
-                                    let launched = std::process::Command::new("msiexec")
-                                        .arg("/i").arg(&installer)
-                                        .args(["/passive", "/norestart"])
-                                        .spawn().is_ok();
-                                    if launched {
-                                        std::process::exit(0);
-                                    } else {
-                                        self.update_status = "Could not launch the Windows installer.".into();
+                                muted(ui, &self.update_status);
+                                if let Some((version, installer)) = self.update_available.clone() {
+                                    if primary_button(ui, &format!("Install Bridge {version} and restart")) {
+                                        let launched = std::process::Command::new("msiexec")
+                                            .arg("/i").arg(&installer)
+                                            .args(["/passive", "/norestart"])
+                                            .spawn().is_ok();
+                                        if launched {
+                                            std::process::exit(0);
+                                        } else {
+                                            self.update_status = "Could not launch the Windows installer.".into();
+                                        }
                                     }
                                 }
-                            }
-                        });
-                        ui.add_space(14.0);
+                            });
+                            ui.add_space(14.0);
+                        }
+
                         panel(ui, |ui| {
                             eyebrow(ui, "About");
                             ui.label(egui::RichText::new("Bridge for Windows").strong());
