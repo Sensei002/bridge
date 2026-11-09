@@ -170,10 +170,13 @@ internal class BridgeDiscovery(
         val name = localDisplayName ?: return
         val keyFingerprint = localFingerprint ?: return
         stop()
+        val restartGeneration = generation
         // NSD stop/unregister callbacks are asynchronous. Give Android time to
         // retire the previous listeners before registering fresh listener instances.
         android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-            if (localDeviceId == null && !stopped) start(id, name, keyFingerprint)
+            if (generation == restartGeneration && localDeviceId == null && stopped) {
+                start(id, name, keyFingerprint)
+            }
         }, 2500)
     }
 
