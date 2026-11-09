@@ -456,6 +456,8 @@ impl Default for BridgeApp {
         #[cfg(windows)]
         let update_channel = load_update_channel();
         #[cfg(windows)]
+        check_for_update(update_channel.clone(), update_tx.clone());
+        #[cfg(windows)]
         let (trust_store, trust_store_error) = match TrustStore::load(trust_store_path()) {
             Ok(store) => (store, None),
             Err(error) => (TrustStore::new(), Some(error.to_string())),
@@ -531,6 +533,32 @@ impl Default for BridgeApp {
             brand_texture: None,
         }
     }
+}
+
+#[cfg(windows)]
+fn update_channel_path() -> PathBuf {
+    std::env::var_os("APPDATA").map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("Bridge")
+        .join("update-channel.txt")
+}
+
+#[cfg(windows)]
+fn load_update_channel() -> String {
+    if std::fs::read_to_string(update_channel_path()).map(|value| value.trim() == "stable").unwrap_or(false) {
+        "stable".into()
+    } else {
+        "development".into()
+    }
+}
+
+#[cfg(windows)]
+fn save_update_channel(channel: &str) {
+    let path = update_channel_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, if channel == "stable" { "stable" } else { "development" });
 }
 
 #[cfg(windows)]
