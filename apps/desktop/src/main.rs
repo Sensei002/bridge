@@ -11,6 +11,8 @@ use bridge_core::trust::{SasConfirmation, TrustStore};
 #[cfg(windows)]
 use bridge_protocol::{DeviceDescriptor, DeviceId, Platform, PROTOCOL_VERSION};
 #[cfg(windows)]
+use bridge_transfer::{decode_packet, encode_packet, offer_for_file, OutgoingFile, TransferControl, TransferPacket};
+#[cfg(windows)]
 use std::net::TcpListener;
 #[cfg(windows)]
 use std::path::PathBuf;
@@ -115,7 +117,6 @@ impl DesktopSession {
         Ok(Arc::new(Self { connection, incoming: std::sync::Mutex::new(incoming), stop, remote_fingerprint }))
     }
 
-    #[allow(dead_code)]
     fn send(&self, payload: &[u8]) -> Result<(), String> {
         if payload.is_empty() || payload.len() > bridge_network::MAX_FRAME_BYTES - 16 {
             return Err("session payload size is invalid".into());
@@ -126,7 +127,6 @@ impl DesktopSession {
         bridge_network::write_frame(&mut guard.stream, &encrypted[..length]).map_err(|error| error.to_string())
     }
 
-    #[allow(dead_code)]
     fn receive_timeout(&self, timeout: Duration) -> Result<Vec<u8>, String> {
         self.incoming.lock().map_err(|_| "session receiver lock poisoned")?
             .recv_timeout(timeout).map_err(|error| error.to_string())
@@ -141,6 +141,66 @@ impl Drop for DesktopSession {
             let _ = connection.stream.shutdown(std::net::Shutdown::Both);
         }
     }
+}
+
+#[cfg(windows)]
+enum TransferUiEvent {
+    Status(String),
+    Progress { sent: u64, total: u64 },
+    Complete(String),
+    Failed(String),
+}
+
+#[cfg(windows)]
+fn start_file_transfer(
+    session: Arc<DesktopSession>,
+    path: PathBuf,
+    events: Sender<TransferUiEvent>,
+) {
+    thread::Builder::new().name("bridge-file-send".into()).spawn(move || {
+        let result = (|| -> Result<String, String> {
+            let offer = offer_for_file(&path).map_err(|error| error.to_string())?;
+            let file_name = offer.file_name.clone();
+            let transfer_id = offer.transfer_id;
+            let packet = encode_packet(&TransferPacket::Control(
+                TransferControl::FileOffer { offer: offer.clone() }
+            )).map_err(|error| error.to_string())?;
+            session.send(&packet)?;
+            let _ = events.send(TransferUiEvent::Status(format!("Waiting for {} to accept {file_name}…", session.remote_fingerprint[..8].to_owned())));
+            let response = session.receive_timeout(Duration::from_secs(120))?;
+            match decode_packet(&response).map_err(|error| error.to_string())? {
+                TransferPacket::Control(TransferControl::FileAccept { transfer_id: accepted })
+                    if accepted == transfer_id => {}
+                TransferPacket::Control(TransferControl::FileReject { transfer_id: rejected, reason })
+                    if rejected == transfer_id => return Err(format!("Transfer rejected: {reason}")),
+                _ => return Err("The connected device returned an unexpected transfer response.".into()),
+            }
+
+            let mut outgoing = OutgoingFile::open(&path, offer).map_err(|error| error.to_string())?;
+            let total = outgoing.total_bytes();
+            let mut sent = 0_u64;
+            while let Some(chunk) = outgoing.next_chunk().map_err(|error| error.to_string())? {
+                sent = sent.saturating_add(chunk.data.len() as u64);
+                let packet = encode_packet(&TransferPacket::Chunk(chunk)).map_err(|error| error.to_string())?;
+                session.send(&packet)?;
+                let _ = events.send(TransferUiEvent::Progress { sent, total });
+            }
+            let response = session.receive_timeout(Duration::from_secs(120))?;
+            match decode_packet(&response).map_err(|error| error.to_string())? {
+                TransferPacket::Control(TransferControl::FileComplete { transfer_id: completed })
+                    if completed == transfer_id => Ok(format!("{file_name} sent successfully.")),
+                TransferPacket::Control(TransferControl::FileCancel { transfer_id: cancelled })
+                    if cancelled == transfer_id => Err("The receiving device cancelled the transfer.".into()),
+                _ => Err("The connected device did not confirm the completed transfer.".into()),
+            }
+        })();
+        match result {
+            Ok(message) => { let _ = events.send(TransferUiEvent::Complete(message)); }
+            Err(error) => { let _ = events.send(TransferUiEvent::Failed(error)); }
+        }
+    }).map_err(|error| {
+        let _ = events.send(TransferUiEvent::Failed(format!("Could not start transfer worker: {error}")));
+    }).ok();
 }
 
 #[cfg(windows)]
@@ -174,6 +234,18 @@ struct BridgeApp {
     #[cfg(windows)]
     active_sessions: Vec<Arc<DesktopSession>>,
     #[cfg(windows)]
+    selected_transfer_fingerprint: Option<String>,
+    #[cfg(windows)]
+    transfer_tx: Sender<TransferUiEvent>,
+    #[cfg(windows)]
+    transfer_rx: Receiver<TransferUiEvent>,
+    #[cfg(windows)]
+    transfer_busy: bool,
+    #[cfg(windows)]
+    transfer_progress: f32,
+    #[cfg(windows)]
+    transfer_status: String,
+    #[cfg(windows)]
     trust_store: TrustStore,
     #[cfg(windows)]
     trust_store_error: Option<String>,
@@ -191,6 +263,8 @@ impl Default for BridgeApp {
         let (peer_tx, peer_rx) = mpsc::channel();
         #[cfg(windows)]
         let (pairing_tx, pairing_rx) = mpsc::channel();
+        #[cfg(windows)]
+        let (transfer_tx, transfer_rx) = mpsc::channel();
         #[cfg(windows)]
         let (trust_store, trust_store_error) = match TrustStore::load(trust_store_path()) {
             Ok(store) => (store, None),
@@ -229,6 +303,18 @@ impl Default for BridgeApp {
             pending_pairings: Vec::new(),
             #[cfg(windows)]
             active_sessions: Vec::new(),
+            #[cfg(windows)]
+            selected_transfer_fingerprint: None,
+            #[cfg(windows)]
+            transfer_tx,
+            #[cfg(windows)]
+            transfer_rx,
+            #[cfg(windows)]
+            transfer_busy: false,
+            #[cfg(windows)]
+            transfer_progress: 0.0,
+            #[cfg(windows)]
+            transfer_status: "Choose a connected trusted device to send a file.".into(),
             #[cfg(windows)]
             trust_store,
             #[cfg(windows)]
@@ -552,6 +638,26 @@ impl eframe::App for BridgeApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         for message in self.network_rx.try_iter() {
             self.network_status = message;
+        }
+        #[cfg(windows)]
+        for event in self.transfer_rx.try_iter() {
+            match event {
+                TransferUiEvent::Status(message) => self.transfer_status = message,
+                TransferUiEvent::Progress { sent, total } => {
+                    self.transfer_progress = if total == 0 { 1.0 } else { sent as f32 / total as f32 };
+                    self.transfer_status = format!("Sending {} of {} bytes…", sent, total);
+                }
+                TransferUiEvent::Complete(message) => {
+                    self.transfer_busy = false;
+                    self.transfer_progress = 1.0;
+                    self.transfer_status = message;
+                }
+                TransferUiEvent::Failed(error) => {
+                    self.transfer_busy = false;
+                    self.transfer_progress = 0.0;
+                    self.transfer_status = error;
+                }
+            }
         }
         #[cfg(windows)]
         {
@@ -898,25 +1004,78 @@ impl eframe::App for BridgeApp {
                         });
                     }
                     Page::Transfers => {
-                        ui.horizontal(|ui| {
-                            for label in ["All transfers", "Sending", "Received"] {
-                                let _ = ui.selectable_label(label == "All transfers", label);
+                        #[cfg(windows)]
+                        {
+                            let targets = self.trust_store.list().into_iter().filter_map(|device| {
+                                self.active_sessions.iter()
+                                    .find(|session| session.remote_fingerprint.eq_ignore_ascii_case(&device.public_key_fingerprint))
+                                    .map(|session| (device.public_key_fingerprint, device.descriptor.display_name, Arc::clone(session)))
+                            }).collect::<Vec<_>>();
+                            if self.selected_transfer_fingerprint.is_none() {
+                                self.selected_transfer_fingerprint = targets.first().map(|target| target.0.clone());
                             }
-                        });
-                        ui.add_space(12.0);
+                            panel(ui, |ui| {
+                                eyebrow(ui, "SECURE FILE TRANSFER");
+                                ui.add_space(8.0);
+                                ui.label(egui::RichText::new("Send a file to a trusted device").size(20.0).strong());
+                                muted(ui, "Files are sent over the existing authenticated, encrypted local session.");
+                                ui.add_space(14.0);
+                                let selected_name = targets.iter()
+                                    .find(|target| Some(&target.0) == self.selected_transfer_fingerprint.as_ref())
+                                    .map(|target| target.1.as_str())
+                                    .unwrap_or("No connected trusted device");
+                                egui::ComboBox::from_id_salt("bridge_transfer_target")
+                                    .selected_text(selected_name)
+                                    .width(260.0)
+                                    .show_ui(ui, |ui| {
+                                        for (fingerprint, name, _) in &targets {
+                                            ui.selectable_value(&mut self.selected_transfer_fingerprint, Some(fingerprint.clone()), name);
+                                        }
+                                    });
+                                ui.add_space(12.0);
+                                let can_send = !self.transfer_busy && !targets.is_empty()
+                                    && self.selected_transfer_fingerprint.as_ref().is_some_and(|fingerprint| targets.iter().any(|target| &target.0 == fingerprint));
+                                if ui.add_enabled(can_send, egui::Button::new(egui::RichText::new("＋  Choose file and send").strong().color(TEXT))
+                                    .fill(egui::Color32::from_rgb(12, 105, 121))
+                                    .corner_radius(egui::CornerRadius::same(8))
+                                    .min_size(egui::vec2(210.0, 38.0))).clicked() {
+                                    let selected_session = targets.iter()
+                                        .find(|target| Some(&target.0) == self.selected_transfer_fingerprint.as_ref())
+                                        .map(|target| Arc::clone(&target.2));
+                                    if let (Some(session), Some(path)) = (selected_session, rfd::FileDialog::new().pick_file()) {
+                                        self.transfer_busy = true;
+                                        self.transfer_progress = 0.0;
+                                        self.transfer_status = format!("Preparing {}…", path.file_name().and_then(|name| name.to_str()).unwrap_or("file"));
+                                        start_file_transfer(session, path, self.transfer_tx.clone());
+                                    }
+                                }
+                                ui.add_space(14.0);
+                                if self.transfer_busy {
+                                    ui.add(egui::ProgressBar::new(self.transfer_progress).show_percentage().animate(true));
+                                }
+                                muted(ui, &self.transfer_status);
+                                if targets.is_empty() {
+                                    ui.add_space(8.0);
+                                    muted(ui, "No active secure sessions. Connect to a trusted device on the Devices page first.");
+                                }
+                            });
+                            ui.add_space(12.0);
+                            panel(ui, |ui| {
+                                eyebrow(ui, "TRANSFER SAFETY");
+                                feature_row(ui, "◇", "Encrypted in transit", "Uses the authenticated Noise session; no cloud relay.", "ACTIVE");
+                                ui.add_space(10.0);
+                                feature_row(ui, "✓", "Integrity checked", "SHA-256 verified before the receiver publishes the file.", "ACTIVE");
+                                ui.add_space(10.0);
+                                feature_row(ui, "▣", "No accidental overwrite", "The receiver chooses a collision-safe destination name.", "ACTIVE");
+                            });
+                        }
+                        #[cfg(not(windows))]
                         panel(ui, |ui| {
                             ui.vertical_centered(|ui| {
-                                ui.add_space(26.0);
-                                ui.label(egui::RichText::new("⇧").size(40.0).color(ACCENT));
-                                ui.label(egui::RichText::new("Your transfers will live here").size(19.0).strong());
-                                muted(ui, "Send files directly between paired devices. No cloud upload required.");
-                                ui.add_space(14.0);
-                                if primary_button(ui, "＋  Choose files") { self.show_pair_dialog = true; }
-                                ui.add_space(22.0);
+                                ui.label(egui::RichText::new("File transfer is available in the Windows build").strong());
+                                muted(ui, "Android and iOS transfer workflows are being connected next.");
                             });
                         });
-                        ui.add_space(12.0);
-                        muted(ui, "Transfer controls are a UI preview; file transport is not active yet.");
                     }
                     Page::Clipboard => {
                         panel(ui, |ui| {
