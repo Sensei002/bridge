@@ -120,6 +120,7 @@ class MainActivity : ComponentActivity() {
                 receivedFiles = receivedFiles,
                 onExportFile = { file -> pendingExportFile = file; exportFileLauncher.launch(file.name) },
                 onPickFile = { handle -> pendingSendHandle = handle; sendFileLauncher.launch(arrayOf("*/*")) },
+                onCancelTransfer = { transferReceiver?.cancelAll() },
                 onAcceptTransfer = { offer -> transferReceiver?.accept(offer); incomingOffers.remove(offer) },
                 onRejectTransfer = { offer -> transferReceiver?.reject(offer); incomingOffers.remove(offer) },
                 onPair = { peer -> pairingController?.pair(peer) },
@@ -311,6 +312,7 @@ private fun BridgeApp(
     receivedFiles: List<File>,
     onExportFile: (File) -> Unit,
     onPickFile: (Long) -> Unit,
+    onCancelTransfer: () -> Unit,
     onAcceptTransfer: (BridgeIncomingOffer) -> Unit,
     onRejectTransfer: (BridgeIncomingOffer) -> Unit,
     onPair: (BridgePeer) -> Unit,
@@ -355,6 +357,7 @@ private fun BridgeApp(
                             trustedDevices = trustedDevices,
                             connectedSessionHandles = connectedSessionHandles,
                             onPickFile = onPickFile,
+                            onCancelTransfer = onCancelTransfer,
                             transferStatus = transferStatus,
                             receivedFiles = receivedFiles,
                             onExportFile = onExportFile,
@@ -702,6 +705,7 @@ private fun TransfersScreen(
     trustedDevices: List<BridgeTrustedDevice>,
     connectedSessionHandles: Map<String, Long>,
     onPickFile: (Long) -> Unit,
+    onCancelTransfer: () -> Unit,
     transferStatus: String,
     receivedFiles: List<File>,
     onExportFile: (File) -> Unit,
@@ -778,8 +782,13 @@ private fun TransfersScreen(
             }
         }
         Panel {
-            Eyebrow("TRANSFER STATUS")
+            Eyebrow("LIVE TRANSFER ACTIVITY")
             Text(transferStatus, color = Color.White, fontSize = 12.sp, lineHeight = 18.sp)
+            if (transferStatus.startsWith("Sending ") || transferStatus.startsWith("Receiving ") || transferStatus.startsWith("Waiting for the receiving device")) {
+                Button(onClick = onCancelTransfer, colors = ButtonDefaults.buttonColors(containerColor = PanelAlt, contentColor = Amber)) {
+                    Text("Cancel transfer")
+                }
+            }
             Text("Received files stay private until you choose Save to… and select a destination such as Downloads.", color = Muted, fontSize = 10.sp, lineHeight = 15.sp)
         }
         Panel {
