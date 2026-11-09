@@ -313,6 +313,7 @@ internal class BridgeTransferReceiver(
         const val CONTROL_TAG = 0x01
         const val CHUNK_TAG = 0x02
         const val CHUNK_HEADER_SIZE = 28
+        const val CHUNK_DATA_BYTES = 48 * 1024
         const val MAX_FILE_BYTES = 2L * 1024 * 1024 * 1024
     }
 }
