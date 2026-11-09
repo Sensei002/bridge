@@ -70,7 +70,7 @@ fn check_and_download(channel: &str) -> Result<Option<(String, PathBuf)>, String
 
     let windows = &manifest["windows"];
     let version = windows["version"].as_str().ok_or("Windows version is missing")?.to_owned();
-    if compare_versions(&version, env!("CARGO_PKG_VERSION"))? != std::cmp::Ordering::Greater {
+    if compare_versions(&version, option_env!("BRIDGE_BUILD_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")))? != std::cmp::Ordering::Greater {
         return Ok(None);
     }
     let download_url = windows["download_url"].as_str().ok_or("MSI download URL is missing")?;
