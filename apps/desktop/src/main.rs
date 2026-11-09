@@ -1112,6 +1112,59 @@ impl eframe::App for BridgeApp {
                                     .find(|session| session.remote_fingerprint.eq_ignore_ascii_case(&device.public_key_fingerprint))
                                     .map(|session| (device.public_key_fingerprint.clone(), device.descriptor.display_name.clone(), Arc::clone(session)))
                             }).collect::<Vec<_>>();
+                            let mut accept_incoming: Option<(usize, PathBuf)> = None;
+                            let mut reject_incoming: Option<usize> = None;
+                            if !self.pending_incoming_transfers.is_empty() {
+                                panel(ui, |ui| {
+                                    eyebrow(ui, "INCOMING FILE REQUESTS");
+                                    ui.add_space(6.0);
+                                    for (index, pending) in self.pending_incoming_transfers.iter().enumerate() {
+                                        ui.horizontal(|ui| {
+                                            ui.vertical(|ui| {
+                                                ui.label(egui::RichText::new(&pending.offer.file_name).strong().color(TEXT));
+                                                muted(ui, &format!(
+                                                    "{} · {:.2} MB · encrypted and SHA-256 verified",
+                                                    &pending.session.remote_fingerprint[..8.min(pending.session.remote_fingerprint.len())],
+                                                    pending.offer.file_size as f64 / 1_048_576.0
+                                                ));
+                                            });
+                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                if primary_button(ui, "Decline") { reject_incoming = Some(index); }
+                                                if primary_button(ui, "Accept…") {
+                                                    if let Some(path) = rfd::FileDialog::new()
+                                                        .set_file_name(&pending.offer.file_name)
+                                                        .save_file()
+                                                    {
+                                                        accept_incoming = Some((index, path));
+                                                    }
+                                                }
+                                            });
+                                        });
+                                        ui.add_space(8.0);
+                                    }
+                                });
+                                if let Some(index) = reject_incoming {
+                                    if index < self.pending_incoming_transfers.len() {
+                                        let pending = self.pending_incoming_transfers.remove(index);
+                                        reject_incoming_transfer(&pending.session, &pending.offer);
+                                        self.transfer_status = format!("Declined {}.", pending.offer.file_name);
+                                    }
+                                }
+                                if let Some((index, path)) = accept_incoming {
+                                    if index < self.pending_incoming_transfers.len() {
+                                        let pending = self.pending_incoming_transfers.remove(index);
+                                        self.transfer_busy = true;
+                                        self.transfer_progress = 0.0;
+                                        self.transfer_status = format!("Receiving {}…", pending.offer.file_name);
+                                        start_receive_file_transfer(
+                                            pending.session,
+                                            pending.offer,
+                                            path,
+                                            self.transfer_tx.clone(),
+                                        );
+                                    }
+                                }
+                            }
                             if self.selected_transfer_fingerprint.is_none() {
                                 self.selected_transfer_fingerprint = targets.first().map(|target| target.0.clone());
                             }
