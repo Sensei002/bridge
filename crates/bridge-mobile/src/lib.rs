@@ -88,7 +88,7 @@ fn register(
     // Keep the dispatcher alive while the peer is idle; shutdown on session close wakes this read.
     let connection = Arc::new(Mutex::new(connection));
     reader_stream.set_read_timeout(None).map_err(|error| error.to_string())?;
-    let (sender, incoming) = mpsc::channel();
+    let (sender, incoming) = mpsc::sync_channel(8);
     let stop = Arc::new(AtomicBool::new(false));
     let reader_connection = Arc::clone(&connection);
     let reader_stop = Arc::clone(&stop);
