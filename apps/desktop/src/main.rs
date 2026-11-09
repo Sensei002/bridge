@@ -91,7 +91,7 @@ impl DesktopSession {
         let reader_connection = Arc::clone(&connection);
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let reader_stop = Arc::clone(&stop);
-        let (sender, incoming) = mpsc::channel();
+        let (sender, incoming) = mpsc::sync_channel(8);
         let (offer_sender, incoming_offers) = mpsc::channel();
         thread::Builder::new()
             .name("bridge-desktop-session-reader".into())
