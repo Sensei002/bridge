@@ -194,7 +194,7 @@ class BridgeConnectionService : Service() {
                     deviceId,
                     onPending = { pending ->
                         mainHandler.post {
-                            if (!stopping && BridgeRuntimeState.pendingPairings.none { it.requestId == pending.requestId }) {
+                            if (!stopping && BridgeRuntimeState.pendingPairings.none { it.handle == pending.handle }) {
                                 BridgeRuntimeState.pendingPairings.add(pending)
                             }
                         }
