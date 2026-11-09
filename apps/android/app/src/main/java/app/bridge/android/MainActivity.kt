@@ -784,6 +784,12 @@ private fun TransfersScreen(
         Panel {
             Eyebrow("LIVE TRANSFER ACTIVITY")
             Text(transferStatus, color = Color.White, fontSize = 12.sp, lineHeight = 18.sp)
+            val transferPercent = Regex("(\\d+)%").find(transferStatus)?.groupValues?.get(1)?.toFloatOrNull()?.div(100f)
+            if (transferPercent != null) {
+                Box(modifier = Modifier.fillMaxWidth().height(8.dp).background(PanelAlt, RoundedCornerShape(8.dp))) {
+                    Box(modifier = Modifier.fillMaxWidth(transferPercent.coerceIn(0f, 1f)).fillMaxHeight().background(Accent, RoundedCornerShape(8.dp)))
+                }
+            }
             if (transferStatus.startsWith("Sending ") || transferStatus.startsWith("Receiving ") || transferStatus.startsWith("Waiting for the receiving device")) {
                 Button(onClick = onCancelTransfer, colors = ButtonDefaults.buttonColors(containerColor = PanelAlt, contentColor = Amber)) {
                     Text("Cancel transfer")
