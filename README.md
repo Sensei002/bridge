@@ -67,6 +67,10 @@ Push a version tag such as `v0.2.0` to build release assets and publish a GitHub
 
 **Signing note:** Windows output is unsigned, Android release artifacts are unsigned, and iOS archive is unsigned. Store distribution requires signing certificates/provisioning profiles and repository secrets; none are committed to this repository.
 
+## Windows system platform
+
+Bridge for Windows is planned as a system-integrated platform: a background Windows service will own trusted sessions and capability permissions, while the existing egui app remains the management UI. Optional, separately packaged Windows drivers will expose capabilities such as a virtual monitor and virtual audio endpoints. The architecture and phased implementation plan are documented in [docs/windows-system-platform.md](docs/windows-system-platform.md). The service and device drivers are not implemented yet.
+
 ## Windows desktop technology
 
 The Windows client is a native Rust desktop application rendered by egui. It does not embed a browser engine and does not depend on Microsoft Edge WebView2 Runtime. The desktop build compiles directly from the Rust crate in `apps/desktop`.
