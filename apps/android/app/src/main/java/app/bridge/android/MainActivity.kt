@@ -70,16 +70,24 @@ class MainActivity : ComponentActivity() {
     private val discoveredPeers = mutableStateListOf<BridgePeer>()
     private val pendingPairings = mutableStateListOf<BridgePendingPairing>()
     private val trustedDevices = mutableStateListOf<BridgeTrustedDevice>()
+    private val connectedSessionHandles = mutableStateMapOf<String, Long>()
     private val incomingOffers = mutableStateListOf<BridgeIncomingOffer>()
     private val receivedFiles = mutableStateListOf<File>()
     private var pendingExportFile: File? = null
     private lateinit var exportFileLauncher: ActivityResultLauncher<String>
+    private lateinit var sendFileLauncher: ActivityResultLauncher<Array<String>>
+    private var pendingSendHandle: Long? = null
     private var transferStatus by mutableStateOf("Waiting for a connected trusted device.")
     @Volatile private var transferReceiver: BridgeTransferReceiver? = null
     private var pairingStatus by mutableStateOf("Preparing secure device identity…")
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        sendFileLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
+            val handle = pendingSendHandle
+            pendingSendHandle = null
+            if (uri != null && handle != null) transferReceiver?.sendFile(uri, handle)
+        }
         exportFileLauncher = registerForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri: Uri? ->
             val source = pendingExportFile
             pendingExportFile = null
@@ -105,11 +113,13 @@ class MainActivity : ComponentActivity() {
                 discoveredPeers = discoveredPeers,
                 pendingPairings = pendingPairings,
                 trustedDevices = trustedDevices,
+                connectedSessionHandles = connectedSessionHandles,
                 pairingStatus = pairingStatus,
                 incomingOffers = incomingOffers,
                 transferStatus = transferStatus,
                 receivedFiles = receivedFiles,
                 onExportFile = { file -> pendingExportFile = file; exportFileLauncher.launch(file.name) },
+                onPickFile = { handle -> pendingSendHandle = handle; sendFileLauncher.launch(arrayOf("*/*")) },
                 onAcceptTransfer = { offer -> transferReceiver?.accept(offer); incomingOffers.remove(offer) },
                 onRejectTransfer = { offer -> transferReceiver?.reject(offer); incomingOffers.remove(offer) },
                 onPair = { peer -> pairingController?.pair(peer) },
@@ -169,7 +179,10 @@ class MainActivity : ComponentActivity() {
                     return@Thread
                 }
                 pairingController = controller
-                controller.onSessionReady = { peerId, handle -> receiver.attach(peerId, handle) }
+                controller.onSessionReady = { peerId, handle ->
+                    connectedSessionHandles[peerId] = handle
+                    receiver.attach(peerId, handle)
+                }
                 controller.start()
 
                 val networkDiscovery = BridgeDiscovery(this, { peer ->
@@ -291,11 +304,13 @@ private fun BridgeApp(
     discoveredPeers: List<BridgePeer>,
     pendingPairings: List<BridgePendingPairing>,
     trustedDevices: List<BridgeTrustedDevice>,
+    connectedSessionHandles: Map<String, Long>,
     pairingStatus: String,
     incomingOffers: List<BridgeIncomingOffer>,
     transferStatus: String,
     receivedFiles: List<File>,
     onExportFile: (File) -> Unit,
+    onPickFile: (Long) -> Unit,
     onAcceptTransfer: (BridgeIncomingOffer) -> Unit,
     onRejectTransfer: (BridgeIncomingOffer) -> Unit,
     onPair: (BridgePeer) -> Unit,
@@ -337,6 +352,9 @@ private fun BridgeApp(
                         )
                         BridgeTab.Transfers -> TransfersScreen(
                             incomingOffers = incomingOffers,
+                            trustedDevices = trustedDevices,
+                            connectedSessionHandles = connectedSessionHandles,
+                            onPickFile = onPickFile,
                             transferStatus = transferStatus,
                             receivedFiles = receivedFiles,
                             onExportFile = onExportFile,
@@ -681,6 +699,9 @@ private fun DevicesScreen(
 @Composable
 private fun TransfersScreen(
     incomingOffers: List<BridgeIncomingOffer>,
+    trustedDevices: List<BridgeTrustedDevice>,
+    connectedSessionHandles: Map<String, Long>,
+    onPickFile: (Long) -> Unit,
     transferStatus: String,
     receivedFiles: List<File>,
     onExportFile: (File) -> Unit,
@@ -690,6 +711,29 @@ private fun TransfersScreen(
 ) {
     ScreenContent {
         ScreenHeading("MOVE WITHOUT LIMITS", "File transfers", "Receive files over your authenticated, encrypted local connection.")
+        Panel {
+            Eyebrow("SEND A FILE")
+            val connected = trustedDevices.filter { connectedSessionHandles.containsKey(it.deviceId) }
+            if (connected.isEmpty()) {
+                Text("Connect a trusted device first. Online devices will appear here.", color = Muted, fontSize = 12.sp)
+            } else {
+                Text("Choose a connected device, then select a file from your phone.", color = Muted, fontSize = 11.sp, lineHeight = 16.sp)
+                connected.forEach { device ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                            Text(device.name, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                            Text("Secure connection ready", color = Good, fontSize = 10.sp)
+                        }
+                        PrimaryAction("Choose file", { connectedSessionHandles[device.deviceId]?.let(onPickFile) })
+                    }
+                    DividerLine()
+                }
+            }
+        }
         Panel {
             Eyebrow("INCOMING REQUESTS")
             if (incomingOffers.isEmpty()) {
