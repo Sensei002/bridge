@@ -149,6 +149,7 @@ jobs:
           apk = root / "Bridge-android.apk"
           if os.environ.get("ANDROID_SIGNED", "").lower() == "true" and apk.exists():
               manifest["android"] = {
+                  "application_id": "app.bridge.android",
                   "version_name": version,
                   "version_code": int(build),
                   "asset": apk.name,
