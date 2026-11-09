@@ -47,21 +47,45 @@ internal class BridgeDiscovery(
         object : NsdManager.ResolveListener {
             override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
                 resolving.remove(serviceName, this)
+                if (!stopped) {
+                    onStatus("Found ${serviceName}, but Android could not resolve it (NSD error $errorCode).")
+                }
             }
 
             override fun onServiceResolved(serviceInfo: NsdServiceInfo) {
                 resolving.remove(serviceName, this)
                 if (stopped) return
-                val host = serviceInfo.host?.hostAddress ?: return
+                val host = serviceInfo.host?.hostAddress
+                if (host.isNullOrBlank()) {
+                    onStatus("Bridge service ${serviceInfo.serviceName} resolved without a usable network address.")
+                    return
+                }
                 val attributes = serviceInfo.attributes
-                fun attr(key: String) = attributes[key]?.toString(Charsets.UTF_8).orEmpty()
+                // DNS-SD TXT keys are case-insensitive. Be tolerant of platform
+                // differences in how Android exposes their original casing.
+                fun attr(key: String) = attributes.entries
+                    .firstOrNull { it.key.equals(key, ignoreCase = true) }
+                    ?.value?.toString(Charsets.UTF_8).orEmpty()
                 val id = attr("id")
                 val fingerprint = attr("fingerprint")
                 val platform = attr("platform")
                 val name = attr("name").ifBlank { serviceInfo.serviceName }
-                if (id.isBlank() || id == localDeviceId || fingerprint.length != 64 ||
-                    !fingerprint.all { it.isDigit() || it.lowercaseChar() in 'a'..'f' }) return
+                if (id.isBlank()) {
+                    onStatus("Ignored ${serviceInfo.serviceName}: its Bridge device ID is missing.")
+                    return
+                }
+                if (id == localDeviceId) return
+                if (fingerprint.length != 64 ||
+                    !fingerprint.all { it.isDigit() || it.lowercaseChar() in 'a'..'f' }) {
+                    onStatus("Ignored ${serviceInfo.serviceName}: its identity fingerprint is missing or invalid.")
+                    return
+                }
+                if (platform.isBlank()) {
+                    onStatus("Ignored ${serviceInfo.serviceName}: its platform metadata is missing.")
+                    return
+                }
                 onPeerFound(BridgePeer(name, host, serviceInfo.port, id, fingerprint, platform, serviceInfo.serviceName))
+                onStatus("Found nearby Bridge device: $name.")
             }
         }
 
@@ -77,7 +101,11 @@ internal class BridgeDiscovery(
             stop()
         }
         override fun onServiceFound(serviceInfo: NsdServiceInfo) {
-            if (stopped || serviceInfo.serviceType != SERVICE_TYPE) return
+            if (stopped) return
+            // discoverServices() is already scoped to SERVICE_TYPE. Android
+            // versions differ in whether serviceType includes the local domain,
+            // so an exact string comparison here can hide valid peers.
+            onStatus("Found Bridge service ${serviceInfo.serviceName}; resolving…")
             val listener = resolveListener(serviceInfo.serviceName)
             if (resolving.putIfAbsent(serviceInfo.serviceName, listener) != null) return
             @Suppress("DEPRECATION")
