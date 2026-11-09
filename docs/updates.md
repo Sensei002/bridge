@@ -98,3 +98,15 @@ For each new Development release:
 7. Verify the app version shown by each client matches the newly published release.
 
 Android requires confirmation in the system package installer. Windows currently exits for MSI installation; reopening from the Start menu may be necessary after setup finishes.
+
+## Update smoke test
+
+For each development release, verify both installed clients against a newer published build:
+
+1. Confirm the release includes the Windows MSI, signed Android APK, and `bridge-update.json`.
+2. On the installed Windows and Android clients, run **Settings → Software updates → Check for updates**.
+3. Confirm each client detects the newer development version and offers the correct platform package.
+4. Complete installation on each platform and confirm the installed version advances.
+5. Run another check and confirm both clients report that Bridge is up to date.
+
+A successful update check alone verifies release discovery and manifest parsing; completing installation verifies the full update path.
