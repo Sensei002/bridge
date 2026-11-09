@@ -236,7 +236,11 @@ class BridgeConnectionService : Service() {
                     { peer ->
                         mainHandler.post {
                             if (stopping || peer.deviceId == deviceId) return@post
-                            val existing = BridgeRuntimeState.discoveredPeers.indexOfFirst { it.deviceId == peer.deviceId }
+                            // Device IDs can be regenerated after app-data reset; the
+                            // authenticated Noise fingerprint remains the stable identity.
+                            val existing = BridgeRuntimeState.discoveredPeers.indexOfFirst {
+                                it.deviceId == peer.deviceId || it.fingerprint.equals(peer.fingerprint, ignoreCase = true)
+                            }
                             if (existing >= 0) BridgeRuntimeState.discoveredPeers[existing] = peer
                             else BridgeRuntimeState.discoveredPeers.add(peer)
 

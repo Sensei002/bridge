@@ -14,6 +14,10 @@ use bridge_protocol::{DeviceDescriptor, DeviceId};
 use serde::{Deserialize, Serialize};
 
 const MAX_ACTIVE_SESSIONS: usize = 32;
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+const SESSION_READ_TIMEOUT: Duration = Duration::from_secs(15);
+const HEARTBEAT_PING: &[u8] = b"\0BRIDGE_HEARTBEAT_PING_V1";
+const HEARTBEAT_PONG: &[u8] = b"\0BRIDGE_HEARTBEAT_PONG_V1";
 static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
 struct SessionEntry { connection: Arc<Mutex<NoiseConnection>>, incoming: Mutex<Receiver<Vec<u8>>>, stop: Arc<AtomicBool> }
 
@@ -85,13 +89,14 @@ fn register(
         role: Some(role.into()),
     };
     let reader_stream = connection.stream.try_clone().map_err(|error| error.to_string())?;
-    // Keep the dispatcher alive while the peer is idle; shutdown on session close wakes this read.
+    // Encrypted heartbeats keep idle sessions alive and bound stale-peer detection.
     let connection = Arc::new(Mutex::new(connection));
-    reader_stream.set_read_timeout(None).map_err(|error| error.to_string())?;
+    reader_stream.set_read_timeout(Some(SESSION_READ_TIMEOUT)).map_err(|error| error.to_string())?;
     let (sender, incoming) = mpsc::sync_channel(8);
     let stop = Arc::new(AtomicBool::new(false));
     let reader_connection = Arc::clone(&connection);
     let reader_stop = Arc::clone(&stop);
+    let reader_connection_for_thread = Arc::clone(&reader_connection);
     thread::Builder::new().name(format!("bridge-session-reader-{handle}")).spawn(move || {
         while !reader_stop.load(Ordering::Acquire) {
             let encrypted = match bridge_network::read_frame(&mut &reader_stream) { Ok(frame) => frame, Err(_) => break };
@@ -103,7 +108,45 @@ fn register(
                     Err(_) => break,
                 }
             };
+            if plaintext == HEARTBEAT_PING {
+                let mut guard = match reader_connection.lock() { Ok(guard) => guard, Err(_) => break };
+                let mut response = vec![0_u8; 65_535];
+                let length = match guard.transport.write_message(HEARTBEAT_PONG, &mut response) {
+                    Ok(length) => length, Err(_) => break,
+                };
+                if bridge_network::write_frame(&mut guard.stream, &response[..length]).is_err() { break; }
+                continue;
+            }
+            if plaintext == HEARTBEAT_PONG { continue; }
             if sender.send(plaintext).is_err() { break; }
+        }
+        reader_stop.store(true, Ordering::Release);
+        if let Ok(guard) = reader_connection_for_thread.lock() {
+            let _ = guard.stream.shutdown(std::net::Shutdown::Both);
+        }
+    }).map_err(|error| error.to_string())?;
+
+    let heartbeat_connection = Arc::clone(&connection);
+    let heartbeat_stop = Arc::clone(&stop);
+    thread::Builder::new().name(format!("bridge-session-heartbeat-{handle}")).spawn(move || {
+        while !heartbeat_stop.load(Ordering::Acquire) {
+            thread::sleep(HEARTBEAT_INTERVAL);
+            if heartbeat_stop.load(Ordering::Acquire) { break; }
+            let mut guard = match heartbeat_connection.lock() { Ok(guard) => guard, Err(_) => break };
+            let mut encrypted = vec![0_u8; 65_535];
+            let length = match guard.transport.write_message(HEARTBEAT_PING, &mut encrypted) {
+                Ok(length) => length,
+                Err(_) => {
+                    heartbeat_stop.store(true, Ordering::Release);
+                    let _ = guard.stream.shutdown(std::net::Shutdown::Both);
+                    break;
+                }
+            };
+            if bridge_network::write_frame(&mut guard.stream, &encrypted[..length]).is_err() {
+                heartbeat_stop.store(true, Ordering::Release);
+                let _ = guard.stream.shutdown(std::net::Shutdown::Both);
+                break;
+            }
         }
     }).map_err(|error| error.to_string())?;
     registry.insert(handle, Arc::new(SessionEntry { connection, incoming: Mutex::new(incoming), stop }));
@@ -400,7 +443,11 @@ mod android_jni {
     ) -> jni::sys::jbyteArray {
         match session_receive_payload(handle as u64) {
             Ok(bytes) => env.byte_array_from_slice(&bytes).map(|value| value.into_raw()).unwrap_or(std::ptr::null_mut()),
-            Err(_) => std::ptr::null_mut(),
+            // An idle but healthy session may have no application packet for a while.
+            // Return an empty array for that timeout; reserve [0] for a closed reader.
+            Err(error) if error == "session receive timed out" =>
+                env.byte_array_from_slice(&[]).map(|value| value.into_raw()).unwrap_or(std::ptr::null_mut()),
+            Err(_) => env.byte_array_from_slice(&[0_u8]).map(|value| value.into_raw()).unwrap_or(std::ptr::null_mut()),
         }
     }
 
