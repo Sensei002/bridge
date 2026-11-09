@@ -283,7 +283,7 @@ fn session_receive_payload(handle: u64) -> Result<Vec<u8>, String> {
         .map_err(|_| "session registry poisoned".to_string())
         .and_then(|map| map.get(&handle).cloned().ok_or_else(|| "session not found".to_string()))?;
     let receiver = session.incoming.lock().map_err(|_| "session receive queue poisoned".to_string())?;
-    receiver.recv_timeout(Duration::from_secs(20)).map_err(|error| match error {
+    receiver.recv_timeout(Duration::from_secs(120)).map_err(|error| match error {
         mpsc::RecvTimeoutError::Timeout => "session receive timed out".to_string(),
         mpsc::RecvTimeoutError::Disconnected => "session reader disconnected".to_string(),
     })
@@ -443,7 +443,11 @@ mod android_jni {
     ) -> jni::sys::jbyteArray {
         match session_receive_payload(handle as u64) {
             Ok(bytes) => env.byte_array_from_slice(&bytes).map(|value| value.into_raw()).unwrap_or(std::ptr::null_mut()),
-            Err(_) => std::ptr::null_mut(),
+            // An idle but healthy session may have no application packet for a while.
+            // Return an empty array for that timeout; reserve [0] for a closed reader.
+            Err(error) if error == "session receive timed out" =>
+                env.byte_array_from_slice(&[]).map(|value| value.into_raw()).unwrap_or(std::ptr::null_mut()),
+            Err(_) => env.byte_array_from_slice(&[0_i8]).map(|value| value.into_raw()).unwrap_or(std::ptr::null_mut()),
         }
     }
 
