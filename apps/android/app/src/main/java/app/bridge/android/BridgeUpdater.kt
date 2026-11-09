@@ -59,8 +59,12 @@ object BridgeUpdater {
                 require(expectedHash.matches(Regex("[0-9a-f]{64}"))) { "Invalid APK checksum in release manifest." }
 
                 postStatus(onStatus, "Downloading Bridge \${android.optString("version_name")}…")
+                val assetName = android.optString("asset")
+                require(assetName == File(assetName).name && assetName.endsWith(".apk", ignoreCase = true)) {
+                    "APK filename in the release manifest is invalid."
+                }
                 val updateDir = File(activity.cacheDir, "updates").apply { mkdirs() }
-                val apk = File(updateDir, android.optString("asset").ifBlank { "Bridge-update.apk" })
+                val apk = File(updateDir, assetName)
                 download(downloadUrl, apk)
                 if (!sha256(apk).equals(expectedHash, ignoreCase = true)) {
                     apk.delete()
