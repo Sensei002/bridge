@@ -731,31 +731,52 @@ fn start_local_discovery(status: Sender<String>, peers: Sender<DiscoveredPeer>) 
             protocol_version: PROTOCOL_VERSION,
             public_key_fingerprint: fingerprint.clone(),
         };
-        let (discovery, events) = match LocalDiscovery::start(
-            &format!("Bridge-{suffix}"),
-            &format!("bridge-{suffix}.local."),
-            NETWORK_PORT,
-            &record,
-        ) {
-            Ok(value) => value,
-            Err(error) => {
-                let _ = status.send(format!("Local discovery unavailable: {error}"));
-                return;
-            }
-        };
-        let _keep_service_registered = discovery;
-        let _ = status.send("Bridge is advertising on the local network. Discovered peers remain unverified.".into());
-        while let Ok(event) = events.recv() {
-            if let Some(peer) = peer_from_event(&event) {
-                if peer.record.public_key_fingerprint.eq_ignore_ascii_case(&fingerprint) {
+
+        // Recreate the mDNS daemon periodically. Windows can change Wi-Fi
+        // interfaces/IP addresses while Bridge remains open; a daemon created
+        // before that transition may keep advertising on the old interface.
+        // Refreshing the daemon restores advertisement and browsing without
+        // touching trusted identities or authenticated-session state.
+        loop {
+            let (discovery, events) = match LocalDiscovery::start(
+                &format!("Bridge-{suffix}"),
+                &format!("bridge-{suffix}.local."),
+                NETWORK_PORT,
+                &record,
+            ) {
+                Ok(value) => value,
+                Err(error) => {
+                    let _ = status.send(format!("Local discovery restarting after error: {error}"));
+                    thread::sleep(Duration::from_secs(5));
                     continue;
                 }
-                let _ = status.send(format!(
-                    "Found unverified local peer: {} · {}",
-                    peer.record.display_name, peer.address,
-                ));
-                let _ = peers.send(peer);
+            };
+            let _ = status.send("Bridge is advertising on the local network. Discovered peers remain unverified.".into());
+            loop {
+                match events.recv_timeout(Duration::from_secs(15)) {
+                    Ok(event) => {
+                        if let Some(peer) = peer_from_event(&event) {
+                            if peer.record.public_key_fingerprint.eq_ignore_ascii_case(&fingerprint) {
+                                continue;
+                            }
+                            let _ = status.send(format!(
+                                "Found unverified local peer: {} · {}",
+                                peer.record.display_name, peer.address,
+                            ));
+                            let _ = peers.send(peer);
+                        }
+                    }
+                    Err(mdns_sd::Error::RecvTimeout(_)) => {
+                        // Periodic refresh is also the fallback for network
+                        // changes that do not produce a clean mDNS error.
+                        break;
+                    }
+                    Err(_) => break,
+                }
             }
+            drop(events);
+            let _ = discovery.shutdown();
+            thread::sleep(Duration::from_secs(2));
         }
     });
 }
