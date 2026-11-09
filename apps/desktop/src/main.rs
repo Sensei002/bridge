@@ -71,6 +71,79 @@ struct PendingApproval {
 }
 
 #[cfg(windows)]
+struct DesktopSession {
+    connection: Arc<std::sync::Mutex<NoiseConnection>>,
+    incoming: std::sync::Mutex<Receiver<Vec<u8>>>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    pub remote_fingerprint: String,
+}
+
+#[cfg(windows)]
+impl DesktopSession {
+    fn start(connection: NoiseConnection) -> Result<Arc<Self>, String> {
+        let reader_stream = connection.stream.try_clone().map_err(|error| error.to_string())?;
+        reader_stream.set_read_timeout(None).map_err(|error| error.to_string())?;
+        let remote_fingerprint = connection.remote_fingerprint.clone();
+        let connection = Arc::new(std::sync::Mutex::new(connection));
+        let reader_connection = Arc::clone(&connection);
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader_stop = Arc::clone(&stop);
+        let (sender, incoming) = mpsc::channel();
+        thread::Builder::new()
+            .name("bridge-desktop-session-reader".into())
+            .spawn(move || {
+                while !reader_stop.load(Ordering::Acquire) {
+                    let encrypted = match bridge_network::read_frame(&mut &reader_stream) {
+                        Ok(frame) => frame,
+                        Err(_) => break,
+                    };
+                    let plaintext = {
+                        let mut guard = match reader_connection.lock() {
+                            Ok(guard) => guard,
+                            Err(_) => break,
+                        };
+                        let mut plaintext = vec![0_u8; bridge_network::MAX_FRAME_BYTES];
+                        match guard.transport.read_message(&encrypted, &mut plaintext) {
+                            Ok(length) => { plaintext.truncate(length); plaintext },
+                            Err(_) => break,
+                        }
+                    };
+                    if sender.send(plaintext).is_err() { break; }
+                }
+            })
+            .map_err(|error| error.to_string())?;
+        Ok(Arc::new(Self { connection, incoming: std::sync::Mutex::new(incoming), stop, remote_fingerprint }))
+    }
+
+    #[allow(dead_code)]
+    fn send(&self, payload: &[u8]) -> Result<(), String> {
+        if payload.is_empty() || payload.len() > bridge_network::MAX_FRAME_BYTES - 16 {
+            return Err("session payload size is invalid".into());
+        }
+        let mut guard = self.connection.lock().map_err(|_| "session connection lock poisoned")?;
+        let mut encrypted = vec![0_u8; bridge_network::MAX_FRAME_BYTES];
+        let length = guard.transport.write_message(payload, &mut encrypted).map_err(|error| error.to_string())?;
+        bridge_network::write_frame(&mut guard.stream, &encrypted[..length]).map_err(|error| error.to_string())
+    }
+
+    #[allow(dead_code)]
+    fn receive_timeout(&self, timeout: Duration) -> Result<Vec<u8>, String> {
+        self.incoming.lock().map_err(|_| "session receiver lock poisoned")?
+            .recv_timeout(timeout).map_err(|error| error.to_string())
+    }
+}
+
+#[cfg(windows)]
+impl Drop for DesktopSession {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Ok(connection) = self.connection.lock() {
+            let _ = connection.stream.shutdown(std::net::Shutdown::Both);
+        }
+    }
+}
+
+#[cfg(windows)]
 struct ConnectionPermit(Arc<AtomicUsize>);
 
 #[cfg(windows)]
@@ -99,7 +172,7 @@ struct BridgeApp {
     #[cfg(windows)]
     pending_pairings: Vec<PendingApproval>,
     #[cfg(windows)]
-    active_sessions: Vec<NoiseConnection>,
+    active_sessions: Vec<Arc<DesktopSession>>,
     #[cfg(windows)]
     trust_store: TrustStore,
     #[cfg(windows)]
@@ -527,7 +600,10 @@ impl eframe::App for BridgeApp {
                         }
                     }
                     self.network_status = format!("Secure session established with {}.", pairing.descriptor.display_name);
-                    self.active_sessions.push(pairing.connection);
+                    match DesktopSession::start(pairing.connection) {
+                        Ok(session) => self.active_sessions.push(session),
+                        Err(error) => self.network_status = format!("Could not start secure session dispatcher: {error}"),
+                    }
                 } else {
                     self.pending_pairings.push(pairing);
                 }
@@ -972,7 +1048,10 @@ impl eframe::App for BridgeApp {
                             let _ = self.trust_store.revoke_and_save(&pending.descriptor.id, trust_store_path());
                             self.network_status = format!("Could not confirm pairing: {error}");
                         } else {
-                            self.active_sessions.push(pending.connection);
+                            match DesktopSession::start(pending.connection) {
+                                Ok(session) => self.active_sessions.push(session),
+                                Err(error) => self.network_status = format!("Could not start secure session dispatcher: {error}"),
+                            }
                             self.network_status = format!("{} is now connected and trusted.", pending.descriptor.display_name);
                         }
                     }
