@@ -1,81 +1,177 @@
-name: Development Release
+name: Bridge Channel Releases
 
 on:
   push:
-    branches: [development]
+    branches: [development, stable]
   pull_request:
-    branches: [development]
   workflow_dispatch:
 
 permissions:
   contents: write
 
 concurrency:
-  group: development-release
+  group: bridge-channel-release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   windows-msi:
-    name: Build Windows MSI installer
+    name: Build Windows MSI
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-
       - name: Build native Windows desktop app
+        env:
+          BRIDGE_BUILD_VERSION: 0.2.${{ github.run_number }}
         run: cargo build --release --manifest-path apps/desktop/Cargo.toml
-
       - name: Install WiX Toolset
         shell: pwsh
         run: dotnet tool install --global wix --version 6.0.2
-
       - name: Package per-user MSI
         shell: pwsh
         run: |
           $workspace = Get-Content Cargo.toml -Raw
           if ($workspace -notmatch '(?m)^version = "([0-9]+\.[0-9]+)\.[0-9]+"') {
-            throw "Could not read the workspace version from Cargo.toml"
+            throw "Could not read workspace version from Cargo.toml"
           }
-          $minorVersion = $Matches[1]
-          $productVersion = "$minorVersion.${{ github.run_number }}"
-          $env:PRODUCT_VERSION = $productVersion
-          wix build installer/windows/Package.wxs -d ProductVersion=$productVersion -d PublishDir="$PWD\target\release" -o "Bridge-$productVersion-x64.msi"
-          "PRODUCT_VERSION=$productVersion" >> $env:GITHUB_ENV
-          "MSI_NAME=Bridge-$productVersion-x64.msi" >> $env:GITHUB_ENV
-
-      - name: Generate update manifest
-        shell: pwsh
-        run: |
-          $hash = (Get-FileHash "$env:MSI_NAME" -Algorithm SHA256).Hash.ToLowerInvariant()
-          $tag = "dev-${{ github.run_number }}"
-          $manifest = @{
-            channel = "development"
-            platform = "windows-x64"
-            version = "$env:PRODUCT_VERSION"
-            asset = "$env:MSI_NAME"
-            sha256 = $hash
-            download_url = "https://github.com/Sensei002/bridge/releases/download/$tag/$env:MSI_NAME"
-            commit = "${{ github.sha }}"
-          } | ConvertTo-Json -Depth 4
-          Set-Content -Path "bridge-update-windows.json" -Value $manifest -Encoding utf8
-
+          $version = "$($Matches[1]).${{ github.run_number }}"
+          wix build installer/windows/Package.wxs -d ProductVersion=$version -d PublishDir="$PWD\target\release" -o "Bridge-$version-x64.msi"
       - uses: actions/upload-artifact@v4
         with:
-          name: bridge-windows-msi-development
-          path: |
-            Bridge-*.msi
-            bridge-update-windows.json
+          name: bridge-windows-msi
+          path: Bridge-*.msi
           if-no-files-found: error
 
-      - name: Publish development release
-        if: github.event_name == 'push' && github.ref == 'refs/heads/development'
+  android-apk:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    outputs:
+      release_signed: ${{ steps.build.outputs.release_signed }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+      - name: Install Android SDK and NDK
+        run: sdkmanager "platforms;android-36" "ndk;27.2.12479018"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build shared Rust mobile library
+        run: |
+          rustup target add aarch64-linux-android armv7-linux-androideabi
+          cargo install cargo-ndk --locked
+          cargo ndk -t arm64-v8a -t armeabi-v7a -o apps/android/app/src/main/jniLibs build --release -p bridge-mobile
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.6.0"
+      - name: Build signed release APK when signing secrets exist
+        id: build
+        working-directory: apps/android
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: |
+          VERSION_NAME="0.2.$BUILD_NUMBER"
+          if [ -n "$ANDROID_KEYSTORE_BASE64" ] && [ -n "$ANDROID_KEYSTORE_PASSWORD" ] && [ -n "$ANDROID_KEY_ALIAS" ] && [ -n "$ANDROID_KEY_PASSWORD" ]; then
+            printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/bridge-release.jks"
+            export BRIDGE_KEYSTORE_PATH="$RUNNER_TEMP/bridge-release.jks"
+            export BRIDGE_KEYSTORE_PASSWORD="$ANDROID_KEYSTORE_PASSWORD"
+            export BRIDGE_KEY_ALIAS="$ANDROID_KEY_ALIAS"
+            export BRIDGE_KEY_PASSWORD="$ANDROID_KEY_PASSWORD"
+            gradle :app:assembleRelease -PbridgeVersionCode="$BUILD_NUMBER" -PbridgeVersionName="$VERSION_NAME"
+            cp app/build/outputs/apk/release/app-release.apk "$GITHUB_WORKSPACE/Bridge-android.apk"
+            echo "release_signed=true" >> "$GITHUB_OUTPUT"
+          else
+            gradle :app:assembleDebug -PbridgeVersionCode="$BUILD_NUMBER" -PbridgeVersionName="$VERSION_NAME"
+            cp app/build/outputs/apk/debug/app-debug.apk "$GITHUB_WORKSPACE/Bridge-android-debug.apk"
+            echo "release_signed=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Android release signing secrets are missing. A debug APK will be built for CI, but no Android update asset will be published."
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bridge-android-apk
+          path: |
+            Bridge-android.apk
+            Bridge-android-debug.apk
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish channel release and update manifest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/development' || github.ref == 'refs/heads/stable')
+    needs: [windows-msi, android-apk]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: bridge-windows-msi
+      - uses: actions/download-artifact@v4
+        with:
+          name: bridge-android-apk
+      - name: Build update manifest
+        env:
+          CHANNEL: ${{ github.ref == 'refs/heads/stable' && 'stable' || 'development' }}
+          BUILD_NUMBER: ${{ github.run_number }}
+          COMMIT_SHA: ${{ github.sha }}
+          ANDROID_SIGNED: ${{ needs.android-apk.outputs.release_signed }}
+        run: |
+          python - <<'PY'
+          import hashlib, json, os, pathlib
+          channel = os.environ["CHANNEL"]
+          build = os.environ["BUILD_NUMBER"]
+          version = f"0.2.{build}"
+          tag = ("stable-" if channel == "stable" else "dev-") + build
+          root = pathlib.Path(".")
+          msi = next(root.glob("Bridge-*.msi"))
+          def sha(path):
+              h = hashlib.sha256()
+              with path.open("rb") as stream:
+                  for block in iter(lambda: stream.read(1024 * 1024), b""):
+                      h.update(block)
+              return h.hexdigest()
+          base = f"https://github.com/Sensei002/bridge/releases/download/{tag}/"
+          manifest = {
+              "schema_version": 1,
+              "channel": channel,
+              "version": version,
+              "commit": os.environ["COMMIT_SHA"],
+              "windows": {
+                  "version": version,
+                  "asset": msi.name,
+                  "sha256": sha(msi),
+                  "download_url": base + msi.name
+              }
+          }
+          apk = root / "Bridge-android.apk"
+          if os.environ.get("ANDROID_SIGNED", "").lower() == "true" and apk.exists():
+              manifest["android"] = {
+                  "application_id": "app.bridge.android",
+                  "version_name": version,
+                  "version_code": int(build),
+                  "asset": apk.name,
+                  "sha256": sha(apk),
+                  "download_url": base + apk.name
+              }
+          (root / "bridge-update.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+          if not apk.exists():
+              debug_apk = root / "Bridge-android-debug.apk"
+              if debug_apk.exists():
+                  debug_apk.unlink()
+          PY
+      - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: dev-${{ github.run_number }}
-          name: Bridge Development Build ${{ github.run_number }}
-          prerelease: true
+          tag_name: ${{ github.ref == 'refs/heads/stable' && format('stable-{0}', github.run_number) || format('dev-{0}', github.run_number) }}
+          name: ${{ github.ref == 'refs/heads/stable' && format('Bridge Stable {0}', github.run_number) || format('Bridge Development {0}', github.run_number) }}
+          prerelease: ${{ github.ref == 'refs/heads/development' }}
           generate_release_notes: true
           files: |
             Bridge-*.msi
-            bridge-update-windows.json
+            Bridge-android.apk
+            bridge-update.json

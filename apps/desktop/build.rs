@@ -1,6 +1,10 @@
 use std::{env, fs::File, path::PathBuf};
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=BRIDGE_BUILD_VERSION");
+    let build_version = env::var("BRIDGE_BUILD_VERSION")
+        .unwrap_or_else(|_| env::var("CARGO_PKG_VERSION").expect("CARGO_PKG_VERSION missing"));
+    println!("cargo:rustc-env=BRIDGE_BUILD_VERSION={build_version}");
     println!("cargo:rerun-if-changed=../../assets/bridge-app-icon.png");
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;

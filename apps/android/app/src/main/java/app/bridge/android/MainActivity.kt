@@ -39,6 +39,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.*
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -82,6 +83,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var sendFileLauncher: ActivityResultLauncher<Array<String>>
     private var pendingSendHandle: Long? = null
     private var transferStatus by mutableStateOf("Waiting for a connected trusted device.")
+    private var updateStatus by mutableStateOf("Not checked yet.")
     @Volatile private var transferReceiver: BridgeTransferReceiver? = null
     private var pairingStatus by mutableStateOf("Preparing secure device identity…")
     private var wifiCallbackRegistered = false
@@ -165,6 +167,10 @@ class MainActivity : ComponentActivity() {
                 incomingOffers = incomingOffers,
                 transferStatus = transferStatus,
                 receivedFiles = receivedFiles,
+                updateStatus = updateStatus,
+                onCheckUpdates = { channel ->
+                    BridgeUpdater.checkAndInstall(this, channel) { message -> updateStatus = message }
+                },
                 onExportFile = { file -> pendingExportFile = file; exportFileLauncher.launch(file.name) },
                 onPickFile = { handle -> pendingSendHandle = handle; sendFileLauncher.launch(arrayOf("*/*")) },
                 onCancelTransfer = { transferReceiver?.cancelAll() },
@@ -405,8 +411,15 @@ private fun BridgeApp(
     onPair: (BridgePeer) -> Unit,
     onApprove: (BridgePendingPairing) -> Unit,
     onReject: (BridgePendingPairing) -> Unit,
-    onRevoke: (String) -> Unit
+    onRevoke: (String) -> Unit,
+    updateStatus: String,
+    onCheckUpdates: (String) -> Unit
 ) {
+    val context = LocalContext.current
+    val updatePreferences = remember { context.getSharedPreferences("bridge_settings", android.content.Context.MODE_PRIVATE) }
+    var updateChannel by remember {
+        mutableStateOf(updatePreferences.getString("update_channel", "development") ?: "development")
+    }
     var selected by remember { mutableStateOf(BridgeTab.Home) }
     var showPairDialog by remember { mutableStateOf(false) }
     var clipboardSync by remember { mutableStateOf(true) }
@@ -461,7 +474,14 @@ private fun BridgeApp(
                             notifications = notifications,
                             onNotificationsChange = { notifications = it },
                             autoAccept = autoAccept,
-                            onAutoAcceptChange = { autoAccept = it }
+                            onAutoAcceptChange = { autoAccept = it },
+                            updateChannel = updateChannel,
+                            onUpdateChannelChange = {
+                                updateChannel = it
+                                updatePreferences.edit().putString("update_channel", it).apply()
+                            },
+                            updateStatus = updateStatus,
+                            onCheckUpdates = { onCheckUpdates(updateChannel) }
                         )
                     }
                 }
@@ -949,14 +969,18 @@ private fun SettingsScreen(
     notifications: Boolean,
     onNotificationsChange: (Boolean) -> Unit,
     autoAccept: Boolean,
-    onAutoAcceptChange: (Boolean) -> Unit
+    onAutoAcceptChange: (Boolean) -> Unit,
+    updateChannel: String,
+    onUpdateChannelChange: (String) -> Unit,
+    updateStatus: String,
+    onCheckUpdates: () -> Unit
 ) {
     ScreenContent {
         ScreenHeading("MAKE IT YOURS", "Settings", "Privacy and preferences for your Bridge workspace.")
         Panel {
             Eyebrow("THIS DEVICE")
             Text("Android device", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-            Text("Bridge mobile · Version 0.3 preview", color = Muted, fontSize = 11.sp)
+            Text("Bridge mobile · Version ${BuildConfig.VERSION_NAME}", color = Muted, fontSize = 11.sp)
             StatusTag("NOT PAIRED")
         }
         Panel {
@@ -964,6 +988,28 @@ private fun SettingsScreen(
             PreferenceSwitch("Notifications", "Show Bridge activity notifications.", notifications, onNotificationsChange)
             DividerLine()
             PreferenceSwitch("Auto-accept trusted devices", "Skip confirmation for trusted requests.", autoAccept, onAutoAcceptChange)
+        }
+        Panel {
+            Eyebrow("SOFTWARE UPDATES")
+            Text("Update channel", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf("development" to "Development", "stable" to "Stable").forEach { (value, label) ->
+                    Button(
+                        onClick = { onUpdateChannelChange(value) },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (updateChannel == value) Accent else PanelAlt,
+                            contentColor = if (updateChannel == value) Ink else Color.White
+                        )
+                    ) { Text(label, fontSize = 11.sp, fontWeight = FontWeight.Bold) }
+                }
+            }
+            Text(
+                if (updateChannel == "stable") "Stable releases will appear here when the Stable channel launches."
+                else "Development builds contain the newest features and may be less stable.",
+                color = Muted, fontSize = 10.sp, lineHeight = 15.sp
+            )
+            Text(updateStatus, color = Amber, fontSize = 11.sp, lineHeight = 16.sp)
+            PrimaryAction("Check for updates", onCheckUpdates, Modifier.fillMaxWidth())
         }
         Panel {
             Eyebrow("PRIVACY & SECURITY")
