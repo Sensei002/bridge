@@ -74,7 +74,10 @@ internal class BridgePairingController(
         postStatus("Authenticated Noise XX pairing listener is ready.")
     }
 
+    private val connectingDevices = ConcurrentHashMap.newKeySet<String>()
+
     fun pair(peer: BridgePeer, expectedFingerprint: String? = null) {
+        if (!connectingDevices.add(peer.deviceId)) return
         Thread({
             try {
                 val trusted = trustedDevices().firstOrNull { it.deviceId == peer.deviceId }
@@ -84,9 +87,20 @@ internal class BridgePairingController(
                 )
                 handleResult(response)
             } catch (error: Exception) {
-                postStatus("Secure pairing failed: ${error.message}")
+                postStatus("Secure connection attempt failed: ${error.message}")
+            } finally {
+                connectingDevices.remove(peer.deviceId)
             }
         }, "BridgeNoiseConnect").apply { isDaemon = true; start() }
+    }
+
+    /** Drop transport sessions after Wi-Fi loss without deleting trusted identities. */
+    fun onNetworkLost() {
+        activeSessions.values.forEach(BridgeNative::sessionClose)
+        activeSessions.clear()
+        pendingSessions.keys.toList().forEach(BridgeNative::sessionClose)
+        pendingSessions.clear()
+        postStatus("Wi-Fi disconnected. Trusted devices will reconnect automatically when the network returns.")
     }
 
     fun approve(pending: BridgePendingPairing): Boolean {
