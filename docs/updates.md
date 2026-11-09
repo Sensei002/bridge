@@ -84,3 +84,17 @@ Do not rotate or lose this key: Android will reject future APKs signed with a di
 - SHA-256 detects corrupted or substituted downloads relative to the retrieved release manifest.
 - Android's installer enforces package signing identity; the permanent keystore must be protected.
 - Windows MSI Authenticode signing is not configured yet. Windows may show an unknown-publisher warning until a trusted code-signing certificate is added.
+
+## Repeating the updater acceptance test
+
+For each new Development release:
+
+1. Install the currently published Development build on both devices.
+2. Publish a newer commit to `development` and wait for the **Bridge Channel Releases** workflow to complete successfully.
+3. Confirm the new GitHub prerelease contains the Windows MSI, signed Android APK, and `bridge-update.json`.
+4. On both clients, open **Settings → Software updates** and check for updates.
+5. Confirm each client offers the newer version and verifies/downloads the matching platform package.
+6. Complete installation, reopen Bridge, and check again. The expected result is **No update found**.
+7. Verify the app version shown by each client matches the newly published release.
+
+Android requires confirmation in the system package installer. Windows currently exits for MSI installation; reopening from the Start menu may be necessary after setup finishes.
