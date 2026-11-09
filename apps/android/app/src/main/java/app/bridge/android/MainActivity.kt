@@ -339,6 +339,42 @@ private fun BridgeApp(
         )
     }
 
+    val incomingOffer = incomingOffers.firstOrNull()
+    if (incomingOffer != null) {
+        val senderName = trustedDevices.firstOrNull { it.deviceId == incomingOffer.deviceId }?.name
+            ?: "Trusted device " + incomingOffer.deviceId.take(8)
+        AlertDialog(
+            onDismissRequest = {},
+            containerColor = PanelAlt,
+            title = { Text("Incoming file", color = Color.White, fontWeight = FontWeight.Bold) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("$senderName wants to send you a file.", color = Color.White, fontSize = 13.sp)
+                    Text(incomingOffer.fileName, color = Accent, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                    Text(
+                        if (incomingOffer.fileSize == 0L) "Empty file"
+                        else "%.2f MB".format(incomingOffer.fileSize / 1048576.0),
+                        color = Muted,
+                        fontSize = 12.sp
+                    )
+                    Text("The file is encrypted in transit and its SHA-256 checksum is verified before saving.", color = Muted, fontSize = 11.sp, lineHeight = 16.sp)
+                    Text("Accept only if you trust the sender and expected this file.", color = Amber, fontSize = 11.sp)
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = { onAcceptTransfer(incomingOffer) },
+                    colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Ink)
+                ) { Text("Accept file", fontWeight = FontWeight.Bold) }
+            },
+            dismissButton = {
+                Button(
+                    onClick = { onRejectTransfer(incomingOffer) },
+                    colors = ButtonDefaults.buttonColors(containerColor = Panel, contentColor = Amber)
+                ) { Text("Decline") }
+            }
+        )
+    }
     if (showPairDialog) {
         AlertDialog(
             onDismissRequest = { showPairDialog = false },
