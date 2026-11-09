@@ -34,7 +34,8 @@ internal data class BridgeIncomingOffer(
 internal class BridgeTransferReceiver(
     context: Context,
     private val onOffer: (BridgeIncomingOffer) -> Unit,
-    private val onStatus: (String) -> Unit
+    private val onStatus: (String) -> Unit,
+    private val onSessionEnded: (String, Long) -> Unit
 ) {
     private val appContext = context.applicationContext
     private val main = Handler(Looper.getMainLooper())
@@ -76,6 +77,10 @@ internal class BridgeTransferReceiver(
                 }
             } catch (error: Exception) {
                 if (!Thread.currentThread().isInterrupted) postStatus("Transfer connection ended: ${error.message}")
+            } finally {
+                queues.remove(handle, queue)
+                readers.remove(handle, Thread.currentThread())
+                onSessionEnded(deviceId, handle)
             }
         }, "BridgeTransferReader-$handle").apply { isDaemon = true; start() }
         readers[handle] = thread
