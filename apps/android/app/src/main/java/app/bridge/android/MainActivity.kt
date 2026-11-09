@@ -69,73 +69,34 @@ private enum class BridgeTab(val label: String, val symbol: String) {
 }
 
 class MainActivity : ComponentActivity() {
-    @Volatile private var destroyed = false
-    @Volatile private var discovery: BridgeDiscovery? = null
-    @Volatile private var pairingController: BridgePairingController? = null
-    private val discoveredPeers = mutableStateListOf<BridgePeer>()
-    private val pendingPairings = mutableStateListOf<BridgePendingPairing>()
-    private val trustedDevices = mutableStateListOf<BridgeTrustedDevice>()
-    private val connectedSessionHandles = mutableStateMapOf<String, Long>()
-    private val incomingOffers = mutableStateListOf<BridgeIncomingOffer>()
-    private val receivedFiles = mutableStateListOf<File>()
+    private val discoveredPeers get() = BridgeRuntimeState.discoveredPeers
+    private val pendingPairings get() = BridgeRuntimeState.pendingPairings
+    private val trustedDevices get() = BridgeRuntimeState.trustedDevices
+    private val connectedSessionHandles get() = BridgeRuntimeState.connectedSessionHandles
+    private val incomingOffers get() = BridgeRuntimeState.incomingOffers
+    private val receivedFiles get() = BridgeRuntimeState.receivedFiles
+    private val pairingStatus get() = BridgeRuntimeState.pairingStatus.value
+    private val transferStatus get() = BridgeRuntimeState.transferStatus.value
+
     private var pendingExportFile: File? = null
     private lateinit var exportFileLauncher: ActivityResultLauncher<String>
     private lateinit var sendFileLauncher: ActivityResultLauncher<Array<String>>
     private var pendingSendHandle: Long? = null
-    private var transferStatus by mutableStateOf("Waiting for a connected trusted device.")
     private var updateStatus by mutableStateOf("Not checked yet.")
-    @Volatile private var transferReceiver: BridgeTransferReceiver? = null
-    private var pairingStatus by mutableStateOf("Preparing secure device identity…")
-    private var wifiCallbackRegistered = false
-    private val wifiNetworkCallback = object : ConnectivityManager.NetworkCallback() {
-        override fun onAvailable(network: Network) {
-            runOnUiThread {
-                if (destroyed) return@runOnUiThread
-                pairingStatus = "Wi-Fi connected. Looking for trusted Bridge devices…"
-                discovery?.restart()
-            }
-        }
-
-        override fun onLost(network: Network) {
-            runOnUiThread {
-                if (destroyed) return@runOnUiThread
-                pairingController?.onNetworkLost()
-                transferReceiver?.cancelAll()
-                transferReceiver?.stop()
-                connectedSessionHandles.clear()
-                pairingStatus = "Wi-Fi disconnected. Waiting to reconnect…"
-            }
-        }
-    }
-
-    private fun registerWifiNetworkCallback() {
-        if (wifiCallbackRegistered) return
-        val manager = getSystemService(ConnectivityManager::class.java) ?: return
-        try {
-            manager.registerNetworkCallback(
-                NetworkRequest.Builder().addTransportType(NetworkCapabilities.TRANSPORT_WIFI).build(),
-                wifiNetworkCallback
-            )
-            wifiCallbackRegistered = true
-        } catch (error: Exception) {
-            pairingStatus = "Automatic Wi-Fi recovery unavailable: ${error.message}"
-        }
-    }
-
-    private fun unregisterWifiNetworkCallback() {
-        if (!wifiCallbackRegistered) return
-        try {
-            getSystemService(ConnectivityManager::class.java)?.unregisterNetworkCallback(wifiNetworkCallback)
-        } catch (_: Exception) { }
-        wifiCallbackRegistered = false
-    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // The foreground service owns discovery, trusted sessions and transfers.
+        // Starting it while the Activity is visible is allowed on modern Android.
+        startForegroundService(android.content.Intent(this, BridgeConnectionService::class.java))
+
         sendFileLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
             val handle = pendingSendHandle
             pendingSendHandle = null
-            if (uri != null && handle != null) transferReceiver?.sendFile(uri, handle)
+            if (uri != null && handle != null) {
+                BridgeConnectionService.instance?.sendFile(uri, handle)
+            }
         }
         exportFileLauncher = registerForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri: Uri? ->
             val source = pendingExportFile
@@ -146,17 +107,14 @@ class MainActivity : ComponentActivity() {
                         contentResolver.openOutputStream(uri)?.use { output ->
                             source.inputStream().use { input -> input.copyTo(output) }
                         } ?: error("Could not open the selected destination.")
-                        runOnUiThread { transferStatus = "Exported ${source.name} successfully." }
+                        runOnUiThread { BridgeRuntimeState.transferStatus.value = "Exported ${source.name} successfully." }
                     } catch (error: Exception) {
-                        runOnUiThread { transferStatus = "Could not export ${source.name}: ${error.message}" }
+                        runOnUiThread { BridgeRuntimeState.transferStatus.value = "Could not export ${source.name}: ${error.message}" }
                     }
                 }, "BridgeFileExport").apply { isDaemon = true; start() }
             }
         }
-        refreshReceivedFiles()
 
-        // Show the native UI immediately; Keystore and JNI initialization may
-        // take time on first launch and must not block Android's main thread.
         setContent {
             BridgeApp(
                 discoveredPeers = discoveredPeers,
@@ -173,168 +131,42 @@ class MainActivity : ComponentActivity() {
                 },
                 onExportFile = { file -> pendingExportFile = file; exportFileLauncher.launch(file.name) },
                 onPickFile = { handle -> pendingSendHandle = handle; sendFileLauncher.launch(arrayOf("*/*")) },
-                onCancelTransfer = { transferReceiver?.cancelAll() },
-                onAcceptTransfer = { offer -> transferReceiver?.accept(offer); incomingOffers.remove(offer) },
-                onRejectTransfer = { offer -> transferReceiver?.reject(offer); incomingOffers.remove(offer) },
-                onPair = { peer -> pairingController?.pair(peer) },
+                onCancelTransfer = { BridgeConnectionService.instance?.cancelTransfers() },
+                onAcceptTransfer = { offer ->
+                    BridgeConnectionService.instance?.acceptTransfer(offer)
+                    incomingOffers.remove(offer)
+                },
+                onRejectTransfer = { offer ->
+                    BridgeConnectionService.instance?.rejectTransfer(offer)
+                    incomingOffers.remove(offer)
+                },
+                onPair = { peer -> BridgeConnectionService.instance?.pair(peer) },
                 onApprove = { pending ->
-                    pairingController?.approve(pending)
+                    BridgeConnectionService.instance?.approve(pending)
                     pendingPairings.remove(pending)
                     trustedDevices.clear()
-                    trustedDevices.addAll(pairingController?.trustedDevices().orEmpty())
+                    trustedDevices.addAll(BridgeConnectionService.instance?.trustedDevices().orEmpty())
                 },
                 onReject = { pending ->
-                    pairingController?.reject(pending)
+                    BridgeConnectionService.instance?.reject(pending)
                     pendingPairings.remove(pending)
                 },
                 onRevoke = { deviceId ->
-                    pairingController?.revoke(deviceId)
+                    BridgeConnectionService.instance?.revoke(deviceId)
                     trustedDevices.clear()
-                    trustedDevices.addAll(pairingController?.trustedDevices().orEmpty())
+                    trustedDevices.addAll(BridgeConnectionService.instance?.trustedDevices().orEmpty())
                 }
             )
         }
-
-        Thread({
-            try {
-                val privateKey = BridgeIdentityStore.loadOrCreate(this)
-                val keyHex = privateKey.joinToString("") { "%02x".format(it.toInt() and 0xff) }
-                val fingerprintResult = org.json.JSONObject(BridgeNative.identityFingerprint(keyHex))
-                check(fingerprintResult.optBoolean("ok")) { fingerprintResult.optString("error") }
-                val fingerprint = fingerprintResult.getString("fingerprint")
-                val identityPreferences = getSharedPreferences("bridge_secure_identity", MODE_PRIVATE)
-                val deviceId = identityPreferences.getString("device_id", null) ?: java.util.UUID.randomUUID().toString().also {
-                    check(identityPreferences.edit().putString("device_id", it).commit())
-                }
-
-                val receiver = BridgeTransferReceiver(
-                    this,
-                    onOffer = { offer -> incomingOffers.add(offer) },
-                    onStatus = { message ->
-                        transferStatus = message
-                        if (message.startsWith("Received ")) refreshReceivedFiles()
-                    },
-                    onSessionEnded = { peerId, handle ->
-                        runOnUiThread {
-                            pairingController?.onSessionEnded(peerId, handle)
-                            if (connectedSessionHandles[peerId] == handle) {
-                                connectedSessionHandles.remove(peerId)
-                            }
-                            // Retry the trusted peer after the stale handle is removed.
-                            // Fingerprint verification remains enforced by pair().
-                            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                                if (!destroyed && !connectedSessionHandles.containsKey(peerId)) {
-                                    val peer = discoveredPeers.firstOrNull { it.deviceId == peerId }
-                                    if (peer != null) {
-                                        val trusted = pairingController?.trustedDevices()
-                                            ?.firstOrNull { it.deviceId == peerId }
-                                        if (trusted != null && trusted.fingerprint.equals(peer.fingerprint, ignoreCase = true)) {
-                                            pairingController?.pair(peer, trusted.fingerprint)
-                                        }
-                                    }
-                                }
-                            }, 2000)
-                        }
-                    }
-                )
-                transferReceiver = receiver
-                val controller = BridgePairingController(
-                    this, privateKey, fingerprint, deviceId,
-                    onPending = { pendingPairings.add(it) },
-                    onStatus = { message ->
-                        pairingStatus = message
-                        if (message.endsWith("Device connected.")) {
-                            trustedDevices.clear()
-                            trustedDevices.addAll(pairingController?.trustedDevices().orEmpty())
-                        }
-                    }
-                )
-                val restoredDevices = controller.trustedDevices()
-                if (destroyed) {
-                    controller.stop()
-                    return@Thread
-                }
-                pairingController = controller
-                controller.onSessionReady = { peerId, handle ->
-                    runOnUiThread {
-                        if (!destroyed) {
-                            connectedSessionHandles[peerId] = handle
-                            receiver.attach(peerId, handle)
-                        } else {
-                            BridgeNative.sessionClose(handle)
-                        }
-                    }
-                }
-                controller.start()
-
-                val networkDiscovery = BridgeDiscovery(this, { peer ->
-                    if (peer.deviceId != deviceId) {
-                        val existing = discoveredPeers.indexOfFirst { it.deviceId == peer.deviceId }
-                        if (existing >= 0) discoveredPeers[existing] = peer else discoveredPeers.add(peer)
-                        // Discovery is also the automatic reconnect trigger. Only
-                        // reconnect devices whose saved fingerprint still matches.
-                        val trustedPeer = try {
-                            controller.trustedDevices().firstOrNull { it.deviceId == peer.deviceId }
-                        } catch (_: Exception) { null }
-                        if (trustedPeer != null &&
-                            trustedPeer.fingerprint.equals(peer.fingerprint, ignoreCase = true) &&
-                            !connectedSessionHandles.containsKey(peer.deviceId)) {
-                            controller.pair(peer, trustedPeer.fingerprint)
-                        }
-                    }
-                }, { serviceName ->
-                    discoveredPeers.removeAll { it.serviceName == serviceName }
-                }, { message -> pairingStatus = message })
-                if (destroyed) {
-                    controller.stop()
-                    return@Thread
-                }
-                discovery = networkDiscovery
-                networkDiscovery.start(deviceId, android.os.Build.MODEL ?: "Bridge Android", fingerprint)
-                registerWifiNetworkCallback()
-
-                runOnUiThread {
-                    if (!destroyed) {
-                        trustedDevices.addAll(restoredDevices)
-                        pairingStatus = "Identity protected by Android Keystore · Noise XX ready."
-                    }
-                }
-            } catch (error: Throwable) {
-                runOnUiThread {
-                    if (!destroyed) {
-                        val detail = error.message?.takeIf { it.isNotBlank() } ?: error.javaClass.simpleName
-                        pairingStatus = "Startup failed (${error.javaClass.simpleName}): $detail"
-                    }
-                }
-            }
-        }, "BridgeStartup").apply { isDaemon = true; start() }
     }
 
     override fun onResume() {
         super.onResume()
-        refreshReceivedFiles()
+        BridgeConnectionService.instance?.refreshReceivedFiles()
     }
 
-    private fun refreshReceivedFiles() {
-        val directory = File(filesDir, "Bridge/Received")
-        val files = directory.listFiles()?.filter { it.isFile && !it.name.startsWith(".bridge-") }
-            ?.sortedByDescending { it.lastModified() }.orEmpty()
-        runOnUiThread {
-            receivedFiles.clear()
-            receivedFiles.addAll(files)
-        }
-    }
-
-    override fun onDestroy() {
-        destroyed = true
-        unregisterWifiNetworkCallback()
-        pairingController?.stop()
-        transferReceiver?.stop()
-        transferReceiver = null
-        discovery?.stop()
-        discovery = null
-        super.onDestroy()
-    }
+    // Deliberately do not stop networking here. Android may destroy this Activity
+    // when the user dismisses its task; the foreground service remains active.
 }
 
 private const val BRIDGE_PORT = 45821
