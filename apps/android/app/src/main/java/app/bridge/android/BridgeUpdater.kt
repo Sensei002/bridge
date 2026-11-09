@@ -3,6 +3,8 @@ package app.bridge.android
 import android.app.Activity
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
+import android.provider.Settings
 import android.os.Handler
 import android.os.Looper
 import androidx.core.content.FileProvider
@@ -48,6 +50,9 @@ object BridgeUpdater {
                 require(manifest.optString("channel") == selectedChannel) { "Release channel mismatch." }
                 val android = manifest.optJSONObject("android")
                     ?: throw IllegalStateException("This release does not include an Android APK.")
+                require(android.optString("application_id") == activity.packageName) {
+                    "The release APK belongs to a different Bridge application identity."
+                }
                 val versionCode = android.optInt("version_code", 0)
                 if (versionCode <= BuildConfig.VERSION_CODE) {
                     postStatus(onStatus, "Bridge is up to date (\${BuildConfig.VERSION_NAME}).")
@@ -72,6 +77,17 @@ object BridgeUpdater {
                 }
                 mainHandler.post {
                     try {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+                            !activity.packageManager.canRequestPackageInstalls()
+                        ) {
+                            val settingsIntent = Intent(
+                                Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                                Uri.parse("package:${activity.packageName}")
+                            )
+                            activity.startActivity(settingsIntent)
+                            onStatus("Allow Bridge to install apps from this source, then return and check for updates again.")
+                            return@post
+                        }
                         val uri: Uri = FileProvider.getUriForFile(activity, "\${activity.packageName}.fileprovider", apk)
                         val intent = Intent(Intent.ACTION_VIEW).apply {
                             setDataAndType(uri, "application/vnd.android.package-archive")
