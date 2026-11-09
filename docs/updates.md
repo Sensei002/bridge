@@ -31,17 +31,17 @@ The channel release workflow builds a Windows x64 MSI and, when Android release 
 }
 ```
 
-The Android object is omitted until a persistently signed APK is available. Clients retrieve release metadata from the GitHub Releases API over HTTPS, require official Bridge release asset URLs, and verify the downloaded package against the manifest SHA-256 before handing it to the platform installer. Android's package installer additionally enforces the APK signing-certificate continuity.
+The Android object is omitted until a persistently signed APK is available. The Android package identity is `app.bridge.android`; this must remain unchanged for in-place updates. Clients retrieve release metadata from the GitHub Releases API over HTTPS, require official Bridge release asset URLs, and verify the downloaded package against the manifest SHA-256 before handing it to the platform installer. Android's package installer additionally enforces the APK signing-certificate continuity.
 
 ## Android release signing (required for in-place updates)
 
 A permanent signing identity is required. GitHub-hosted debug signing keys are not stable across builds and cannot update one another. Create a release keystore locally and keep a secure offline backup. Never commit the keystore or passwords to the repository.
 
-Example keystore creation:
+Example keystore creation (RSA 2048-bit, matching the currently configured release key):
 
 ```bash
-keytool -genkeypair -v -keystore bridge-release.jks -alias bridge \
-  -keyalg RSA -keysize 3072 -validity 10000
+keytool -genkeypair -v -keystore bridge-release.jks -alias bridge \\
+  -keyalg RSA -keysize 2048 -validity 10000
 ```
 
 Add these repository Actions secrets under **Settings → Secrets and variables → Actions**:
@@ -59,7 +59,7 @@ On Linux, encode the keystore with `base64 -w 0 bridge-release.jks`. On PowerShe
 
 Do not rotate or lose this key: Android will reject future APKs signed with a different certificate as updates. The workflow intentionally publishes an Android update asset only when all four secrets are present. Without them, CI still produces a debug APK artifact for testing, but Android in-app updates remain unavailable.
 
-Users moving from earlier CI debug APKs to the new permanent release key may need to uninstall the old app once, then install the first release-signed APK. This is a one-time signing-identity migration; later updates install over the app.
+**Signing migration warning:** users moving from earlier CI debug APKs to the permanent release key may not be able to install the signed APK over the existing app. Do not uninstall an existing installation until its signing certificate and a safe app-data/pairing migration path have been checked. A one-time reinstall may otherwise be required.
 
 ## Client behavior
 
