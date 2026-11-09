@@ -49,6 +49,7 @@ fn check_and_download(channel: &str) -> Result<Option<(String, PathBuf)>, String
         .and_then(|items| items.iter().find(|item| {
             !item["draft"].as_bool().unwrap_or(true)
                 && item["prerelease"].as_bool().unwrap_or(false) == development
+                && item["tag_name"].as_str().unwrap_or("").starts_with(if development { "dev-" } else { "stable-" })
         }))
         .ok_or_else(|| format!("No {channel} release is available yet."))?;
 
