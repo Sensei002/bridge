@@ -54,6 +54,9 @@ internal class BridgeTransferReceiver(
                 while (!Thread.currentThread().isInterrupted) {
                     val packet = BridgeNative.sessionReceiveBytes(handle)
                         ?: error("The secure device session has ended.")
+                    if (packet.size == 1 && packet[0] == 0.toByte()) {
+                        error("The secure device session has ended.")
+                    }
                     if (packet.isEmpty()) continue
                     if (packet[0].toInt() == CONTROL_TAG) {
                         val control = JSONObject(String(packet, 1, packet.size - 1, Charsets.UTF_8))
