@@ -1,0 +1,78 @@
+name: Development Release
+
+on:
+  push:
+    branches: [development]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: development-release
+  cancel-in-progress: false
+
+jobs:
+  windows-msi:
+    name: Build Windows MSI installer
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build native Windows desktop app
+        run: cargo build --release --manifest-path apps/desktop/Cargo.toml
+
+      - name: Install WiX Toolset
+        shell: pwsh
+        run: dotnet tool install --global wix
+
+      - name: Package per-user MSI
+        shell: pwsh
+        run: |
+          $workspace = Get-Content Cargo.toml -Raw
+          if ($workspace -notmatch '(?m)^version = "([0-9]+\.[0-9]+)\.[0-9]+"') {
+            throw "Could not read the workspace version from Cargo.toml"
+          }
+          $minorVersion = $Matches[1]
+          $productVersion = "$minorVersion.${{ github.run_number }}"
+          $env:PRODUCT_VERSION = $productVersion
+          wix build installer/windows/Package.wxs -d ProductVersion=$productVersion -d PublishDir="$PWD\target\release" -o "Bridge-$productVersion-x64.msi"
+          "PRODUCT_VERSION=$productVersion" >> $env:GITHUB_ENV
+          "MSI_NAME=Bridge-$productVersion-x64.msi" >> $env:GITHUB_ENV
+
+      - name: Generate update manifest
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash "$env:MSI_NAME" -Algorithm SHA256).Hash.ToLowerInvariant()
+          $tag = "dev-${{ github.run_number }}"
+          $manifest = @{
+            channel = "development"
+            platform = "windows-x64"
+            version = "$env:PRODUCT_VERSION"
+            asset = "$env:MSI_NAME"
+            sha256 = $hash
+            download_url = "https://github.com/Sensei002/bridge/releases/download/$tag/$env:MSI_NAME"
+            commit = "${{ github.sha }}"
+          } | ConvertTo-Json -Depth 4
+          Set-Content -Path "bridge-update-windows.json" -Value $manifest -Encoding utf8
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bridge-windows-msi-development
+          path: |
+            Bridge-*.msi
+            bridge-update-windows.json
+          if-no-files-found: error
+
+      - name: Publish development release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: dev-${{ github.run_number }}
+          name: Bridge Development Build ${{ github.run_number }}
+          prerelease: true
+          generate_release_notes: true
+          files: |
+            Bridge-*.msi
+            bridge-update-windows.json
