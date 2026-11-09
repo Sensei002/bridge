@@ -196,7 +196,11 @@ fn start_receive_file_transfer(
             let mut last_bytes = 0_u64;
             while received < accepted_offer.file_size {
                 if cancel.load(Ordering::Acquire) { return Err("Transfer cancelled by you.".into()); }
-                let packet = session.receive_timeout(Duration::from_secs(1))?;
+                let packet = match session.receive_timeout(Duration::from_secs(1)) {
+                    Ok(packet) => packet,
+                    Err(error) if error.contains("timed out") => continue,
+                    Err(error) => return Err(error),
+                };
                 match decode_packet(&packet).map_err(|error| error.to_string())? {
                     TransferPacket::Chunk(chunk) => {
                         received = received.saturating_add(chunk.data.len() as u64);
@@ -785,11 +789,15 @@ impl eframe::App for BridgeApp {
                 TransferUiEvent::Complete(message) => {
                     self.transfer_busy = false;
                     self.transfer_progress = 1.0;
+                    self.transfer_speed = 0.0;
+                    self.transfer_cancel = None;
                     self.transfer_status = message;
                 }
                 TransferUiEvent::Failed(error) => {
                     self.transfer_busy = false;
                     self.transfer_progress = 0.0;
+                    self.transfer_speed = 0.0;
+                    self.transfer_cancel = None;
                     self.transfer_status = error;
                 }
             }
@@ -1201,12 +1209,16 @@ impl eframe::App for BridgeApp {
                                         let pending = self.pending_incoming_transfers.remove(index);
                                         self.transfer_busy = true;
                                         self.transfer_progress = 0.0;
+                                        self.transfer_speed = 0.0;
+                                        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                                        self.transfer_cancel = Some(Arc::clone(&cancel));
                                         self.transfer_status = format!("Receiving {}…", pending.offer.file_name);
                                         start_receive_file_transfer(
                                             pending.session,
                                             pending.offer,
                                             path,
                                             self.transfer_tx.clone(),
+                                            cancel,
                                         );
                                     }
                                 }
@@ -1245,13 +1257,23 @@ impl eframe::App for BridgeApp {
                                     if let (Some(session), Some(path)) = (selected_session, rfd::FileDialog::new().pick_file()) {
                                         self.transfer_busy = true;
                                         self.transfer_progress = 0.0;
+                                        self.transfer_speed = 0.0;
+                                        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                                        self.transfer_cancel = Some(Arc::clone(&cancel));
                                         self.transfer_status = format!("Preparing {}…", path.file_name().and_then(|name| name.to_str()).unwrap_or("file"));
-                                        start_file_transfer(session, path, self.transfer_tx.clone());
+                                        start_file_transfer(session, path, self.transfer_tx.clone(), cancel);
                                     }
                                 }
                                 ui.add_space(14.0);
                                 if self.transfer_busy {
                                     ui.add(egui::ProgressBar::new(self.transfer_progress).show_percentage().animate(true));
+                                    ui.horizontal(|ui| {
+                                        muted(ui, &format!("{:.2} MB/s", self.transfer_speed / 1_048_576.0));
+                                        if ui.button("Cancel transfer").clicked() {
+                                            if let Some(cancel) = &self.transfer_cancel { cancel.store(true, Ordering::Release); }
+                                            self.transfer_status = "Cancelling transfer…".into();
+                                        }
+                                    });
                                 }
                                 muted(ui, &self.transfer_status);
                                 if targets.is_empty() {
