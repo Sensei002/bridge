@@ -55,7 +55,7 @@ object BridgeUpdater {
                 }
                 val versionCode = android.optInt("version_code", 0)
                 if (versionCode <= BuildConfig.VERSION_CODE) {
-                    postStatus(onStatus, "Bridge is up to date (\${BuildConfig.VERSION_NAME}).")
+                    postStatus(onStatus, "Bridge is up to date (${BuildConfig.VERSION_NAME}).")
                     return@Thread
                 }
                 val downloadUrl = android.optString("download_url")
@@ -63,7 +63,7 @@ object BridgeUpdater {
                 val expectedHash = android.optString("sha256").lowercase()
                 require(expectedHash.matches(Regex("[0-9a-f]{64}"))) { "Invalid APK checksum in release manifest." }
 
-                postStatus(onStatus, "Downloading Bridge \${android.optString("version_name")}…")
+                postStatus(onStatus, "Downloading Bridge ${android.optString("version_name")}…")
                 val assetName = android.optString("asset")
                 require(assetName == File(assetName).name && assetName.endsWith(".apk", ignoreCase = true)) {
                     "APK filename in the release manifest is invalid."
@@ -88,19 +88,19 @@ object BridgeUpdater {
                             onStatus("Allow Bridge to install apps from this source, then return and check for updates again.")
                             return@post
                         }
-                        val uri: Uri = FileProvider.getUriForFile(activity, "\${activity.packageName}.fileprovider", apk)
+                        val uri: Uri = FileProvider.getUriForFile(activity, "${activity.packageName}.fileprovider", apk)
                         val intent = Intent(Intent.ACTION_VIEW).apply {
                             setDataAndType(uri, "application/vnd.android.package-archive")
                             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                         }
                         activity.startActivity(intent)
-                        onStatus("Verified Bridge \${android.optString("version_name")}. Confirm installation in Android.")
+                        onStatus("Verified Bridge ${android.optString("version_name")}. Confirm installation in Android.")
                     } catch (error: Exception) {
-                        onStatus("Verified download, but Android could not open the installer: \${error.message}")
+                        onStatus("Verified download, but Android could not open the installer: ${error.message}")
                     }
                 }
             } catch (error: Exception) {
-                postStatus(onStatus, "Update check failed: \${error.message ?: error.javaClass.simpleName}")
+                postStatus(onStatus, "Update check failed: ${error.message ?: error.javaClass.simpleName}")
             }
         }, "BridgeUpdater").apply { isDaemon = true; start() }
     }
