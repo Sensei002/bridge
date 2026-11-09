@@ -158,7 +158,7 @@ internal class BridgeTransferReceiver(
 
     private fun sendControl(handle: Long, value: JSONObject) {
         val json = value.toString().toByteArray(Charsets.UTF_8)
-        val packet = byteArrayOf(CONTROL_TAG) + json
+        val packet = byteArrayOf(CONTROL_TAG.toByte()) + json
         val result = JSONObject(BridgeNative.sessionSendBytes(handle, packet))
         check(result.optBoolean("ok")) { result.optString("error", "Could not send transfer response.") }
     }
