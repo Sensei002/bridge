@@ -11,6 +11,11 @@ import java.io.InputStreamReader
 import java.io.PrintWriter
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.result.ActivityResultLauncher
+import androidx.activity.result.contract.ActivityResultContracts
+import android.net.Uri
+import java.io.File
+
 import androidx.compose.foundation.Image
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.layout.ContentScale
@@ -66,12 +71,32 @@ class MainActivity : ComponentActivity() {
     private val pendingPairings = mutableStateListOf<BridgePendingPairing>()
     private val trustedDevices = mutableStateListOf<BridgeTrustedDevice>()
     private val incomingOffers = mutableStateListOf<BridgeIncomingOffer>()
+    private val receivedFiles = mutableStateListOf<File>()
+    private var pendingExportFile: File? = null
+    private lateinit var exportFileLauncher: ActivityResultLauncher<String>
     private var transferStatus by mutableStateOf("Waiting for a connected trusted device.")
     @Volatile private var transferReceiver: BridgeTransferReceiver? = null
     private var pairingStatus by mutableStateOf("Preparing secure device identity…")
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        exportFileLauncher = registerForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri: Uri? ->
+            val source = pendingExportFile
+            pendingExportFile = null
+            if (uri != null && source != null) {
+                Thread({
+                    try {
+                        contentResolver.openOutputStream(uri)?.use { output ->
+                            source.inputStream().use { input -> input.copyTo(output) }
+                        } ?: error("Could not open the selected destination.")
+                        runOnUiThread { transferStatus = "Exported ${source.name} successfully." }
+                    } catch (error: Exception) {
+                        runOnUiThread { transferStatus = "Could not export ${source.name}: ${error.message}" }
+                    }
+                }, "BridgeFileExport").apply { isDaemon = true; start() }
+            }
+        }
+        refreshReceivedFiles()
 
         // Show the native UI immediately; Keystore and JNI initialization may
         // take time on first launch and must not block Android's main thread.
@@ -83,6 +108,8 @@ class MainActivity : ComponentActivity() {
                 pairingStatus = pairingStatus,
                 incomingOffers = incomingOffers,
                 transferStatus = transferStatus,
+                receivedFiles = receivedFiles,
+                onExportFile = { file -> pendingExportFile = file; exportFileLauncher.launch(file.name) },
                 onAcceptTransfer = { offer -> transferReceiver?.accept(offer); incomingOffers.remove(offer) },
                 onRejectTransfer = { offer -> transferReceiver?.reject(offer); incomingOffers.remove(offer) },
                 onPair = { peer -> pairingController?.pair(peer) },
@@ -119,7 +146,10 @@ class MainActivity : ComponentActivity() {
                 val receiver = BridgeTransferReceiver(
                     this,
                     onOffer = { offer -> incomingOffers.add(offer) },
-                    onStatus = { message -> transferStatus = message }
+                    onStatus = { message ->
+                        transferStatus = message
+                        if (message.startsWith("Received ")) refreshReceivedFiles()
+                    }
                 )
                 transferReceiver = receiver
                 val controller = BridgePairingController(
@@ -172,6 +202,21 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }, "BridgeStartup").apply { isDaemon = true; start() }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        refreshReceivedFiles()
+    }
+
+    private fun refreshReceivedFiles() {
+        val directory = File(filesDir, "Bridge/Received")
+        val files = directory.listFiles()?.filter { it.isFile && !it.name.startsWith(".bridge-") }
+            ?.sortedByDescending { it.lastModified() }.orEmpty()
+        runOnUiThread {
+            receivedFiles.clear()
+            receivedFiles.addAll(files)
+        }
     }
 
     override fun onDestroy() {
@@ -249,6 +294,8 @@ private fun BridgeApp(
     pairingStatus: String,
     incomingOffers: List<BridgeIncomingOffer>,
     transferStatus: String,
+    receivedFiles: List<File>,
+    onExportFile: (File) -> Unit,
     onAcceptTransfer: (BridgeIncomingOffer) -> Unit,
     onRejectTransfer: (BridgeIncomingOffer) -> Unit,
     onPair: (BridgePeer) -> Unit,
@@ -291,6 +338,8 @@ private fun BridgeApp(
                         BridgeTab.Transfers -> TransfersScreen(
                             incomingOffers = incomingOffers,
                             transferStatus = transferStatus,
+                            receivedFiles = receivedFiles,
+                            onExportFile = onExportFile,
                             onAccept = onAcceptTransfer,
                             onReject = onRejectTransfer,
                             onPair = { showPairDialog = true }
@@ -633,6 +682,8 @@ private fun DevicesScreen(
 private fun TransfersScreen(
     incomingOffers: List<BridgeIncomingOffer>,
     transferStatus: String,
+    receivedFiles: List<File>,
+    onExportFile: (File) -> Unit,
     onAccept: (BridgeIncomingOffer) -> Unit,
     onReject: (BridgeIncomingOffer) -> Unit,
     onPair: () -> Unit
@@ -660,9 +711,32 @@ private fun TransfersScreen(
             }
         }
         Panel {
+            Eyebrow("RECEIVED FILES")
+            if (receivedFiles.isEmpty()) {
+                Text("Files you accept will appear here.", color = Muted, fontSize = 12.sp)
+            } else {
+                receivedFiles.forEach { file ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                            Text(file.name, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            Text("%.2f MB".format(file.length() / 1048576.0), color = Muted, fontSize = 10.sp)
+                        }
+                        Button(onClick = { onExportFile(file) }, colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Ink)) {
+                            Text("Save to…", fontWeight = FontWeight.Bold)
+                        }
+                    }
+                    DividerLine()
+                }
+            }
+        }
+        Panel {
             Eyebrow("TRANSFER STATUS")
             Text(transferStatus, color = Color.White, fontSize = 12.sp, lineHeight = 18.sp)
-            Text("Accepted files are saved in Bridge's private app storage under Bridge/Received.", color = Muted, fontSize = 10.sp, lineHeight = 15.sp)
+            Text("Received files stay private until you choose Save to… and select a destination such as Downloads.", color = Muted, fontSize = 10.sp, lineHeight = 15.sp)
         }
         Panel {
             FeatureLine("◇", "Encrypted in transit", "Uses the authenticated Noise session.", "ACTIVE")
