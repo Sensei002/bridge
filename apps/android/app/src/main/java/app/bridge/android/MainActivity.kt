@@ -207,6 +207,28 @@ class MainActivity : ComponentActivity() {
                     onStatus = { message ->
                         transferStatus = message
                         if (message.startsWith("Received ")) refreshReceivedFiles()
+                    },
+                    onSessionEnded = { peerId, handle ->
+                        runOnUiThread {
+                            pairingController?.onSessionEnded(peerId, handle)
+                            if (connectedSessionHandles[peerId] == handle) {
+                                connectedSessionHandles.remove(peerId)
+                            }
+                            // Retry the trusted peer after the stale handle is removed.
+                            // Fingerprint verification remains enforced by pair().
+                            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                                if (!destroyed && !connectedSessionHandles.containsKey(peerId)) {
+                                    val peer = discoveredPeers.firstOrNull { it.deviceId == peerId }
+                                    if (peer != null) {
+                                        val trusted = pairingController?.trustedDevices()
+                                            ?.firstOrNull { it.deviceId == peerId }
+                                        if (trusted != null && trusted.fingerprint.equals(peer.fingerprint, ignoreCase = true)) {
+                                            pairingController?.pair(peer, trusted.fingerprint)
+                                        }
+                                    }
+                                }
+                            }, 2000)
+                        }
                     }
                 )
                 transferReceiver = receiver
