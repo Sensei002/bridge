@@ -183,6 +183,14 @@ internal class BridgePairingController(
 
     fun connectedSessions(): Map<String, Long> = activeSessions.toMap()
 
+    /** Remove only the session that actually ended; never discard a newer replacement. */
+    fun onSessionEnded(peerId: String, handle: Long) {
+        if (activeSessions.remove(peerId, handle)) {
+            BridgeNative.sessionClose(handle)
+            postStatus("Secure session ended. Waiting to reconnect…")
+        }
+    }
+
     fun trustedDevices(): List<BridgeTrustedDevice> {
         val encoded = preferences.getString("devices_encrypted_v1", null)
         if (encoded == null) {
