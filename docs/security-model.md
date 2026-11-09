@@ -24,3 +24,10 @@ Private keys must never leave their device. Discovery names, addresses, TXT reco
 ## Legacy prototype pairing disabled
 
 The former BRIDGE_PAIR/1 exchange compared a short code over an unauthenticated TCP connection. It did not run Noise or pin a peer identity. It remains disabled. The TCP ping/pong endpoint is a connectivity diagnostic only and is not an authenticated session.
+
+
+## File-transfer security (Milestone 2)
+
+The shared `bridge-transfer` crate validates bounded offers and chunks, enforces a 2 GiB initial file-size ceiling, checks a SHA-256 digest before publication, rejects path-like filenames, and publishes received files without overwriting existing destinations. Incoming data is staged in a temporary file that is removed if the transfer is dropped before successful verification.
+
+These primitives are not a substitute for transport authentication: clients must send control messages and chunks only through the already-authenticated Noise session, and must obtain explicit receiver approval before accepting file data. UI and session integration, physical-device testing, and independent review remain outstanding while Milestone 2 is in progress.

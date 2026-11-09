@@ -11,6 +11,8 @@ use bridge_core::trust::{SasConfirmation, TrustStore};
 #[cfg(windows)]
 use bridge_protocol::{DeviceDescriptor, DeviceId, Platform, PROTOCOL_VERSION};
 #[cfg(windows)]
+use bridge_transfer::{decode_packet, encode_packet, offer_for_file, FileOffer, IncomingFile, OutgoingFile, TransferControl, TransferPacket};
+#[cfg(windows)]
 use std::net::TcpListener;
 #[cfg(windows)]
 use std::path::PathBuf;
@@ -23,6 +25,8 @@ use std::sync::mpsc::Sender;
 #[cfg(windows)]
 use std::thread;
 use std::time::Duration;
+#[cfg(windows)]
+use std::time::Instant;
 
 const BG: egui::Color32 = egui::Color32::from_rgb(10, 11, 15);
 const SIDEBAR: egui::Color32 = egui::Color32::from_rgb(13, 15, 19);
@@ -71,6 +75,301 @@ struct PendingApproval {
 }
 
 #[cfg(windows)]
+struct DesktopSession {
+    connection: Arc<std::sync::Mutex<NoiseConnection>>,
+    incoming: std::sync::Mutex<Receiver<Vec<u8>>>,
+    incoming_offers: std::sync::Mutex<Receiver<FileOffer>>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    alive: Arc<std::sync::atomic::AtomicBool>,
+    pub remote_fingerprint: String,
+}
+
+#[cfg(windows)]
+impl DesktopSession {
+    fn start(connection: NoiseConnection) -> Result<Arc<Self>, String> {
+        let reader_stream = connection.stream.try_clone().map_err(|error| error.to_string())?;
+        reader_stream.set_read_timeout(None).map_err(|error| error.to_string())?;
+        let remote_fingerprint = connection.remote_fingerprint.clone();
+        let connection = Arc::new(std::sync::Mutex::new(connection));
+        let reader_connection = Arc::clone(&connection);
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader_stop = Arc::clone(&stop);
+        let alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let reader_alive = Arc::clone(&alive);
+        let (sender, incoming) = mpsc::sync_channel(8);
+        let (offer_sender, incoming_offers) = mpsc::channel();
+        thread::Builder::new()
+            .name("bridge-desktop-session-reader".into())
+            .spawn(move || {
+                while !reader_stop.load(Ordering::Acquire) {
+                    let encrypted = match bridge_network::read_frame(&mut &reader_stream) {
+                        Ok(frame) => frame,
+                        Err(_) => break,
+                    };
+                    let plaintext = {
+                        let mut guard = match reader_connection.lock() {
+                            Ok(guard) => guard,
+                            Err(_) => break,
+                        };
+                        let mut plaintext = vec![0_u8; bridge_network::MAX_FRAME_BYTES];
+                        match guard.transport.read_message(&encrypted, &mut plaintext) {
+                            Ok(length) => { plaintext.truncate(length); plaintext },
+                            Err(_) => break,
+                        }
+                    };
+                    match decode_packet(&plaintext) {
+                        Ok(TransferPacket::Control(TransferControl::FileOffer { offer })) => {
+                            if offer_sender.send(offer).is_err() { break; }
+                        }
+                        _ => {
+                            if sender.send(plaintext).is_err() { break; }
+                        }
+                    }
+                }
+                reader_alive.store(false, Ordering::Release);
+            })
+            .map_err(|error| error.to_string())?;
+        Ok(Arc::new(Self { connection, incoming: std::sync::Mutex::new(incoming), incoming_offers: std::sync::Mutex::new(incoming_offers), stop, alive, remote_fingerprint }))
+    }
+
+    fn is_alive(&self) -> bool {
+        self.alive.load(Ordering::Acquire)
+    }
+
+    fn send(&self, payload: &[u8]) -> Result<(), String> {
+        if !self.is_alive() {
+            return Err("The connected device session has ended. Reconnect before transferring.".into());
+        }
+        if payload.is_empty() || payload.len() > bridge_network::MAX_FRAME_BYTES - 16 {
+            return Err("session payload size is invalid".into());
+        }
+        let mut guard = self.connection.lock().map_err(|_| "session connection lock poisoned")?;
+        let mut encrypted = vec![0_u8; bridge_network::MAX_FRAME_BYTES];
+        let length = guard.transport.write_message(payload, &mut encrypted).map_err(|error| error.to_string())?;
+        let result = bridge_network::write_frame(&mut guard.stream, &encrypted[..length])
+            .map_err(|error| error.to_string());
+        if result.is_err() {
+            self.alive.store(false, Ordering::Release);
+        }
+        result
+    }
+
+    fn receive_timeout(&self, timeout: Duration) -> Result<Vec<u8>, String> {
+        self.incoming.lock().map_err(|_| "session receiver lock poisoned")?
+            .recv_timeout(timeout).map_err(|error| error.to_string())
+    }
+
+    fn try_receive_packet(&self) -> Result<Option<Vec<u8>>, String> {
+        match self.incoming.lock().map_err(|_| "session receiver lock poisoned")?.try_recv() {
+            Ok(packet) => Ok(Some(packet)),
+            Err(mpsc::TryRecvError::Empty) => Ok(None),
+            Err(mpsc::TryRecvError::Disconnected) => Err("The secure session reader has stopped.".into()),
+        }
+    }
+
+    fn try_receive_offer(&self) -> Option<FileOffer> {
+        self.incoming_offers.lock().ok()?.try_recv().ok()
+    }
+}
+
+#[cfg(windows)]
+impl Drop for DesktopSession {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Ok(connection) = self.connection.lock() {
+            let _ = connection.stream.shutdown(std::net::Shutdown::Both);
+        }
+    }
+}
+
+#[cfg(windows)]
+struct PendingIncomingTransfer {
+    session: Arc<DesktopSession>,
+    offer: FileOffer,
+}
+
+#[cfg(windows)]
+enum TransferUiEvent {
+    Status(String),
+    Progress { sent: u64, total: u64, speed_bytes_per_sec: f64 },
+    Complete(String),
+    Failed(String),
+}
+
+#[cfg(windows)]
+fn start_receive_file_transfer(
+    session: Arc<DesktopSession>,
+    offer: FileOffer,
+    destination: PathBuf,
+    events: Sender<TransferUiEvent>,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+) {
+    let worker_events = events.clone();
+    thread::Builder::new().name("bridge-file-receive".into()).spawn(move || {
+        let result = (|| -> Result<String, String> {
+            let mut accepted_offer = offer.clone();
+            if let Some(name) = destination.file_name().and_then(|value| value.to_str()) {
+                accepted_offer.file_name = name.to_owned();
+            }
+            let directory = destination.parent().ok_or("Choose a valid destination folder")?;
+            let packet = encode_packet(&TransferPacket::Control(
+                TransferControl::FileAccept { transfer_id: offer.transfer_id }
+            )).map_err(|error| error.to_string())?;
+            session.send(&packet)?;
+            let mut incoming = IncomingFile::create(directory, accepted_offer.clone()).map_err(|error| error.to_string())?;
+            let mut received = 0_u64;
+            let mut last_sample = Instant::now();
+            let mut last_bytes = 0_u64;
+            while received < accepted_offer.file_size {
+                if cancel.load(Ordering::Acquire) { return Err("Transfer cancelled by you.".into()); }
+                let packet = match session.receive_timeout(Duration::from_secs(1)) {
+                    Ok(packet) => packet,
+                    Err(error) if error.contains("timed out") => continue,
+                    Err(error) => return Err(error),
+                };
+                match decode_packet(&packet).map_err(|error| error.to_string())? {
+                    TransferPacket::Chunk(chunk) => {
+                        received = received.saturating_add(chunk.data.len() as u64);
+                        incoming.write_chunk(chunk).map_err(|error| error.to_string())?;
+                        let elapsed = last_sample.elapsed().as_secs_f64().max(0.001);
+                        let speed = (received.saturating_sub(last_bytes)) as f64 / elapsed;
+                        last_sample = Instant::now();
+                        last_bytes = received;
+                        let _ = worker_events.send(TransferUiEvent::Progress { sent: received, total: accepted_offer.file_size, speed_bytes_per_sec: speed });
+                    }
+                    _ => return Err("Unexpected packet while receiving file data.".into()),
+                }
+            }
+            let saved = incoming.finish().map_err(|error| error.to_string())?;
+            let packet = encode_packet(&TransferPacket::Control(
+                TransferControl::FileComplete { transfer_id: offer.transfer_id }
+            )).map_err(|error| error.to_string())?;
+            session.send(&packet)?;
+            Ok(format!("Received {} → {}", offer.file_name, saved.display()))
+        })();
+        match result {
+            Ok(message) => { let _ = worker_events.send(TransferUiEvent::Complete(message)); }
+            Err(error) => {
+                if let Ok(packet) = encode_packet(&TransferPacket::Control(
+                    TransferControl::FileCancel { transfer_id: offer.transfer_id }
+                )) {
+                    let _ = session.send(&packet);
+                }
+                let _ = worker_events.send(TransferUiEvent::Failed(error));
+            }
+        }
+    }).map_err(|error| {
+        let _ = events.send(TransferUiEvent::Failed(format!("Could not start receive worker: {error}")));
+    }).ok();
+}
+
+#[cfg(windows)]
+fn reject_incoming_transfer(session: &DesktopSession, offer: &FileOffer) {
+    if let Ok(packet) = encode_packet(&TransferPacket::Control(TransferControl::FileReject {
+        transfer_id: offer.transfer_id,
+        reason: "Declined on receiving device".into(),
+    })) {
+        let _ = session.send(&packet);
+    }
+}
+
+#[cfg(windows)]
+fn start_file_transfer(
+    session: Arc<DesktopSession>,
+    path: PathBuf,
+    events: Sender<TransferUiEvent>,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+) {
+    let worker_events = events.clone();
+    thread::Builder::new().name("bridge-file-send".into()).spawn(move || {
+        let events = worker_events;
+        let mut active_transfer_id = None;
+        let result = (|| -> Result<String, String> {
+            let offer = offer_for_file(&path).map_err(|error| error.to_string())?;
+            let file_name = offer.file_name.clone();
+            let transfer_id = offer.transfer_id;
+            active_transfer_id = Some(transfer_id);
+            let packet = encode_packet(&TransferPacket::Control(
+                TransferControl::FileOffer { offer: offer.clone() }
+            )).map_err(|error| error.to_string())?;
+            session.send(&packet)?;
+            let _ = events.send(TransferUiEvent::Status(format!("Waiting for {} to accept {file_name}…", session.remote_fingerprint[..8].to_owned())));
+            let approval_deadline = Instant::now() + Duration::from_secs(600);
+            let response = loop {
+                if cancel.load(Ordering::Acquire) { return Err("Transfer cancelled by you.".into()); }
+                match session.receive_timeout(Duration::from_secs(1)) {
+                    Ok(packet) => break packet,
+                    Err(error) if error.contains("timed out") && Instant::now() < approval_deadline => continue,
+                    Err(error) => return Err(error),
+                }
+            };
+            match decode_packet(&response).map_err(|error| error.to_string())? {
+                TransferPacket::Control(TransferControl::FileAccept { transfer_id: accepted })
+                    if accepted == transfer_id => {}
+                TransferPacket::Control(TransferControl::FileReject { transfer_id: rejected, reason })
+                    if rejected == transfer_id => return Err(format!("Transfer rejected: {reason}")),
+                _ => return Err("The connected device returned an unexpected transfer response.".into()),
+            }
+
+            let mut outgoing = OutgoingFile::open(&path, offer).map_err(|error| error.to_string())?;
+            let total = outgoing.total_bytes();
+            let mut sent = 0_u64;
+            let mut last_sample = Instant::now();
+            let mut last_bytes = 0_u64;
+            while let Some(chunk) = outgoing.next_chunk().map_err(|error| error.to_string())? {
+                if cancel.load(Ordering::Acquire) { return Err("Transfer cancelled by you.".into()); }
+                if let Some(packet) = session.try_receive_packet()? {
+                    match decode_packet(&packet).map_err(|error| error.to_string())? {
+                        TransferPacket::Control(TransferControl::FileCancel { transfer_id: cancelled })
+                            if cancelled == transfer_id => {
+                                return Err("The receiving device cancelled the transfer.".into());
+                            }
+                        _ => return Err("The receiving device sent an unexpected message during file transfer.".into()),
+                    }
+                }
+                sent = sent.saturating_add(chunk.data.len() as u64);
+                let packet = encode_packet(&TransferPacket::Chunk(chunk)).map_err(|error| error.to_string())?;
+                session.send(&packet)?;
+                let elapsed = last_sample.elapsed().as_secs_f64().max(0.001);
+                let speed = (sent.saturating_sub(last_bytes)) as f64 / elapsed;
+                last_sample = Instant::now();
+                last_bytes = sent;
+                let _ = events.send(TransferUiEvent::Progress { sent, total, speed_bytes_per_sec: speed });
+            }
+            let completion_deadline = Instant::now() + Duration::from_secs(600);
+            let response = loop {
+                if cancel.load(Ordering::Acquire) { return Err("Transfer cancelled by you.".into()); }
+                match session.receive_timeout(Duration::from_secs(1)) {
+                    Ok(packet) => break packet,
+                    Err(error) if error.contains("timed out") && Instant::now() < completion_deadline => continue,
+                    Err(error) => return Err(error),
+                }
+            };
+            match decode_packet(&response).map_err(|error| error.to_string())? {
+                TransferPacket::Control(TransferControl::FileComplete { transfer_id: completed })
+                    if completed == transfer_id => Ok(format!("{file_name} sent successfully.")),
+                TransferPacket::Control(TransferControl::FileCancel { transfer_id: cancelled })
+                    if cancelled == transfer_id => Err("The receiving device cancelled the transfer.".into()),
+                _ => Err("The connected device did not confirm the completed transfer.".into()),
+            }
+        })();
+        match result {
+            Ok(message) => { let _ = events.send(TransferUiEvent::Complete(message)); }
+            Err(error) => {
+                if let Some(transfer_id) = active_transfer_id {
+                    if let Ok(packet) = encode_packet(&TransferPacket::Control(TransferControl::FileCancel { transfer_id })) {
+                        let _ = session.send(&packet);
+                    }
+                }
+                let _ = events.send(TransferUiEvent::Failed(error));
+            }
+        }
+    }).map_err(|error| {
+        let _ = events.send(TransferUiEvent::Failed(format!("Could not start transfer worker: {error}")));
+    }).ok();
+}
+
+#[cfg(windows)]
 struct ConnectionPermit(Arc<AtomicUsize>);
 
 #[cfg(windows)]
@@ -99,7 +398,25 @@ struct BridgeApp {
     #[cfg(windows)]
     pending_pairings: Vec<PendingApproval>,
     #[cfg(windows)]
-    active_sessions: Vec<NoiseConnection>,
+    active_sessions: Vec<Arc<DesktopSession>>,
+    #[cfg(windows)]
+    pending_incoming_transfers: Vec<PendingIncomingTransfer>,
+    #[cfg(windows)]
+    selected_transfer_fingerprint: Option<String>,
+    #[cfg(windows)]
+    transfer_tx: Sender<TransferUiEvent>,
+    #[cfg(windows)]
+    transfer_rx: Receiver<TransferUiEvent>,
+    #[cfg(windows)]
+    transfer_busy: bool,
+    #[cfg(windows)]
+    transfer_progress: f32,
+    #[cfg(windows)]
+    transfer_speed: f64,
+    #[cfg(windows)]
+    transfer_cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+    #[cfg(windows)]
+    transfer_status: String,
     #[cfg(windows)]
     trust_store: TrustStore,
     #[cfg(windows)]
@@ -118,6 +435,8 @@ impl Default for BridgeApp {
         let (peer_tx, peer_rx) = mpsc::channel();
         #[cfg(windows)]
         let (pairing_tx, pairing_rx) = mpsc::channel();
+        #[cfg(windows)]
+        let (transfer_tx, transfer_rx) = mpsc::channel();
         #[cfg(windows)]
         let (trust_store, trust_store_error) = match TrustStore::load(trust_store_path()) {
             Ok(store) => (store, None),
@@ -156,6 +475,24 @@ impl Default for BridgeApp {
             pending_pairings: Vec::new(),
             #[cfg(windows)]
             active_sessions: Vec::new(),
+            #[cfg(windows)]
+            pending_incoming_transfers: Vec::new(),
+            #[cfg(windows)]
+            selected_transfer_fingerprint: None,
+            #[cfg(windows)]
+            transfer_tx,
+            #[cfg(windows)]
+            transfer_rx,
+            #[cfg(windows)]
+            transfer_busy: false,
+            #[cfg(windows)]
+            transfer_progress: 0.0,
+            #[cfg(windows)]
+            transfer_speed: 0.0,
+            #[cfg(windows)]
+            transfer_cancel: None,
+            #[cfg(windows)]
+            transfer_status: "Choose a connected trusted device to send a file.".into(),
             #[cfg(windows)]
             trust_store,
             #[cfg(windows)]
@@ -394,31 +731,49 @@ fn start_local_discovery(status: Sender<String>, peers: Sender<DiscoveredPeer>) 
             protocol_version: PROTOCOL_VERSION,
             public_key_fingerprint: fingerprint.clone(),
         };
-        let (discovery, events) = match LocalDiscovery::start(
-            &format!("Bridge-{suffix}"),
-            &format!("bridge-{suffix}.local."),
-            NETWORK_PORT,
-            &record,
-        ) {
-            Ok(value) => value,
-            Err(error) => {
-                let _ = status.send(format!("Local discovery unavailable: {error}"));
-                return;
-            }
-        };
-        let _keep_service_registered = discovery;
-        let _ = status.send("Bridge is advertising on the local network. Discovered peers remain unverified.".into());
-        while let Ok(event) = events.recv() {
-            if let Some(peer) = peer_from_event(&event) {
-                if peer.record.public_key_fingerprint.eq_ignore_ascii_case(&fingerprint) {
+
+        // Recreate the mDNS daemon periodically. Windows can change Wi-Fi
+        // interfaces/IP addresses while Bridge remains open; a daemon created
+        // before that transition may keep advertising on the old interface.
+        // Refreshing the daemon restores advertisement and browsing without
+        // touching trusted identities or authenticated-session state.
+        loop {
+            let (discovery, events) = match LocalDiscovery::start(
+                &format!("Bridge-{suffix}"),
+                &format!("bridge-{suffix}.local."),
+                NETWORK_PORT,
+                &record,
+            ) {
+                Ok(value) => value,
+                Err(error) => {
+                    let _ = status.send(format!("Local discovery restarting after error: {error}"));
+                    thread::sleep(Duration::from_secs(5));
                     continue;
                 }
-                let _ = status.send(format!(
-                    "Found unverified local peer: {} · {}",
-                    peer.record.display_name, peer.address,
-                ));
-                let _ = peers.send(peer);
+            };
+            let _ = status.send("Bridge is advertising on the local network. Discovered peers remain unverified.".into());
+            loop {
+                match events.recv_timeout(Duration::from_secs(15)) {
+                    Ok(event) => {
+                        if let Some(peer) = peer_from_event(&event) {
+                            if peer.record.public_key_fingerprint.eq_ignore_ascii_case(&fingerprint) {
+                                continue;
+                            }
+                            let _ = status.send(format!(
+                                "Found unverified local peer: {} · {}",
+                                peer.record.display_name, peer.address,
+                            ));
+                            let _ = peers.send(peer);
+                        }
+                    }
+                    // A timeout or channel error triggers a daemon refresh.
+                    // This also covers Wi-Fi changes that do not surface as mDNS errors.
+                    Err(_) => break,
+                }
             }
+            drop(events);
+            let _ = discovery.shutdown();
+            thread::sleep(Duration::from_secs(2));
         }
     });
 }
@@ -482,6 +837,45 @@ impl eframe::App for BridgeApp {
         }
         #[cfg(windows)]
         {
+            // Remove sessions whose reader observed EOF or a transport failure.
+            // Reconnected peers must never keep selecting an older dead session.
+            self.active_sessions.retain(|session| session.is_alive());
+            for session in &self.active_sessions {
+                while let Some(offer) = session.try_receive_offer() {
+                    self.pending_incoming_transfers.push(PendingIncomingTransfer {
+                        session: Arc::clone(session),
+                        offer,
+                    });
+                }
+            }
+        }
+        #[cfg(windows)]
+        for event in self.transfer_rx.try_iter() {
+            match event {
+                TransferUiEvent::Status(message) => self.transfer_status = message,
+                TransferUiEvent::Progress { sent, total, speed_bytes_per_sec } => {
+                    self.transfer_progress = if total == 0 { 1.0 } else { sent as f32 / total as f32 };
+                    self.transfer_speed = speed_bytes_per_sec;
+                    self.transfer_status = format!("{} / {} MB", sent as f64 / 1_048_576.0, total as f64 / 1_048_576.0);
+                }
+                TransferUiEvent::Complete(message) => {
+                    self.transfer_busy = false;
+                    self.transfer_progress = 1.0;
+                    self.transfer_speed = 0.0;
+                    self.transfer_cancel = None;
+                    self.transfer_status = message;
+                }
+                TransferUiEvent::Failed(error) => {
+                    self.transfer_busy = false;
+                    self.transfer_progress = 0.0;
+                    self.transfer_speed = 0.0;
+                    self.transfer_cancel = None;
+                    self.transfer_status = error;
+                }
+            }
+        }
+        #[cfg(windows)]
+        {
             for peer in self.peer_rx.try_iter() {
                 // mDNS may resolve one physical device over both IPv4 and IPv6.
                 // Device identity, not socket address, defines one discovered row.
@@ -527,7 +921,13 @@ impl eframe::App for BridgeApp {
                         }
                     }
                     self.network_status = format!("Secure session established with {}.", pairing.descriptor.display_name);
-                    self.active_sessions.push(pairing.connection);
+                    match DesktopSession::start(pairing.connection) {
+                        Ok(session) => {
+                            self.active_sessions.retain(|existing| existing.remote_fingerprint != session.remote_fingerprint);
+                            self.active_sessions.push(session);
+                        }
+                        Err(error) => self.network_status = format!("Could not start secure session dispatcher: {error}"),
+                    }
                 } else {
                     self.pending_pairings.push(pairing);
                 }
@@ -626,6 +1026,18 @@ impl eframe::App for BridgeApp {
                                 .show(ui, |ui| { ui.label(egui::RichText::new("●").color(GREEN)); });
                             ui.vertical(|ui| {
                                 ui.label(egui::RichText::new("This device").strong().size(12.0));
+                                #[cfg(windows)]
+                                {
+                                    let connected = self.active_sessions.len();
+                                    muted(ui, &if connected == 0 {
+                                        "Waiting for pairing".to_owned()
+                                    } else if connected == 1 {
+                                        "1 device connected".to_owned()
+                                    } else {
+                                        format!("{connected} devices connected")
+                                    });
+                                }
+                                #[cfg(not(windows))]
                                 muted(ui, "Waiting for pairing");
                             });
                         });
@@ -822,25 +1234,145 @@ impl eframe::App for BridgeApp {
                         });
                     }
                     Page::Transfers => {
-                        ui.horizontal(|ui| {
-                            for label in ["All transfers", "Sending", "Received"] {
-                                let _ = ui.selectable_label(label == "All transfers", label);
+                        #[cfg(windows)]
+                        {
+                            let targets = self.trust_store.list().into_iter().filter_map(|device| {
+                                self.active_sessions.iter()
+                                    .find(|session| session.remote_fingerprint.eq_ignore_ascii_case(&device.public_key_fingerprint))
+                                    .map(|session| (device.public_key_fingerprint.clone(), device.descriptor.display_name.clone(), Arc::clone(session)))
+                            }).collect::<Vec<_>>();
+                            let mut accept_incoming: Option<(usize, PathBuf)> = None;
+                            let mut reject_incoming: Option<usize> = None;
+                            if !self.pending_incoming_transfers.is_empty() {
+                                panel(ui, |ui| {
+                                    eyebrow(ui, "INCOMING FILE REQUESTS");
+                                    ui.add_space(6.0);
+                                    for (index, pending) in self.pending_incoming_transfers.iter().enumerate() {
+                                        ui.horizontal(|ui| {
+                                            ui.vertical(|ui| {
+                                                ui.label(egui::RichText::new(&pending.offer.file_name).strong().color(TEXT));
+                                                muted(ui, &format!(
+                                                    "{} · {:.2} MB · encrypted and SHA-256 verified",
+                                                    &pending.session.remote_fingerprint[..8.min(pending.session.remote_fingerprint.len())],
+                                                    pending.offer.file_size as f64 / 1_048_576.0
+                                                ));
+                                            });
+                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                if primary_button(ui, "Decline") { reject_incoming = Some(index); }
+                                                if primary_button(ui, "Accept…") {
+                                                    if let Some(path) = rfd::FileDialog::new()
+                                                        .set_file_name(&pending.offer.file_name)
+                                                        .save_file()
+                                                    {
+                                                        accept_incoming = Some((index, path));
+                                                    }
+                                                }
+                                            });
+                                        });
+                                        ui.add_space(8.0);
+                                    }
+                                });
+                                if let Some(index) = reject_incoming {
+                                    if index < self.pending_incoming_transfers.len() {
+                                        let pending = self.pending_incoming_transfers.remove(index);
+                                        reject_incoming_transfer(&pending.session, &pending.offer);
+                                        self.transfer_status = format!("Declined {}.", pending.offer.file_name);
+                                    }
+                                }
+                                if let Some((index, path)) = accept_incoming {
+                                    if index < self.pending_incoming_transfers.len() {
+                                        let pending = self.pending_incoming_transfers.remove(index);
+                                        self.transfer_busy = true;
+                                        self.transfer_progress = 0.0;
+                                        self.transfer_speed = 0.0;
+                                        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                                        self.transfer_cancel = Some(Arc::clone(&cancel));
+                                        self.transfer_status = format!("Receiving {}…", pending.offer.file_name);
+                                        start_receive_file_transfer(
+                                            pending.session,
+                                            pending.offer,
+                                            path,
+                                            self.transfer_tx.clone(),
+                                            cancel,
+                                        );
+                                    }
+                                }
                             }
-                        });
-                        ui.add_space(12.0);
+                            if self.selected_transfer_fingerprint.is_none() {
+                                self.selected_transfer_fingerprint = targets.first().map(|target| target.0.clone());
+                            }
+                            panel(ui, |ui| {
+                                eyebrow(ui, "SECURE FILE TRANSFER");
+                                ui.add_space(8.0);
+                                ui.label(egui::RichText::new("Send a file to a trusted device").size(20.0).strong());
+                                muted(ui, "Files are sent over the existing authenticated, encrypted local session.");
+                                ui.add_space(14.0);
+                                let selected_name = targets.iter()
+                                    .find(|target| Some(&target.0) == self.selected_transfer_fingerprint.as_ref())
+                                    .map(|target| target.1.as_str())
+                                    .unwrap_or("No connected trusted device");
+                                egui::ComboBox::from_id_salt("bridge_transfer_target")
+                                    .selected_text(selected_name)
+                                    .width(260.0)
+                                    .show_ui(ui, |ui| {
+                                        for (fingerprint, name, _) in &targets {
+                                            ui.selectable_value(&mut self.selected_transfer_fingerprint, Some(fingerprint.clone()), name);
+                                        }
+                                    });
+                                ui.add_space(12.0);
+                                let can_send = !self.transfer_busy && !targets.is_empty()
+                                    && self.selected_transfer_fingerprint.as_ref().is_some_and(|fingerprint| targets.iter().any(|target| &target.0 == fingerprint));
+                                if ui.add_enabled(can_send, egui::Button::new(egui::RichText::new("＋  Choose file and send").strong().color(TEXT))
+                                    .fill(egui::Color32::from_rgb(12, 105, 121))
+                                    .corner_radius(egui::CornerRadius::same(8))
+                                    .min_size(egui::vec2(210.0, 38.0))).clicked() {
+                                    let selected_session = targets.iter()
+                                        .find(|target| Some(&target.0) == self.selected_transfer_fingerprint.as_ref())
+                                        .map(|target| Arc::clone(&target.2));
+                                    if let (Some(session), Some(path)) = (selected_session, rfd::FileDialog::new().pick_file()) {
+                                        self.transfer_busy = true;
+                                        self.transfer_progress = 0.0;
+                                        self.transfer_speed = 0.0;
+                                        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                                        self.transfer_cancel = Some(Arc::clone(&cancel));
+                                        self.transfer_status = format!("Preparing {}…", path.file_name().and_then(|name| name.to_str()).unwrap_or("file"));
+                                        start_file_transfer(session, path, self.transfer_tx.clone(), cancel);
+                                    }
+                                }
+                                ui.add_space(14.0);
+                                if self.transfer_busy {
+                                    ui.add(egui::ProgressBar::new(self.transfer_progress).show_percentage().animate(true));
+                                    ui.horizontal(|ui| {
+                                        muted(ui, &format!("{:.2} MB/s", self.transfer_speed / 1_048_576.0));
+                                        if ui.button("Cancel transfer").clicked() {
+                                            if let Some(cancel) = &self.transfer_cancel { cancel.store(true, Ordering::Release); }
+                                            self.transfer_status = "Cancelling transfer…".into();
+                                        }
+                                    });
+                                }
+                                muted(ui, &self.transfer_status);
+                                if targets.is_empty() {
+                                    ui.add_space(8.0);
+                                    muted(ui, "No active secure sessions. Connect to a trusted device on the Devices page first.");
+                                }
+                            });
+                            ui.add_space(12.0);
+                            panel(ui, |ui| {
+                                eyebrow(ui, "TRANSFER SAFETY");
+                                feature_row(ui, "◇", "Encrypted in transit", "Uses the authenticated Noise session; no cloud relay.", "ACTIVE");
+                                ui.add_space(10.0);
+                                feature_row(ui, "✓", "Integrity checked", "SHA-256 verified before the receiver publishes the file.", "ACTIVE");
+                                ui.add_space(10.0);
+                                feature_row(ui, "▣", "No accidental overwrite", "The receiver chooses a collision-safe destination name.", "ACTIVE");
+                            });
+                        }
+                        #[cfg(not(windows))]
                         panel(ui, |ui| {
                             ui.vertical_centered(|ui| {
-                                ui.add_space(26.0);
-                                ui.label(egui::RichText::new("⇧").size(40.0).color(ACCENT));
-                                ui.label(egui::RichText::new("Your transfers will live here").size(19.0).strong());
-                                muted(ui, "Send files directly between paired devices. No cloud upload required.");
-                                ui.add_space(14.0);
-                                if primary_button(ui, "＋  Choose files") { self.show_pair_dialog = true; }
-                                ui.add_space(22.0);
+                                ui.label(egui::RichText::new("File transfer is available in the Windows build").strong());
+                                muted(ui, "Android and iOS transfer workflows are being connected next.");
                             });
                         });
-                        ui.add_space(12.0);
-                        muted(ui, "Transfer controls are a UI preview; file transport is not active yet.");
                     }
                     Page::Clipboard => {
                         panel(ui, |ui| {
@@ -972,7 +1504,13 @@ impl eframe::App for BridgeApp {
                             let _ = self.trust_store.revoke_and_save(&pending.descriptor.id, trust_store_path());
                             self.network_status = format!("Could not confirm pairing: {error}");
                         } else {
-                            self.active_sessions.push(pending.connection);
+                            match DesktopSession::start(pending.connection) {
+                                Ok(session) => {
+                                    self.active_sessions.retain(|existing| existing.remote_fingerprint != session.remote_fingerprint);
+                                    self.active_sessions.push(session);
+                                }
+                                Err(error) => self.network_status = format!("Could not start secure session dispatcher: {error}"),
+                            }
                             self.network_status = format!("{} is now connected and trusted.", pending.descriptor.display_name);
                         }
                     }

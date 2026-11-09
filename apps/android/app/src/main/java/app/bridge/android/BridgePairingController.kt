@@ -45,6 +45,7 @@ internal class BridgePairingController(
     private val onPending: (BridgePendingPairing) -> Unit,
     private val onStatus: (String) -> Unit
 ) {
+    @Volatile var onSessionReady: ((String, Long) -> Unit)? = null
     private val appContext = context.applicationContext
     private val preferences = appContext.getSharedPreferences("bridge_trusted_devices", Context.MODE_PRIVATE)
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -73,7 +74,10 @@ internal class BridgePairingController(
         postStatus("Authenticated Noise XX pairing listener is ready.")
     }
 
+    private val connectingDevices = ConcurrentHashMap.newKeySet<String>()
+
     fun pair(peer: BridgePeer, expectedFingerprint: String? = null) {
+        if (!connectingDevices.add(peer.deviceId)) return
         Thread({
             try {
                 val trusted = trustedDevices().firstOrNull { it.deviceId == peer.deviceId }
@@ -83,9 +87,20 @@ internal class BridgePairingController(
                 )
                 handleResult(response)
             } catch (error: Exception) {
-                postStatus("Secure pairing failed: ${error.message}")
+                postStatus("Secure connection attempt failed: ${error.message}")
+            } finally {
+                connectingDevices.remove(peer.deviceId)
             }
         }, "BridgeNoiseConnect").apply { isDaemon = true; start() }
+    }
+
+    /** Drop transport sessions after Wi-Fi loss without deleting trusted identities. */
+    fun onNetworkLost() {
+        activeSessions.values.forEach(BridgeNative::sessionClose)
+        activeSessions.clear()
+        pendingSessions.keys.toList().forEach(BridgeNative::sessionClose)
+        pendingSessions.clear()
+        postStatus("Wi-Fi disconnected. Trusted devices will reconnect automatically when the network returns.")
     }
 
     fun approve(pending: BridgePendingPairing): Boolean {
@@ -120,6 +135,7 @@ internal class BridgePairingController(
         }
         pendingSessions.remove(pending.handle)
         activeSessions.put(pending.deviceId, pending.handle)?.let(BridgeNative::sessionClose)
+        onSessionReady?.invoke(pending.deviceId, pending.handle)
         postStatus("${pending.name} is now connected and trusted.")
         return true
     }
@@ -147,6 +163,7 @@ internal class BridgePairingController(
             all += BridgeTrustedDevice(peerId, remote.getString("display_name"), remote.getString("platform"), fingerprint, System.currentTimeMillis())
             check(saveTrusted(all)) { "Could not save the trusted device." }
             activeSessions.put(peerId, handle)?.let(BridgeNative::sessionClose)
+            onSessionReady?.invoke(peerId, handle)
             postStatus("${remote.getString("display_name")} accepted. Device connected.")
         } catch (error: Exception) {
             BridgeNative.sessionClose(handle)
@@ -162,6 +179,16 @@ internal class BridgePairingController(
         }
         activeSessions.remove(deviceId)?.let(BridgeNative::sessionClose)
         postStatus("Device trust revoked and its active session closed.")
+    }
+
+    fun connectedSessions(): Map<String, Long> = activeSessions.toMap()
+
+    /** Remove only the session that actually ended; never discard a newer replacement. */
+    fun onSessionEnded(peerId: String, handle: Long) {
+        if (activeSessions.remove(peerId, handle)) {
+            BridgeNative.sessionClose(handle)
+            postStatus("Secure session ended. Waiting to reconnect…")
+        }
     }
 
     fun trustedDevices(): List<BridgeTrustedDevice> {
@@ -238,6 +265,7 @@ internal class BridgePairingController(
                     }
                 }
                 activeSessions.put(peerId, handle)?.let(BridgeNative::sessionClose)
+                onSessionReady?.invoke(peerId, handle)
                 postStatus("Secure session re-established with ${trusted.name}.")
             } else {
                 BridgeNative.sessionClose(handle)

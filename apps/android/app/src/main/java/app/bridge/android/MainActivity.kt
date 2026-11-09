@@ -1,6 +1,10 @@
 package app.bridge.android
 
 import android.os.Bundle
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.os.Handler
 import android.os.Looper
 import java.net.ServerSocket
@@ -11,6 +15,11 @@ import java.io.InputStreamReader
 import java.io.PrintWriter
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.result.ActivityResultLauncher
+import androidx.activity.result.contract.ActivityResultContracts
+import android.net.Uri
+import java.io.File
+
 import androidx.compose.foundation.Image
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.layout.ContentScale
@@ -65,10 +74,84 @@ class MainActivity : ComponentActivity() {
     private val discoveredPeers = mutableStateListOf<BridgePeer>()
     private val pendingPairings = mutableStateListOf<BridgePendingPairing>()
     private val trustedDevices = mutableStateListOf<BridgeTrustedDevice>()
+    private val connectedSessionHandles = mutableStateMapOf<String, Long>()
+    private val incomingOffers = mutableStateListOf<BridgeIncomingOffer>()
+    private val receivedFiles = mutableStateListOf<File>()
+    private var pendingExportFile: File? = null
+    private lateinit var exportFileLauncher: ActivityResultLauncher<String>
+    private lateinit var sendFileLauncher: ActivityResultLauncher<Array<String>>
+    private var pendingSendHandle: Long? = null
+    private var transferStatus by mutableStateOf("Waiting for a connected trusted device.")
+    @Volatile private var transferReceiver: BridgeTransferReceiver? = null
     private var pairingStatus by mutableStateOf("Preparing secure device identity…")
+    private var wifiCallbackRegistered = false
+    private val wifiNetworkCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) {
+            runOnUiThread {
+                if (destroyed) return@runOnUiThread
+                pairingStatus = "Wi-Fi connected. Looking for trusted Bridge devices…"
+                discovery?.restart()
+            }
+        }
+
+        override fun onLost(network: Network) {
+            runOnUiThread {
+                if (destroyed) return@runOnUiThread
+                pairingController?.onNetworkLost()
+                transferReceiver?.cancelAll()
+                transferReceiver?.stop()
+                connectedSessionHandles.clear()
+                pairingStatus = "Wi-Fi disconnected. Waiting to reconnect…"
+            }
+        }
+    }
+
+    private fun registerWifiNetworkCallback() {
+        if (wifiCallbackRegistered) return
+        val manager = getSystemService(ConnectivityManager::class.java) ?: return
+        try {
+            manager.registerNetworkCallback(
+                NetworkRequest.Builder().addTransportType(NetworkCapabilities.TRANSPORT_WIFI).build(),
+                wifiNetworkCallback
+            )
+            wifiCallbackRegistered = true
+        } catch (error: Exception) {
+            pairingStatus = "Automatic Wi-Fi recovery unavailable: ${error.message}"
+        }
+    }
+
+    private fun unregisterWifiNetworkCallback() {
+        if (!wifiCallbackRegistered) return
+        try {
+            getSystemService(ConnectivityManager::class.java)?.unregisterNetworkCallback(wifiNetworkCallback)
+        } catch (_: Exception) { }
+        wifiCallbackRegistered = false
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        sendFileLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
+            val handle = pendingSendHandle
+            pendingSendHandle = null
+            if (uri != null && handle != null) transferReceiver?.sendFile(uri, handle)
+        }
+        exportFileLauncher = registerForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri: Uri? ->
+            val source = pendingExportFile
+            pendingExportFile = null
+            if (uri != null && source != null) {
+                Thread({
+                    try {
+                        contentResolver.openOutputStream(uri)?.use { output ->
+                            source.inputStream().use { input -> input.copyTo(output) }
+                        } ?: error("Could not open the selected destination.")
+                        runOnUiThread { transferStatus = "Exported ${source.name} successfully." }
+                    } catch (error: Exception) {
+                        runOnUiThread { transferStatus = "Could not export ${source.name}: ${error.message}" }
+                    }
+                }, "BridgeFileExport").apply { isDaemon = true; start() }
+            }
+        }
+        refreshReceivedFiles()
 
         // Show the native UI immediately; Keystore and JNI initialization may
         // take time on first launch and must not block Android's main thread.
@@ -77,7 +160,16 @@ class MainActivity : ComponentActivity() {
                 discoveredPeers = discoveredPeers,
                 pendingPairings = pendingPairings,
                 trustedDevices = trustedDevices,
+                connectedSessionHandles = connectedSessionHandles,
                 pairingStatus = pairingStatus,
+                incomingOffers = incomingOffers,
+                transferStatus = transferStatus,
+                receivedFiles = receivedFiles,
+                onExportFile = { file -> pendingExportFile = file; exportFileLauncher.launch(file.name) },
+                onPickFile = { handle -> pendingSendHandle = handle; sendFileLauncher.launch(arrayOf("*/*")) },
+                onCancelTransfer = { transferReceiver?.cancelAll() },
+                onAcceptTransfer = { offer -> transferReceiver?.accept(offer); incomingOffers.remove(offer) },
+                onRejectTransfer = { offer -> transferReceiver?.reject(offer); incomingOffers.remove(offer) },
                 onPair = { peer -> pairingController?.pair(peer) },
                 onApprove = { pending ->
                     pairingController?.approve(pending)
@@ -109,6 +201,37 @@ class MainActivity : ComponentActivity() {
                     check(identityPreferences.edit().putString("device_id", it).commit())
                 }
 
+                val receiver = BridgeTransferReceiver(
+                    this,
+                    onOffer = { offer -> incomingOffers.add(offer) },
+                    onStatus = { message ->
+                        transferStatus = message
+                        if (message.startsWith("Received ")) refreshReceivedFiles()
+                    },
+                    onSessionEnded = { peerId, handle ->
+                        runOnUiThread {
+                            pairingController?.onSessionEnded(peerId, handle)
+                            if (connectedSessionHandles[peerId] == handle) {
+                                connectedSessionHandles.remove(peerId)
+                            }
+                            // Retry the trusted peer after the stale handle is removed.
+                            // Fingerprint verification remains enforced by pair().
+                            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                                if (!destroyed && !connectedSessionHandles.containsKey(peerId)) {
+                                    val peer = discoveredPeers.firstOrNull { it.deviceId == peerId }
+                                    if (peer != null) {
+                                        val trusted = pairingController?.trustedDevices()
+                                            ?.firstOrNull { it.deviceId == peerId }
+                                        if (trusted != null && trusted.fingerprint.equals(peer.fingerprint, ignoreCase = true)) {
+                                            pairingController?.pair(peer, trusted.fingerprint)
+                                        }
+                                    }
+                                }
+                            }, 2000)
+                        }
+                    }
+                )
+                transferReceiver = receiver
                 val controller = BridgePairingController(
                     this, privateKey, fingerprint, deviceId,
                     onPending = { pendingPairings.add(it) },
@@ -126,12 +249,32 @@ class MainActivity : ComponentActivity() {
                     return@Thread
                 }
                 pairingController = controller
+                controller.onSessionReady = { peerId, handle ->
+                    runOnUiThread {
+                        if (!destroyed) {
+                            connectedSessionHandles[peerId] = handle
+                            receiver.attach(peerId, handle)
+                        } else {
+                            BridgeNative.sessionClose(handle)
+                        }
+                    }
+                }
                 controller.start()
 
                 val networkDiscovery = BridgeDiscovery(this, { peer ->
                     if (peer.deviceId != deviceId) {
                         val existing = discoveredPeers.indexOfFirst { it.deviceId == peer.deviceId }
                         if (existing >= 0) discoveredPeers[existing] = peer else discoveredPeers.add(peer)
+                        // Discovery is also the automatic reconnect trigger. Only
+                        // reconnect devices whose saved fingerprint still matches.
+                        val trustedPeer = try {
+                            controller.trustedDevices().firstOrNull { it.deviceId == peer.deviceId }
+                        } catch (_: Exception) { null }
+                        if (trustedPeer != null &&
+                            trustedPeer.fingerprint.equals(peer.fingerprint, ignoreCase = true) &&
+                            !connectedSessionHandles.containsKey(peer.deviceId)) {
+                            controller.pair(peer, trustedPeer.fingerprint)
+                        }
                     }
                 }, { serviceName ->
                     discoveredPeers.removeAll { it.serviceName == serviceName }
@@ -142,6 +285,7 @@ class MainActivity : ComponentActivity() {
                 }
                 discovery = networkDiscovery
                 networkDiscovery.start(deviceId, android.os.Build.MODEL ?: "Bridge Android", fingerprint)
+                registerWifiNetworkCallback()
 
                 runOnUiThread {
                     if (!destroyed) {
@@ -160,9 +304,27 @@ class MainActivity : ComponentActivity() {
         }, "BridgeStartup").apply { isDaemon = true; start() }
     }
 
+    override fun onResume() {
+        super.onResume()
+        refreshReceivedFiles()
+    }
+
+    private fun refreshReceivedFiles() {
+        val directory = File(filesDir, "Bridge/Received")
+        val files = directory.listFiles()?.filter { it.isFile && !it.name.startsWith(".bridge-") }
+            ?.sortedByDescending { it.lastModified() }.orEmpty()
+        runOnUiThread {
+            receivedFiles.clear()
+            receivedFiles.addAll(files)
+        }
+    }
+
     override fun onDestroy() {
         destroyed = true
+        unregisterWifiNetworkCallback()
         pairingController?.stop()
+        transferReceiver?.stop()
+        transferReceiver = null
         discovery?.stop()
         discovery = null
         super.onDestroy()
@@ -230,7 +392,16 @@ private fun BridgeApp(
     discoveredPeers: List<BridgePeer>,
     pendingPairings: List<BridgePendingPairing>,
     trustedDevices: List<BridgeTrustedDevice>,
+    connectedSessionHandles: Map<String, Long>,
     pairingStatus: String,
+    incomingOffers: List<BridgeIncomingOffer>,
+    transferStatus: String,
+    receivedFiles: List<File>,
+    onExportFile: (File) -> Unit,
+    onPickFile: (Long) -> Unit,
+    onCancelTransfer: () -> Unit,
+    onAcceptTransfer: (BridgeIncomingOffer) -> Unit,
+    onRejectTransfer: (BridgeIncomingOffer) -> Unit,
     onPair: (BridgePeer) -> Unit,
     onApprove: (BridgePendingPairing) -> Unit,
     onReject: (BridgePendingPairing) -> Unit,
@@ -268,7 +439,19 @@ private fun BridgeApp(
                             onReject = onReject,
                             onRevoke = onRevoke
                         )
-                        BridgeTab.Transfers -> TransfersScreen(onPair = { showPairDialog = true })
+                        BridgeTab.Transfers -> TransfersScreen(
+                            incomingOffers = incomingOffers,
+                            trustedDevices = trustedDevices,
+                            connectedSessionHandles = connectedSessionHandles,
+                            onPickFile = onPickFile,
+                            onCancelTransfer = onCancelTransfer,
+                            transferStatus = transferStatus,
+                            receivedFiles = receivedFiles,
+                            onExportFile = onExportFile,
+                            onAccept = onAcceptTransfer,
+                            onReject = onRejectTransfer,
+                            onPair = { showPairDialog = true }
+                        )
                         BridgeTab.Clipboard -> ClipboardScreen(
                             enabled = clipboardSync,
                             onEnabledChange = { clipboardSync = it }
@@ -313,6 +496,42 @@ private fun BridgeApp(
         )
     }
 
+    val incomingOffer = incomingOffers.firstOrNull()
+    if (incomingOffer != null) {
+        val senderName = trustedDevices.firstOrNull { it.deviceId == incomingOffer.deviceId }?.name
+            ?: "Trusted device " + incomingOffer.deviceId.take(8)
+        AlertDialog(
+            onDismissRequest = {},
+            containerColor = PanelAlt,
+            title = { Text("Incoming file", color = Color.White, fontWeight = FontWeight.Bold) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("$senderName wants to send you a file.", color = Color.White, fontSize = 13.sp)
+                    Text(incomingOffer.fileName, color = Accent, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                    Text(
+                        if (incomingOffer.fileSize == 0L) "Empty file"
+                        else "%.2f MB".format(incomingOffer.fileSize / 1048576.0),
+                        color = Muted,
+                        fontSize = 12.sp
+                    )
+                    Text("The file is encrypted in transit and its SHA-256 checksum is verified before saving.", color = Muted, fontSize = 11.sp, lineHeight = 16.sp)
+                    Text("Accept only if you trust the sender and expected this file.", color = Amber, fontSize = 11.sp)
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = { onAcceptTransfer(incomingOffer) },
+                    colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Ink)
+                ) { Text("Accept file", fontWeight = FontWeight.Bold) }
+            },
+            dismissButton = {
+                Button(
+                    onClick = { onRejectTransfer(incomingOffer) },
+                    colors = ButtonDefaults.buttonColors(containerColor = Panel, contentColor = Amber)
+                ) { Text("Decline") }
+            }
+        )
+    }
     if (showPairDialog) {
         AlertDialog(
             onDismissRequest = { showPairDialog = false },
@@ -568,30 +787,111 @@ private fun DevicesScreen(
 }
 
 @Composable
-private fun TransfersScreen(onPair: () -> Unit) {
+private fun TransfersScreen(
+    incomingOffers: List<BridgeIncomingOffer>,
+    trustedDevices: List<BridgeTrustedDevice>,
+    connectedSessionHandles: Map<String, Long>,
+    onPickFile: (Long) -> Unit,
+    onCancelTransfer: () -> Unit,
+    transferStatus: String,
+    receivedFiles: List<File>,
+    onExportFile: (File) -> Unit,
+    onAccept: (BridgeIncomingOffer) -> Unit,
+    onReject: (BridgeIncomingOffer) -> Unit,
+    onPair: () -> Unit
+) {
     ScreenContent {
-        ScreenHeading("MOVE WITHOUT LIMITS", "File transfers", "Send files between your trusted devices. Privately.")
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            StatusTag("ALL TRANSFERS", Accent)
-            StatusTag("SENDING")
-            StatusTag("RECEIVED")
-        }
+        ScreenHeading("MOVE WITHOUT LIMITS", "File transfers", "Receive files over your authenticated, encrypted local connection.")
         Panel {
-            Box(modifier = Modifier.fillMaxWidth().padding(vertical = 20.dp), contentAlignment = Alignment.Center) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(9.dp)) {
-                    Text("⇧", color = Accent, fontSize = 42.sp)
-                    Text("Nothing moving yet", color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.Bold)
-                    Text("Your sent and received files will show up here.", color = Muted, fontSize = 11.sp)
-                    PrimaryAction("＋   Choose files", onPair)
+            Eyebrow("SEND A FILE")
+            val connected = trustedDevices.filter { connectedSessionHandles.containsKey(it.deviceId) }
+            if (connected.isEmpty()) {
+                Text("Connect a trusted device first. Online devices will appear here.", color = Muted, fontSize = 12.sp)
+            } else {
+                Text("Choose a connected device, then select a file from your phone.", color = Muted, fontSize = 11.sp, lineHeight = 16.sp)
+                connected.forEach { device ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                            Text(device.name, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                            Text("Secure connection ready", color = Good, fontSize = 10.sp)
+                        }
+                        PrimaryAction("Choose file", { connectedSessionHandles[device.deviceId]?.let(onPickFile) })
+                    }
+                    DividerLine()
                 }
             }
         }
         Panel {
-            FeatureLine("◇", "Direct device transfer", "Designed for local, peer-to-peer sharing.", "PLANNED")
-            DividerLine()
-            FeatureLine("↻", "Resume interrupted transfers", "Continue large transfers after a disconnect.", "PLANNED")
+            Eyebrow("INCOMING REQUESTS")
+            if (incomingOffers.isEmpty()) {
+                Text("No incoming file requests.", color = Muted, fontSize = 12.sp)
+            } else {
+                incomingOffers.forEach { offer ->
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(offer.fileName, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                        Text("${offer.deviceId} · ${"%.2f".format(offer.fileSize / 1048576.0)} MB", color = Muted, fontSize = 10.sp)
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            PrimaryAction("Accept", { onAccept(offer) }, Modifier.weight(1f))
+                            Button(onClick = { onReject(offer) }, colors = ButtonDefaults.buttonColors(containerColor = PanelAlt, contentColor = Amber)) {
+                                Text("Decline")
+                            }
+                        }
+                    }
+                    DividerLine()
+                }
+            }
         }
-        Text("File transport is not active yet.", color = Muted, fontSize = 10.sp)
+        Panel {
+            Eyebrow("RECEIVED FILES")
+            if (receivedFiles.isEmpty()) {
+                Text("Files you accept will appear here.", color = Muted, fontSize = 12.sp)
+            } else {
+                receivedFiles.forEach { file ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                            Text(file.name, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            Text("%.2f MB".format(file.length() / 1048576.0), color = Muted, fontSize = 10.sp)
+                        }
+                        Button(onClick = { onExportFile(file) }, colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Ink)) {
+                            Text("Save to…", fontWeight = FontWeight.Bold)
+                        }
+                    }
+                    DividerLine()
+                }
+            }
+        }
+        Panel {
+            Eyebrow("LIVE TRANSFER ACTIVITY")
+            Text(transferStatus, color = Color.White, fontSize = 12.sp, lineHeight = 18.sp)
+            val transferPercent = Regex("(\\d+)%").find(transferStatus)?.groupValues?.get(1)?.toFloatOrNull()?.div(100f)
+            if (transferPercent != null) {
+                Box(modifier = Modifier.fillMaxWidth().height(8.dp).background(PanelAlt, RoundedCornerShape(8.dp))) {
+                    Box(modifier = Modifier.fillMaxWidth(transferPercent.coerceIn(0f, 1f)).fillMaxHeight().background(Accent, RoundedCornerShape(8.dp)))
+                }
+            }
+            if (transferStatus.startsWith("Sending ") || transferStatus.startsWith("Receiving ") || transferStatus.startsWith("Waiting for the receiving device")) {
+                Button(onClick = onCancelTransfer, colors = ButtonDefaults.buttonColors(containerColor = PanelAlt, contentColor = Amber)) {
+                    Text("Cancel transfer")
+                }
+            }
+            Text("Received files stay private until you choose Save to… and select a destination such as Downloads.", color = Muted, fontSize = 10.sp, lineHeight = 15.sp)
+        }
+        Panel {
+            FeatureLine("◇", "Encrypted in transit", "Uses the authenticated Noise session.", "ACTIVE")
+            DividerLine()
+            FeatureLine("✓", "SHA-256 integrity", "Files are checked before being published.", "ACTIVE")
+            DividerLine()
+            FeatureLine("▣", "No overwrite", "Existing files are kept; received files get a numbered name.", "ACTIVE")
+        }
+        PrimaryAction("＋   Pair a device", onPair, Modifier.fillMaxWidth())
     }
 }
 

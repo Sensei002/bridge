@@ -1,0 +1,14 @@
+[package]
+name = "bridge-transfer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Validated, bounded and collision-safe file transfer primitives for Bridge"
+
+[dependencies]
+hex = "0.4"
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+thiserror.workspace = true
+uuid.workspace = true

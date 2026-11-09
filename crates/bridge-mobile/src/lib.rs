@@ -4,7 +4,7 @@ use std::{
     ffi::{CStr, CString},
     net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs},
     os::raw::c_char,
-    sync::{Arc, Mutex, OnceLock, atomic::{AtomicU64, Ordering}},
+    sync::{Arc, Mutex, OnceLock, mpsc::{self, Receiver}, atomic::{AtomicBool, AtomicU64, Ordering}},
     thread,
     time::{Duration, Instant},
 };
@@ -15,9 +15,11 @@ use serde::{Deserialize, Serialize};
 
 const MAX_ACTIVE_SESSIONS: usize = 32;
 static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
-static SESSIONS: OnceLock<Mutex<HashMap<u64, Arc<Mutex<NoiseConnection>>>>> = OnceLock::new();
+struct SessionEntry { connection: Arc<Mutex<NoiseConnection>>, incoming: Mutex<Receiver<Vec<u8>>>, stop: Arc<AtomicBool> }
 
-fn sessions() -> &'static Mutex<HashMap<u64, Arc<Mutex<NoiseConnection>>>> {
+static SESSIONS: OnceLock<Mutex<HashMap<u64, Arc<SessionEntry>>>> = OnceLock::new();
+
+fn sessions() -> &'static Mutex<HashMap<u64, Arc<SessionEntry>>> {
     SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -82,7 +84,29 @@ fn register(
         error: None,
         role: Some(role.into()),
     };
-    registry.insert(handle, Arc::new(Mutex::new(connection)));
+    let reader_stream = connection.stream.try_clone().map_err(|error| error.to_string())?;
+    // Keep the dispatcher alive while the peer is idle; shutdown on session close wakes this read.
+    let connection = Arc::new(Mutex::new(connection));
+    reader_stream.set_read_timeout(None).map_err(|error| error.to_string())?;
+    let (sender, incoming) = mpsc::sync_channel(8);
+    let stop = Arc::new(AtomicBool::new(false));
+    let reader_connection = Arc::clone(&connection);
+    let reader_stop = Arc::clone(&stop);
+    thread::Builder::new().name(format!("bridge-session-reader-{handle}")).spawn(move || {
+        while !reader_stop.load(Ordering::Acquire) {
+            let encrypted = match bridge_network::read_frame(&mut &reader_stream) { Ok(frame) => frame, Err(_) => break };
+            let plaintext = {
+                let mut guard = match reader_connection.lock() { Ok(guard) => guard, Err(_) => break };
+                let mut plaintext = vec![0_u8; MAX_APPLICATION_BYTES];
+                match guard.transport.read_message(&encrypted, &mut plaintext) {
+                    Ok(length) => { plaintext.truncate(length); plaintext },
+                    Err(_) => break,
+                }
+            };
+            if sender.send(plaintext).is_err() { break; }
+        }
+    }).map_err(|error| error.to_string())?;
+    registry.insert(handle, Arc::new(SessionEntry { connection, incoming: Mutex::new(incoming), stop }));
     Ok(result)
 }
 
@@ -194,6 +218,34 @@ pub unsafe extern "C" fn bridge_pair_accept(request_json: *const c_char) -> *mut
 }
 
 
+const MAX_APPLICATION_BYTES: usize = 65_519;
+
+fn session_send_payload(handle: u64, message: &[u8]) -> Result<(), String> {
+    if message.is_empty() || message.len() > MAX_APPLICATION_BYTES {
+        return Err(format!("application message length must be 1..={MAX_APPLICATION_BYTES} bytes"));
+    }
+    let session = sessions().lock()
+        .map_err(|_| "session registry poisoned".to_string())
+        .and_then(|map| map.get(&handle).cloned().ok_or_else(|| "session not found".to_string()))?;
+    let mut connection = session.connection.lock().map_err(|_| "session lock poisoned".to_string())?;
+    let mut encrypted = vec![0_u8; 65_535];
+    let length = connection.transport.write_message(message, &mut encrypted)
+        .map_err(|e: snow::Error| e.to_string())?;
+    bridge_network::write_frame(&mut connection.stream, &encrypted[..length])
+        .map_err(|e: bridge_network::NetworkError| e.to_string())
+}
+
+fn session_receive_payload(handle: u64) -> Result<Vec<u8>, String> {
+    let session = sessions().lock()
+        .map_err(|_| "session registry poisoned".to_string())
+        .and_then(|map| map.get(&handle).cloned().ok_or_else(|| "session not found".to_string()))?;
+    let receiver = session.incoming.lock().map_err(|_| "session receive queue poisoned".to_string())?;
+    receiver.recv_timeout(Duration::from_secs(120)).map_err(|error| match error {
+        mpsc::RecvTimeoutError::Timeout => "session receive timed out".to_string(),
+        mpsc::RecvTimeoutError::Disconnected => "session reader disconnected".to_string(),
+    })
+}
+
 /// Encrypt and send one UTF-8 application message on an established session.
 ///
 /// # Safety
@@ -206,20 +258,26 @@ pub unsafe extern "C" fn bridge_session_send(handle: u64, message: *const c_char
         Ok(value) => value.as_bytes(),
         Err(error) => return to_json(Err(error.to_string())).into_raw(),
     };
-    // Clone the per-session handle while holding the registry lock briefly.
-    // Never hold the global registry while doing socket I/O: a receive waiting
-    // on one peer must not prevent the accept loop from registering another.
-    let session = sessions().lock()
-        .map_err(|_| "session registry poisoned".to_string())
-        .and_then(|map| map.get(&handle).cloned().ok_or_else(|| "session not found".to_string()));
-    let result: Result<(), String> = session.and_then(|session| {
-        let mut connection = session.lock().map_err(|_| "session lock poisoned".to_string())?;
-        let mut encrypted = vec![0_u8; 65_535];
-        let length = connection.transport.write_message(message, &mut encrypted)
-            .map_err(|e: snow::Error| e.to_string())?;
-        bridge_network::write_frame(&mut connection.stream, &encrypted[..length])
-            .map_err(|e: bridge_network::NetworkError| e.to_string())
+    let result = session_send_payload(handle, message);
+    let response = result.map(|()| PairResult {
+        ok: true, handle: Some(handle), remote_fingerprint: None,
+        remote_device: None, error: None, role: None,
     });
+    to_json(response).into_raw()
+}
+
+/// Encrypt and send one bounded binary application message on an established session.
+///
+/// # Safety
+/// `data` must point to `length` readable bytes, or be null only when rejected.
+/// The returned allocation must be released with `bridge_string_free`.
+#[no_mangle]
+pub unsafe extern "C" fn bridge_session_send_bytes(handle: u64, data: *const u8, length: usize) -> *mut c_char {
+    if data.is_null() { return to_json(Err("null byte payload".into())).into_raw(); }
+    if length == 0 || length > MAX_APPLICATION_BYTES {
+        return to_json(Err(format!("application message length must be 1..={MAX_APPLICATION_BYTES} bytes"))).into_raw();
+    }
+    let result = session_send_payload(handle, std::slice::from_raw_parts(data, length));
     let response = result.map(|()| PairResult {
         ok: true, handle: Some(handle), remote_fingerprint: None,
         remote_device: None, error: None, role: None,
@@ -229,32 +287,21 @@ pub unsafe extern "C" fn bridge_session_send(handle: u64, message: *const c_char
 
 #[no_mangle]
 pub extern "C" fn bridge_session_receive(handle: u64) -> *mut c_char {
-    // The registry lock is released before the potentially long blocking read.
-    let session = sessions().lock()
-        .map_err(|_| "session registry poisoned".to_string())
-        .and_then(|map| map.get(&handle).cloned().ok_or_else(|| "session not found".to_string()));
-    let result: Result<String, String> = session.and_then(|session| {
-        let mut connection = session.lock().map_err(|_| "session lock poisoned".to_string())?;
-        connection.stream.set_read_timeout(Some(Duration::from_secs(120)))
-            .map_err(|e| e.to_string())?;
-        let received = (|| {
-            let encrypted = bridge_network::read_frame(&mut connection.stream)
-                .map_err(|e: bridge_network::NetworkError| e.to_string())?;
-            let mut plaintext = vec![0_u8; 65_535];
-            let length = connection.transport.read_message(&encrypted, &mut plaintext)
-                .map_err(|e: snow::Error| e.to_string())?;
-            String::from_utf8(plaintext[..length].to_vec()).map_err(|e: std::string::FromUtf8Error| e.to_string())
-        })();
-        let _ = connection.stream.set_read_timeout(Some(Duration::from_secs(10)));
-        received
+    let result = session_receive_payload(handle).and_then(|bytes| {
+        String::from_utf8(bytes).map_err(|e| e.to_string())
     });
     let json = serde_json::json!({"ok": result.is_ok(), "message": result.as_ref().ok(), "error": result.err()});
     CString::new(json.to_string()).unwrap().into_raw()
 }
 
+
 #[no_mangle]
 pub extern "C" fn bridge_session_close(handle: u64) {
-    if let Ok(mut map) = sessions().lock() { map.remove(&handle); }
+    let entry = sessions().lock().ok().and_then(|mut map| map.remove(&handle));
+    if let Some(entry) = entry {
+        entry.stop.store(true, Ordering::Release);
+        if let Ok(connection) = entry.connection.lock() { let _ = connection.stream.shutdown(std::net::Shutdown::Both); }
+    }
 }
 
 /// Release a string allocated by another Bridge FFI function.
@@ -328,6 +375,33 @@ mod android_jni {
         let response = unsafe { CStr::from_ptr(output).to_string_lossy().into_owned() };
         unsafe { bridge_string_free(output); }
         env.new_string(response).map(|value| value.into_raw()).unwrap_or(std::ptr::null_mut())
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_app_bridge_android_BridgeNative_sessionSendBytes(
+        mut env: JNIEnv, _class: JClass, handle: jni::sys::jlong, data: jni::objects::JByteArray
+    ) -> jstring {
+        let bytes = match env.convert_byte_array(&data) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                let response = serde_json::json!({"ok": false, "error": error.to_string()}).to_string();
+                return env.new_string(response).map(|value| value.into_raw()).unwrap_or(std::ptr::null_mut());
+            }
+        };
+        let output = unsafe { bridge_session_send_bytes(handle as u64, bytes.as_ptr(), bytes.len()) };
+        let response = unsafe { CStr::from_ptr(output).to_string_lossy().into_owned() };
+        unsafe { bridge_string_free(output); }
+        env.new_string(response).map(|value| value.into_raw()).unwrap_or(std::ptr::null_mut())
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_app_bridge_android_BridgeNative_sessionReceiveBytes(
+        mut env: JNIEnv, _class: JClass, handle: jni::sys::jlong
+    ) -> jni::sys::jbyteArray {
+        match session_receive_payload(handle as u64) {
+            Ok(bytes) => env.byte_array_from_slice(&bytes).map(|value| value.into_raw()).unwrap_or(std::ptr::null_mut()),
+            Err(_) => std::ptr::null_mut(),
+        }
     }
 
     #[no_mangle]
@@ -419,6 +493,17 @@ mod tests {
         let parsed_decision: serde_json::Value = serde_json::from_str(received_decision["message"].as_str().unwrap()).unwrap();
         assert_eq!(parsed_decision["type"], "pairing_decision");
         assert_eq!(parsed_decision["decision"], "accepted");
+
+        // The background reader must not hold the Noise session lock while
+        // waiting for inbound data: a simultaneous outbound send must proceed.
+        let waiting_receiver = thread::spawn(move || session_receive_payload(initiator_handle).unwrap());
+        session_send_payload(initiator_handle, b"full-duplex request").unwrap();
+        assert_eq!(session_receive_payload(responder_handle).unwrap(), b"full-duplex request");
+        session_send_payload(responder_handle, b"full-duplex response").unwrap();
+        assert_eq!(waiting_receiver.join().unwrap(), b"full-duplex response");
+        let binary_payload = vec![0x00, 0xff, 0x42, 0x00, 0x80, 0x7f];
+        session_send_payload(initiator_handle, &binary_payload).unwrap();
+        assert_eq!(session_receive_payload(responder_handle).unwrap(), binary_payload);
 
         let message = CString::new("encrypted native bridge payload").unwrap();
         let sent = unsafe { take_json(bridge_session_send(initiator_handle, message.as_ptr())) };
