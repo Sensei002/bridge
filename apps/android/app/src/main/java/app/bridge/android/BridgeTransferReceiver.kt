@@ -221,6 +221,7 @@ internal class BridgeTransferReceiver(
             lock.withLock {
             val queue = queues[offer.handle] ?: return@withLock
             var temporary: File? = null
+            var peerCancelled = false
             try {
                 sendControl(offer.handle, JSONObject()
                     .put("type", "file_accept")
@@ -236,6 +237,15 @@ internal class BridgeTransferReceiver(
                     while (received < offer.fileSize) {
                         check(!cancelFlag.get()) { "Transfer cancelled by you." }
                         val packet = queue.poll(1, TimeUnit.SECONDS) ?: continue
+                        if (packet.isNotEmpty() && packet[0].toInt() == CONTROL_TAG) {
+                            val control = parseControl(packet)
+                            if (control.optString("type") == "file_cancel" &&
+                                control.optString("transfer_id") == offer.transferId) {
+                                peerCancelled = true
+                                error("Transfer cancelled by the sending device.")
+                            }
+                            error("Unexpected transfer control message: ${control.optString("type")}")
+                        }
                         check(packet[0].toInt() == CHUNK_TAG) { "Expected a file data packet." }
                         check(packet.size > CHUNK_HEADER_SIZE + 1) { "Invalid empty data chunk." }
                         check(String(packet, 1, 4, Charsets.US_ASCII) == "BRF1") { "Unknown data chunk format." }
@@ -269,14 +279,16 @@ internal class BridgeTransferReceiver(
                 postStatus("Received ${offer.fileName}. Saved inside Bridge's app storage.")
             } catch (error: Exception) {
                 temporary?.delete()
-                try {
-                    sendControl(offer.handle, JSONObject()
-                        .put("type", "file_cancel")
-                        .put("transfer_id", offer.transferId))
-                    // Drain queued chunks until the sender acknowledges cancellation.
-                    // A full queue must never leave the single session reader blocked.
-                    awaitPeerCancellation(queue, offer.transferId)
-                } catch (_: Exception) { }
+                if (!peerCancelled) {
+                    try {
+                        sendControl(offer.handle, JSONObject()
+                            .put("type", "file_cancel")
+                            .put("transfer_id", offer.transferId))
+                        // Drain queued chunks until the sender acknowledges our cancellation.
+                        // A full queue must never leave the single session reader blocked.
+                        awaitPeerCancellation(queue, offer.transferId)
+                    } catch (_: Exception) { }
+                }
                 postStatus("Could not receive ${offer.fileName}: ${error.message}")
             } finally {
                 cancellations.remove(offer.transferId)
