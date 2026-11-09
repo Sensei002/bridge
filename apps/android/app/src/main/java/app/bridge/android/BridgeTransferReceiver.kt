@@ -45,7 +45,7 @@ internal class BridgeTransferReceiver(
 
     fun attach(deviceId: String, handle: Long) {
         if (readers.containsKey(handle)) return
-        val queue = LinkedBlockingQueue<ByteArray>()
+        val queue = LinkedBlockingQueue<ByteArray>(8)
         queues[handle] = queue
         val thread = Thread({
             try {
