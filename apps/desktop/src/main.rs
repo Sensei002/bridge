@@ -766,11 +766,8 @@ fn start_local_discovery(status: Sender<String>, peers: Sender<DiscoveredPeer>) 
                             let _ = peers.send(peer);
                         }
                     }
-                    Err(mdns_sd::Error::RecvTimeout(_)) => {
-                        // Periodic refresh is also the fallback for network
-                        // changes that do not produce a clean mDNS error.
-                        break;
-                    }
+                    // A timeout or channel error triggers a daemon refresh.
+                    // This also covers Wi-Fi changes that do not surface as mDNS errors.
                     Err(_) => break,
                 }
             }
