@@ -24,7 +24,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::sync::mpsc::Sender;
 #[cfg(windows)]
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const BG: egui::Color32 = egui::Color32::from_rgb(10, 11, 15);
 const SIDEBAR: egui::Color32 = egui::Color32::from_rgb(13, 15, 19);
@@ -165,7 +165,7 @@ struct PendingIncomingTransfer {
 #[cfg(windows)]
 enum TransferUiEvent {
     Status(String),
-    Progress { sent: u64, total: u64 },
+    Progress { sent: u64, total: u64, speed_bytes_per_sec: f64 },
     Complete(String),
     Failed(String),
 }
@@ -176,6 +176,7 @@ fn start_receive_file_transfer(
     offer: FileOffer,
     destination: PathBuf,
     events: Sender<TransferUiEvent>,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
 ) {
     let worker_events = events.clone();
     thread::Builder::new().name("bridge-file-receive".into()).spawn(move || {
@@ -191,13 +192,20 @@ fn start_receive_file_transfer(
             session.send(&packet)?;
             let mut incoming = IncomingFile::create(directory, accepted_offer.clone()).map_err(|error| error.to_string())?;
             let mut received = 0_u64;
+            let mut last_sample = Instant::now();
+            let mut last_bytes = 0_u64;
             while received < accepted_offer.file_size {
-                let packet = session.receive_timeout(Duration::from_secs(120))?;
+                if cancel.load(Ordering::Acquire) { return Err("Transfer cancelled by you.".into()); }
+                let packet = session.receive_timeout(Duration::from_secs(1))?;
                 match decode_packet(&packet).map_err(|error| error.to_string())? {
                     TransferPacket::Chunk(chunk) => {
                         received = received.saturating_add(chunk.data.len() as u64);
                         incoming.write_chunk(chunk).map_err(|error| error.to_string())?;
-                        let _ = worker_events.send(TransferUiEvent::Progress { sent: received, total: accepted_offer.file_size });
+                        let elapsed = last_sample.elapsed().as_secs_f64().max(0.001);
+                        let speed = (received.saturating_sub(last_bytes)) as f64 / elapsed;
+                        last_sample = Instant::now();
+                        last_bytes = received;
+                        let _ = worker_events.send(TransferUiEvent::Progress { sent: received, total: accepted_offer.file_size, speed_bytes_per_sec: speed });
                     }
                     _ => return Err("Unexpected packet while receiving file data.".into()),
                 }
@@ -240,14 +248,17 @@ fn start_file_transfer(
     session: Arc<DesktopSession>,
     path: PathBuf,
     events: Sender<TransferUiEvent>,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
 ) {
     let worker_events = events.clone();
     thread::Builder::new().name("bridge-file-send".into()).spawn(move || {
         let events = worker_events;
+        let mut active_transfer_id = None;
         let result = (|| -> Result<String, String> {
             let offer = offer_for_file(&path).map_err(|error| error.to_string())?;
             let file_name = offer.file_name.clone();
             let transfer_id = offer.transfer_id;
+            active_transfer_id = Some(transfer_id);
             let packet = encode_packet(&TransferPacket::Control(
                 TransferControl::FileOffer { offer: offer.clone() }
             )).map_err(|error| error.to_string())?;
@@ -265,11 +276,18 @@ fn start_file_transfer(
             let mut outgoing = OutgoingFile::open(&path, offer).map_err(|error| error.to_string())?;
             let total = outgoing.total_bytes();
             let mut sent = 0_u64;
+            let mut last_sample = Instant::now();
+            let mut last_bytes = 0_u64;
             while let Some(chunk) = outgoing.next_chunk().map_err(|error| error.to_string())? {
+                if cancel.load(Ordering::Acquire) { return Err("Transfer cancelled by you.".into()); }
                 sent = sent.saturating_add(chunk.data.len() as u64);
                 let packet = encode_packet(&TransferPacket::Chunk(chunk)).map_err(|error| error.to_string())?;
                 session.send(&packet)?;
-                let _ = events.send(TransferUiEvent::Progress { sent, total });
+                let elapsed = last_sample.elapsed().as_secs_f64().max(0.001);
+                let speed = (sent.saturating_sub(last_bytes)) as f64 / elapsed;
+                last_sample = Instant::now();
+                last_bytes = sent;
+                let _ = events.send(TransferUiEvent::Progress { sent, total, speed_bytes_per_sec: speed });
             }
             let response = session.receive_timeout(Duration::from_secs(120))?;
             match decode_packet(&response).map_err(|error| error.to_string())? {
@@ -282,7 +300,14 @@ fn start_file_transfer(
         })();
         match result {
             Ok(message) => { let _ = events.send(TransferUiEvent::Complete(message)); }
-            Err(error) => { let _ = events.send(TransferUiEvent::Failed(error)); }
+            Err(error) => {
+                if let Some(transfer_id) = active_transfer_id {
+                    if let Ok(packet) = encode_packet(&TransferPacket::Control(TransferControl::FileCancel { transfer_id })) {
+                        let _ = session.send(&packet);
+                    }
+                }
+                let _ = events.send(TransferUiEvent::Failed(error));
+            }
         }
     }).map_err(|error| {
         let _ = events.send(TransferUiEvent::Failed(format!("Could not start transfer worker: {error}")));
@@ -331,6 +356,10 @@ struct BridgeApp {
     transfer_busy: bool,
     #[cfg(windows)]
     transfer_progress: f32,
+    #[cfg(windows)]
+    transfer_speed: f64,
+    #[cfg(windows)]
+    transfer_cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
     #[cfg(windows)]
     transfer_status: String,
     #[cfg(windows)]
@@ -403,6 +432,10 @@ impl Default for BridgeApp {
             transfer_busy: false,
             #[cfg(windows)]
             transfer_progress: 0.0,
+            #[cfg(windows)]
+            transfer_speed: 0.0,
+            #[cfg(windows)]
+            transfer_cancel: None,
             #[cfg(windows)]
             transfer_status: "Choose a connected trusted device to send a file.".into(),
             #[cfg(windows)]
@@ -744,9 +777,10 @@ impl eframe::App for BridgeApp {
         for event in self.transfer_rx.try_iter() {
             match event {
                 TransferUiEvent::Status(message) => self.transfer_status = message,
-                TransferUiEvent::Progress { sent, total } => {
+                TransferUiEvent::Progress { sent, total, speed_bytes_per_sec } => {
                     self.transfer_progress = if total == 0 { 1.0 } else { sent as f32 / total as f32 };
-                    self.transfer_status = format!("Sending {} of {} bytes…", sent, total);
+                    self.transfer_speed = speed_bytes_per_sec;
+                    self.transfer_status = format!("{} / {} MB", sent as f64 / 1_048_576.0, total as f64 / 1_048_576.0);
                 }
                 TransferUiEvent::Complete(message) => {
                     self.transfer_busy = false;
