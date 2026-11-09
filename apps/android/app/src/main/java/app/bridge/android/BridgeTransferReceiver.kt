@@ -141,6 +141,8 @@ internal class BridgeTransferReceiver(
                     }
                     postStatus("Sending $displayName…")
                     val fileDigest = MessageDigest.getInstance("SHA-256")
+                    var lastSpeedSample = System.nanoTime()
+                    var lastSpeedBytes = 0L
                     FileInputStream(source).use { input ->
                         val buffer = ByteArray(CHUNK_DATA_BYTES)
                         var offset = 0L
@@ -163,7 +165,12 @@ internal class BridgeTransferReceiver(
                                 .array()
                             sendBytes(handle, chunk)
                             offset += read
-                            postStatus("Sending $displayName · ${(offset * 100 / maxOf(size, 1))}%")
+                            val now = System.nanoTime()
+                            val elapsed = ((now - lastSpeedSample).coerceAtLeast(1L)) / 1_000_000_000.0
+                            val speed = (offset - lastSpeedBytes) / elapsed / 1_048_576.0
+                            lastSpeedSample = now
+                            lastSpeedBytes = offset
+                            postStatus("Sending " + displayName + " · " + (offset * 100 / maxOf(size, 1)) + "% · " + "%.2f MB/s".format(speed))
                         }
                     }
                     val actualDigest = fileDigest.digest().joinToString("") { "%02x".format(it) }
@@ -203,6 +210,8 @@ internal class BridgeTransferReceiver(
                 FileOutputStream(temporary).use { output ->
                     val digest = MessageDigest.getInstance("SHA-256")
                     var received = 0L
+                    var lastSpeedSample = System.nanoTime()
+                    var lastSpeedBytes = 0L
                     while (received < offer.fileSize) {
                         val packet = queue.take()
                         check(packet[0].toInt() == CHUNK_TAG) { "Expected a file data packet." }
@@ -218,6 +227,12 @@ internal class BridgeTransferReceiver(
                         output.write(packet, dataOffset, count)
                         digest.update(packet, dataOffset, count)
                         received += count
+                        val now = System.nanoTime()
+                        val elapsed = ((now - lastSpeedSample).coerceAtLeast(1L)) / 1_000_000_000.0
+                        val speed = (received - lastSpeedBytes) / elapsed / 1_048_576.0
+                        lastSpeedSample = now
+                        lastSpeedBytes = received
+                        postStatus("Receiving " + offer.fileName + " · " + (received * 100 / maxOf(offer.fileSize, 1)) + "% · " + "%.2f MB/s".format(speed))
                     }
                     output.fd.sync()
                     val actual = digest.digest().joinToString("") { "%02x".format(it) }
