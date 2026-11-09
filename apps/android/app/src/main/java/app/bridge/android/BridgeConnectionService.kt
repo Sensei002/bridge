@@ -296,52 +296,52 @@ class BridgeConnectionService : Service() {
         }
     }
 
-    fun pair(peer: BridgePeer) {
+    internal fun pair(peer: BridgePeer) {
         pairingController?.pair(peer)
     }
 
-    fun approve(pending: BridgePendingPairing) {
+    internal fun approve(pending: BridgePendingPairing) {
         pairingController?.approve(pending)
         BridgeRuntimeState.pendingPairings.remove(pending)
         BridgeRuntimeState.trustedDevices.clear()
         BridgeRuntimeState.trustedDevices.addAll(controllerTrustedDevices())
     }
 
-    fun reject(pending: BridgePendingPairing) {
+    internal fun reject(pending: BridgePendingPairing) {
         pairingController?.reject(pending)
         BridgeRuntimeState.pendingPairings.remove(pending)
     }
 
-    fun revoke(deviceId: String) {
+    internal fun revoke(deviceId: String) {
         pairingController?.revoke(deviceId)
         BridgeRuntimeState.trustedDevices.clear()
         BridgeRuntimeState.trustedDevices.addAll(controllerTrustedDevices())
     }
 
-    fun trustedDevices(): List<BridgeTrustedDevice> = controllerTrustedDevices()
+    internal fun trustedDevices(): List<BridgeTrustedDevice> = controllerTrustedDevices()
 
     private fun controllerTrustedDevices(): List<BridgeTrustedDevice> =
         try { pairingController?.trustedDevices().orEmpty() } catch (_: Exception) { emptyList() }
 
-    fun sendFile(uri: Uri, sessionHandle: Long) {
+    internal fun sendFile(uri: Uri, sessionHandle: Long) {
         transferReceiver?.sendFile(uri, sessionHandle)
     }
 
-    fun cancelTransfers() {
+    internal fun cancelTransfers() {
         transferReceiver?.cancelAll()
     }
 
-    fun acceptTransfer(offer: BridgeIncomingOffer) {
+    internal fun acceptTransfer(offer: BridgeIncomingOffer) {
         transferReceiver?.accept(offer)
         BridgeRuntimeState.incomingOffers.remove(offer)
     }
 
-    fun rejectTransfer(offer: BridgeIncomingOffer) {
+    internal fun rejectTransfer(offer: BridgeIncomingOffer) {
         transferReceiver?.reject(offer)
         BridgeRuntimeState.incomingOffers.remove(offer)
     }
 
-    fun refreshReceivedFiles() {
+    internal fun refreshReceivedFiles() {
         val directory = File(filesDir, "Bridge/Received")
         val files = directory.listFiles()?.filter { it.isFile && !it.name.startsWith(".bridge-") }
             ?.sortedByDescending { it.lastModified() }.orEmpty()
