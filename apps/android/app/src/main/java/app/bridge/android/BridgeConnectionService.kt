@@ -69,8 +69,9 @@ class BridgeConnectionService : Service() {
             mainHandler.post {
                 if (stopping) return@post
                 pairingController?.onNetworkLost()
+                // Close active transfers, but keep the receiver reusable: new
+                // authenticated session handles are attached after Wi-Fi returns.
                 transferReceiver?.cancelAll()
-                transferReceiver?.stop()
                 BridgeRuntimeState.connectedSessionHandles.clear()
                 BridgeRuntimeState.pairingStatus.value = "Wi-Fi disconnected. Waiting to reconnect…"
             }
