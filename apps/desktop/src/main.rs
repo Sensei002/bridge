@@ -909,6 +909,18 @@ impl eframe::App for BridgeApp {
                                 .show(ui, |ui| { ui.label(egui::RichText::new("●").color(GREEN)); });
                             ui.vertical(|ui| {
                                 ui.label(egui::RichText::new("This device").strong().size(12.0));
+                                #[cfg(windows)]
+                                {
+                                    let connected = self.active_sessions.len();
+                                    muted(ui, &if connected == 0 {
+                                        "Waiting for pairing".to_owned()
+                                    } else if connected == 1 {
+                                        "1 device connected".to_owned()
+                                    } else {
+                                        format!("{connected} devices connected")
+                                    });
+                                }
+                                #[cfg(not(windows))]
                                 muted(ui, "Waiting for pairing");
                             });
                         });
