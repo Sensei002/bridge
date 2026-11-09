@@ -157,7 +157,9 @@ fn start_file_transfer(
     path: PathBuf,
     events: Sender<TransferUiEvent>,
 ) {
+    let worker_events = events.clone();
     thread::Builder::new().name("bridge-file-send".into()).spawn(move || {
+        let events = worker_events;
         let result = (|| -> Result<String, String> {
             let offer = offer_for_file(&path).map_err(|error| error.to_string())?;
             let file_name = offer.file_name.clone();
@@ -1009,7 +1011,7 @@ impl eframe::App for BridgeApp {
                             let targets = self.trust_store.list().into_iter().filter_map(|device| {
                                 self.active_sessions.iter()
                                     .find(|session| session.remote_fingerprint.eq_ignore_ascii_case(&device.public_key_fingerprint))
-                                    .map(|session| (device.public_key_fingerprint, device.descriptor.display_name, Arc::clone(session)))
+                                    .map(|session| (device.public_key_fingerprint.clone(), device.descriptor.display_name.clone(), Arc::clone(session)))
                             }).collect::<Vec<_>>();
                             if self.selected_transfer_fingerprint.is_none() {
                                 self.selected_transfer_fingerprint = targets.first().map(|target| target.0.clone());
