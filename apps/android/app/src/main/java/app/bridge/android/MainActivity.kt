@@ -65,6 +65,9 @@ class MainActivity : ComponentActivity() {
     private val discoveredPeers = mutableStateListOf<BridgePeer>()
     private val pendingPairings = mutableStateListOf<BridgePendingPairing>()
     private val trustedDevices = mutableStateListOf<BridgeTrustedDevice>()
+    private val incomingOffers = mutableStateListOf<BridgeIncomingOffer>()
+    private var transferStatus by mutableStateOf("Waiting for a connected trusted device.")
+    @Volatile private var transferReceiver: BridgeTransferReceiver? = null
     private var pairingStatus by mutableStateOf("Preparing secure device identity…")
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -78,6 +81,10 @@ class MainActivity : ComponentActivity() {
                 pendingPairings = pendingPairings,
                 trustedDevices = trustedDevices,
                 pairingStatus = pairingStatus,
+                incomingOffers = incomingOffers,
+                transferStatus = transferStatus,
+                onAcceptTransfer = { offer -> transferReceiver?.accept(offer); incomingOffers.remove(offer) },
+                onRejectTransfer = { offer -> transferReceiver?.reject(offer); incomingOffers.remove(offer) },
                 onPair = { peer -> pairingController?.pair(peer) },
                 onApprove = { pending ->
                     pairingController?.approve(pending)
@@ -109,8 +116,14 @@ class MainActivity : ComponentActivity() {
                     check(identityPreferences.edit().putString("device_id", it).commit())
                 }
 
+                val receiver = BridgeTransferReceiver(
+                    this,
+                    onOffer = { offer -> incomingOffers.add(offer) },
+                    onStatus = { message -> transferStatus = message }
+                )
+                transferReceiver = receiver
                 val controller = BridgePairingController(
-                    this, privateKey, fingerprint, deviceId,
+                    this, privateKey, fingerprint,
                     onPending = { pendingPairings.add(it) },
                     onStatus = { message ->
                         pairingStatus = message
@@ -126,6 +139,7 @@ class MainActivity : ComponentActivity() {
                     return@Thread
                 }
                 pairingController = controller
+                controller.onSessionReady = { peerId, handle -> receiver.attach(peerId, handle) }
                 controller.start()
 
                 val networkDiscovery = BridgeDiscovery(this, { peer ->
@@ -163,6 +177,8 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         destroyed = true
         pairingController?.stop()
+        transferReceiver?.stop()
+        transferReceiver = null
         discovery?.stop()
         discovery = null
         super.onDestroy()
@@ -231,6 +247,10 @@ private fun BridgeApp(
     pendingPairings: List<BridgePendingPairing>,
     trustedDevices: List<BridgeTrustedDevice>,
     pairingStatus: String,
+    incomingOffers: List<BridgeIncomingOffer>,
+    transferStatus: String,
+    onAcceptTransfer: (BridgeIncomingOffer) -> Unit,
+    onRejectTransfer: (BridgeIncomingOffer) -> Unit,
     onPair: (BridgePeer) -> Unit,
     onApprove: (BridgePendingPairing) -> Unit,
     onReject: (BridgePendingPairing) -> Unit,
@@ -268,7 +288,13 @@ private fun BridgeApp(
                             onReject = onReject,
                             onRevoke = onRevoke
                         )
-                        BridgeTab.Transfers -> TransfersScreen(onPair = { showPairDialog = true })
+                        BridgeTab.Transfers -> TransfersScreen(
+                            incomingOffers = incomingOffers,
+                            transferStatus = transferStatus,
+                            onAccept = onAcceptTransfer,
+                            onReject = onRejectTransfer,
+                            onPair = { showPairDialog = true }
+                        )
                         BridgeTab.Clipboard -> ClipboardScreen(
                             enabled = clipboardSync,
                             onEnabledChange = { clipboardSync = it }
@@ -568,30 +594,48 @@ private fun DevicesScreen(
 }
 
 @Composable
-private fun TransfersScreen(onPair: () -> Unit) {
+private fun TransfersScreen(
+    incomingOffers: List<BridgeIncomingOffer>,
+    transferStatus: String,
+    onAccept: (BridgeIncomingOffer) -> Unit,
+    onReject: (BridgeIncomingOffer) -> Unit,
+    onPair: () -> Unit
+) {
     ScreenContent {
-        ScreenHeading("MOVE WITHOUT LIMITS", "File transfers", "Send files between your trusted devices. Privately.")
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            StatusTag("ALL TRANSFERS", Accent)
-            StatusTag("SENDING")
-            StatusTag("RECEIVED")
-        }
+        ScreenHeading("MOVE WITHOUT LIMITS", "File transfers", "Receive files over your authenticated, encrypted local connection.")
         Panel {
-            Box(modifier = Modifier.fillMaxWidth().padding(vertical = 20.dp), contentAlignment = Alignment.Center) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(9.dp)) {
-                    Text("⇧", color = Accent, fontSize = 42.sp)
-                    Text("Nothing moving yet", color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.Bold)
-                    Text("Your sent and received files will show up here.", color = Muted, fontSize = 11.sp)
-                    PrimaryAction("＋   Choose files", onPair)
+            Eyebrow("INCOMING REQUESTS")
+            if (incomingOffers.isEmpty()) {
+                Text("No incoming file requests.", color = Muted, fontSize = 12.sp)
+            } else {
+                incomingOffers.forEach { offer ->
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(offer.fileName, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                        Text("${offer.deviceId} · ${"%.2f".format(offer.fileSize / 1048576.0)} MB", color = Muted, fontSize = 10.sp)
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            PrimaryAction("Accept", { onAccept(offer) }, Modifier.weight(1f))
+                            Button(onClick = { onReject(offer) }, colors = ButtonDefaults.buttonColors(containerColor = PanelAlt, contentColor = Amber)) {
+                                Text("Decline")
+                            }
+                        }
+                    }
+                    DividerLine()
                 }
             }
         }
         Panel {
-            FeatureLine("◇", "Direct device transfer", "Designed for local, peer-to-peer sharing.", "PLANNED")
-            DividerLine()
-            FeatureLine("↻", "Resume interrupted transfers", "Continue large transfers after a disconnect.", "PLANNED")
+            Eyebrow("TRANSFER STATUS")
+            Text(transferStatus, color = Color.White, fontSize = 12.sp, lineHeight = 18.sp)
+            Text("Accepted files are saved in Bridge's private app storage under Bridge/Received.", color = Muted, fontSize = 10.sp, lineHeight = 15.sp)
         }
-        Text("File transport is not active yet.", color = Muted, fontSize = 10.sp)
+        Panel {
+            FeatureLine("◇", "Encrypted in transit", "Uses the authenticated Noise session.", "ACTIVE")
+            DividerLine()
+            FeatureLine("✓", "SHA-256 integrity", "Files are checked before being published.", "ACTIVE")
+            DividerLine()
+            FeatureLine("▣", "No overwrite", "Existing files are kept; received files get a numbered name.", "ACTIVE")
+        }
+        PrimaryAction("＋   Pair a device", onPair, Modifier.fillMaxWidth())
     }
 }
 
