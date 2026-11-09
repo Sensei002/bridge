@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+    Name="Bridge"
+    Manufacturer="Bridge Project"
+    Version="$(var.ProductVersion)"
+    UpgradeCode="{7D9A3E4C-6D13-4C0D-9A4F-8B7E6D3C2A10}"
+    Scope="perUser"
+    InstallerVersion="500"
+    Compressed="yes">
+
+    <SummaryInformation Description="Bridge — Connect, Share, Beyond" Manufacturer="Bridge Project" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Bridge is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="ProgramsFolder" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="Bridge" />
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ApplicationProgramsFolder" Name="Bridge" />
+    </StandardDirectory>
+
+    <Feature Id="MainFeature" Title="Bridge" Level="1">
+      <ComponentGroupRef Id="BridgeFiles" />
+      <ComponentGroupRef Id="BridgeShortcuts" />
+    </Feature>
+
+    <ComponentGroup Id="BridgeFiles" Directory="INSTALLFOLDER">
+      <Component Id="BridgeExecutable" Guid="*">
+        <File Id="BridgeExecutableFile" Source="$(var.PublishDir)\bridge-desktop.exe" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <ComponentGroup Id="BridgeShortcuts">
+      <Component Id="BridgeStartMenuShortcut" Directory="ApplicationProgramsFolder" Guid="*">
+        <Shortcut
+          Id="BridgeStartMenuShortcut"
+          Name="Bridge"
+          Target="[INSTALLFOLDER]bridge-desktop.exe"
+          WorkingDirectory="INSTALLFOLDER" />
+        <RemoveFolder Id="RemoveBridgeStartMenuFolder" On="uninstall" />
+        <RegistryValue Root="HKCU" Key="Software\Bridge" Name="installed" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+  </Package>
+</Wix>
