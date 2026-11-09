@@ -159,6 +159,14 @@ impl DesktopSession {
             .recv_timeout(timeout).map_err(|error| error.to_string())
     }
 
+    fn try_receive_packet(&self) -> Result<Option<Vec<u8>>, String> {
+        match self.incoming.lock().map_err(|_| "session receiver lock poisoned")?.try_recv() {
+            Ok(packet) => Ok(Some(packet)),
+            Err(mpsc::TryRecvError::Empty) => Ok(None),
+            Err(mpsc::TryRecvError::Disconnected) => Err("The secure session reader has stopped.".into()),
+        }
+    }
+
     fn try_receive_offer(&self) -> Option<FileOffer> {
         self.incoming_offers.lock().ok()?.try_recv().ok()
     }
@@ -310,6 +318,15 @@ fn start_file_transfer(
             let mut last_bytes = 0_u64;
             while let Some(chunk) = outgoing.next_chunk().map_err(|error| error.to_string())? {
                 if cancel.load(Ordering::Acquire) { return Err("Transfer cancelled by you.".into()); }
+                if let Some(packet) = session.try_receive_packet()? {
+                    match decode_packet(&packet).map_err(|error| error.to_string())? {
+                        TransferPacket::Control(TransferControl::FileCancel { transfer_id: cancelled })
+                            if cancelled == transfer_id => {
+                                return Err("The receiving device cancelled the transfer.".into());
+                            }
+                        _ => return Err("The receiving device sent an unexpected message during file transfer.".into()),
+                    }
+                }
                 sent = sent.saturating_add(chunk.data.len() as u64);
                 let packet = encode_packet(&TransferPacket::Chunk(chunk)).map_err(|error| error.to_string())?;
                 session.send(&packet)?;
