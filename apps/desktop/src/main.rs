@@ -888,6 +888,7 @@ fn feature_row(ui: &mut egui::Ui, symbol: &str, title: &str, detail: &str, statu
 
 impl eframe::App for BridgeApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        ctx.request_repaint_after(Duration::from_millis(500));
         for message in self.network_rx.try_iter() {
             self.network_status = message;
         }
