@@ -980,7 +980,7 @@ private fun SettingsScreen(
         Panel {
             Eyebrow("THIS DEVICE")
             Text("Android device", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-            Text("Bridge mobile · Version 0.3 preview", color = Muted, fontSize = 11.sp)
+            Text("Bridge mobile · Version ${BuildConfig.VERSION_NAME}", color = Muted, fontSize = 11.sp)
             StatusTag("NOT PAIRED")
         }
         Panel {
