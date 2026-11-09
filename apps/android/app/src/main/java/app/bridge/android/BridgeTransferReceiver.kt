@@ -137,7 +137,7 @@ internal class BridgeTransferReceiver(
                     postStatus("Waiting for the receiving device to approve $displayName…")
                     val queue = queues[handle] ?: error("The secure device session is no longer available.")
                     var acceptedPacket: ByteArray? = null
-                    val approvalDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(120)
+                    val approvalDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(600)
                     while (acceptedPacket == null && System.nanoTime() < approvalDeadline) {
                         check(!cancelFlag.get()) { "Transfer cancelled by you." }
                         acceptedPacket = queue.poll(1, TimeUnit.SECONDS)
