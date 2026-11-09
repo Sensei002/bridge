@@ -93,9 +93,10 @@ internal class BridgeTransferReceiver(
                     validateFileName(displayName)
                     val outgoingDir = File(appContext.cacheDir, "Bridge/Outgoing")
                     check(outgoingDir.exists() || outgoingDir.mkdirs()) { "Could not prepare temporary file storage." }
-                    staged = File(outgoingDir, ".bridge-send-${UUID.randomUUID()}.part")
+                    val stagingFile = File(outgoingDir, ".bridge-send-${UUID.randomUUID()}.part")
+                    staged = stagingFile
                     appContext.contentResolver.openInputStream(uri)?.use { input ->
-                        FileOutputStream(staged).use { output ->
+                        FileOutputStream(stagingFile).use { output ->
                             val buffer = ByteArray(64 * 1024)
                             var total = 0L
                             while (true) {
@@ -108,7 +109,7 @@ internal class BridgeTransferReceiver(
                             output.fd.sync()
                         }
                     } ?: error("Android could not open the selected file.")
-                    val source = staged
+                    val source = requireNotNull(staged)
                     val size = source.length()
                     val digest = MessageDigest.getInstance("SHA-256")
                     FileInputStream(source).use { input ->
