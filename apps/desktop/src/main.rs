@@ -80,6 +80,7 @@ struct DesktopSession {
     incoming: std::sync::Mutex<Receiver<Vec<u8>>>,
     incoming_offers: std::sync::Mutex<Receiver<FileOffer>>,
     stop: Arc<std::sync::atomic::AtomicBool>,
+    alive: Arc<std::sync::atomic::AtomicBool>,
     pub remote_fingerprint: String,
 }
 
@@ -93,6 +94,8 @@ impl DesktopSession {
         let reader_connection = Arc::clone(&connection);
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let reader_stop = Arc::clone(&stop);
+        let alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let reader_alive = Arc::clone(&alive);
         let (sender, incoming) = mpsc::sync_channel(8);
         let (offer_sender, incoming_offers) = mpsc::channel();
         thread::Builder::new()
@@ -123,19 +126,32 @@ impl DesktopSession {
                         }
                     }
                 }
+                reader_alive.store(false, Ordering::Release);
             })
             .map_err(|error| error.to_string())?;
-        Ok(Arc::new(Self { connection, incoming: std::sync::Mutex::new(incoming), incoming_offers: std::sync::Mutex::new(incoming_offers), stop, remote_fingerprint }))
+        Ok(Arc::new(Self { connection, incoming: std::sync::Mutex::new(incoming), incoming_offers: std::sync::Mutex::new(incoming_offers), stop, alive, remote_fingerprint }))
+    }
+
+    fn is_alive(&self) -> bool {
+        self.alive.load(Ordering::Acquire)
     }
 
     fn send(&self, payload: &[u8]) -> Result<(), String> {
+        if !self.is_alive() {
+            return Err("The connected device session has ended. Reconnect before transferring.".into());
+        }
         if payload.is_empty() || payload.len() > bridge_network::MAX_FRAME_BYTES - 16 {
             return Err("session payload size is invalid".into());
         }
         let mut guard = self.connection.lock().map_err(|_| "session connection lock poisoned")?;
         let mut encrypted = vec![0_u8; bridge_network::MAX_FRAME_BYTES];
         let length = guard.transport.write_message(payload, &mut encrypted).map_err(|error| error.to_string())?;
-        bridge_network::write_frame(&mut guard.stream, &encrypted[..length]).map_err(|error| error.to_string())
+        let result = bridge_network::write_frame(&mut guard.stream, &encrypted[..length])
+            .map_err(|error| error.to_string());
+        if result.is_err() {
+            self.alive.store(false, Ordering::Release);
+        }
+        result
     }
 
     fn receive_timeout(&self, timeout: Duration) -> Result<Vec<u8>, String> {
@@ -786,6 +802,9 @@ impl eframe::App for BridgeApp {
         }
         #[cfg(windows)]
         {
+            // Remove sessions whose reader observed EOF or a transport failure.
+            // Reconnected peers must never keep selecting an older dead session.
+            self.active_sessions.retain(|session| session.is_alive());
             for session in &self.active_sessions {
                 while let Some(offer) = session.try_receive_offer() {
                     self.pending_incoming_transfers.push(PendingIncomingTransfer {
@@ -868,7 +887,10 @@ impl eframe::App for BridgeApp {
                     }
                     self.network_status = format!("Secure session established with {}.", pairing.descriptor.display_name);
                     match DesktopSession::start(pairing.connection) {
-                        Ok(session) => self.active_sessions.push(session),
+                        Ok(session) => {
+                            self.active_sessions.retain(|existing| existing.remote_fingerprint != session.remote_fingerprint);
+                            self.active_sessions.push(session);
+                        }
                         Err(error) => self.network_status = format!("Could not start secure session dispatcher: {error}"),
                     }
                 } else {
@@ -1448,7 +1470,10 @@ impl eframe::App for BridgeApp {
                             self.network_status = format!("Could not confirm pairing: {error}");
                         } else {
                             match DesktopSession::start(pending.connection) {
-                                Ok(session) => self.active_sessions.push(session),
+                                Ok(session) => {
+                                    self.active_sessions.retain(|existing| existing.remote_fingerprint != session.remote_fingerprint);
+                                    self.active_sessions.push(session);
+                                }
                                 Err(error) => self.network_status = format!("Could not start secure session dispatcher: {error}"),
                             }
                             self.network_status = format!("{} is now connected and trusted.", pending.descriptor.display_name);
