@@ -167,6 +167,8 @@ internal class BridgePairingController(
         postStatus("Device trust revoked and its active session closed.")
     }
 
+    fun connectedSessions(): Map<String, Long> = activeSessions.toMap()
+
     fun trustedDevices(): List<BridgeTrustedDevice> {
         val encoded = preferences.getString("devices_encrypted_v1", null)
         if (encoded == null) {
