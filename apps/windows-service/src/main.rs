@@ -279,6 +279,9 @@ fn handle_request(
         }),
         Request::Challenge => verify_publisher::verify_client_publisher(&caller.image_path)
             .and_then(|_| {
+                // The legacy unsigned challenge path must never retain an attested lease.
+                leases.revoke_process(caller.process_id);
+                lease_fingerprints.remove(&caller.process_id);
                 let nonce = challenges.issue_after_client_verification(caller.process_id)
                     .map_err(|message| io::Error::new(io::ErrorKind::PermissionDenied, message))?;
                 pinned_clients.insert(caller.process_id, caller.clone());
