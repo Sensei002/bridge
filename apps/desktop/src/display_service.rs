@@ -69,11 +69,19 @@ pub fn submit_attestation_response(
         signature.to_ascii_lowercase(),
     );
     let response = request(&command)?;
-    if response.trim() == "BRIDGE_DISPLAY/1 OK attestation_verified" {
-        Ok(())
-    } else {
-        Err(service_response_error(&response))
+    let value = response.trim()
+        .strip_prefix("BRIDGE_DISPLAY/1 OK lease_issued id=")
+        .ok_or_else(|| service_response_error(&response))?;
+    let (lease_id, ttl) = value.split_once(" expires_in_ms=")
+        .ok_or_else(|| "display service returned a malformed lease".to_string())?;
+    uuid::Uuid::parse_str(lease_id)
+        .map_err(|_| "display service returned an invalid lease ID".to_string())?;
+    let ttl_ms: u64 = ttl.parse()
+        .map_err(|_| "display service returned an invalid lease lifetime".to_string())?;
+    if ttl_ms == 0 || ttl_ms > 15_000 {
+        return Err("display service returned an out-of-policy lease lifetime".into());
     }
+    Ok(())
 }
 
 fn is_hex(value: &str, expected_len: usize) -> bool {
