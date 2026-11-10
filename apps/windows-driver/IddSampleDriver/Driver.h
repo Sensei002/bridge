@@ -15,6 +15,7 @@
 #include <memory>
 #include <vector>
 #include <mutex>
+#include <atomic>
 
 #include "BridgeDisplayControl.h"
 
@@ -86,7 +87,8 @@ namespace Microsoft
             IndirectDeviceContext(_In_ WDFDEVICE WdfDevice);
             virtual ~IndirectDeviceContext();
 
-            void InitAdapter();
+            NTSTATUS InitAdapter();
+            void SetAdapterReady(bool Ready) { m_AdapterReady.store(Ready); }
             NTSTATUS ConnectMonitor(UINT ConnectorIndex);
             NTSTATUS DisconnectMonitor();
             void GetDisplayStatus(BRIDGE_DISPLAY_STATUS& Status);
@@ -96,6 +98,7 @@ namespace Microsoft
             IDDCX_ADAPTER m_Adapter;
             IDDCX_MONITOR m_Monitor;
             std::mutex m_MonitorLock;
+            std::atomic<bool> m_AdapterReady{ false };
         };
 
         class IndirectMonitorContext
