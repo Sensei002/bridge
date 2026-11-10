@@ -1,0 +1,72 @@
+name: Windows Indirect Display Driver
+
+on:
+  pull_request:
+    paths:
+      - "apps/windows-driver/**"
+      - ".github/workflows/windows-driver.yml"
+  push:
+    branches: [development]
+    paths:
+      - "apps/windows-driver/**"
+      - ".github/workflows/windows-driver.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bridge-windows-driver-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-iddcx:
+    name: Build x64 IddCx UMDF package
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Locate MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Install matching Windows SDK and WDK
+        shell: pwsh
+        run: |
+          winget install --id Microsoft.WindowsSDK.10.0.28000 --exact --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
+          if ($LASTEXITCODE -ne 0) { throw "Windows SDK 10.0.28000 installation failed (exit $LASTEXITCODE)." }
+
+          winget install --id Microsoft.WindowsWDK.10.0.28000 --exact --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
+          if ($LASTEXITCODE -ne 0) { throw "Windows WDK 10.0.28000 installation failed (exit $LASTEXITCODE)." }
+
+      - name: Build IddCx driver and package
+        shell: pwsh
+        run: |
+          msbuild apps/windows-driver/IddSampleDriver/IddSampleDriver.vcxproj /m /t:Build /p:Configuration=Release /p:Platform=x64 /p:SignMode=Off /p:WindowsTargetPlatformVersion=10.0.28000.0 /p:TargetPlatformVersion=10.0.28000.0 /v:minimal
+          if ($LASTEXITCODE -ne 0) { throw "IddCx driver build failed (exit $LASTEXITCODE)." }
+
+      - name: Verify driver package outputs
+        shell: pwsh
+        run: |
+          $root = "apps/windows-driver/IddSampleDriver"
+          $dll = Get-ChildItem $root -Recurse -File -Filter "IddSampleDriver.dll" | Select-Object -First 1
+          $inf = Get-ChildItem $root -Recurse -File -Filter "IddSampleDriver.inf" | Select-Object -First 1
+          $cat = Get-ChildItem $root -Recurse -File -Filter "IddSampleDriver.cat" | Select-Object -First 1
+
+          if (-not $dll) { throw "UMDF driver DLL was not produced." }
+          if (-not $inf) { throw "Driver INF was not produced." }
+          if (-not $cat) { throw "Driver catalog was not produced." }
+
+          Write-Host "Driver DLL: $($dll.FullName)"
+          Write-Host "Driver INF: $($inf.FullName)"
+          Write-Host "Driver CAT: $($cat.FullName)"
+
+          $package = "bridge-iddcx-package"
+          New-Item -ItemType Directory -Force -Path $package | Out-Null
+          Copy-Item $dll.FullName, $inf.FullName, $cat.FullName -Destination $package
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bridge-iddcx-unsigned-x64
+          path: bridge-iddcx-package/*
+          if-no-files-found: error
+          retention-days: 14
