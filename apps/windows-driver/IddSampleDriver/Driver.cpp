@@ -247,9 +247,7 @@ NTSTATUS IddSampleDeviceD0Entry(WDFDEVICE Device, WDF_POWER_DEVICE_STATE Previou
     // This function is called by WDF to start the device in the fully-on power state.
 
     auto* pContext = WdfObjectGet_IndirectDeviceContextWrapper(Device);
-    pContext->pContext->InitAdapter();
-
-    return STATUS_SUCCESS;
+    return pContext->pContext->InitAdapter();
 }
 
 #pragma region Direct3DDevice
@@ -459,7 +457,7 @@ IndirectDeviceContext::~IndirectDeviceContext()
 {
 }
 
-void IndirectDeviceContext::InitAdapter()
+NTSTATUS IndirectDeviceContext::InitAdapter()
 {
     // ==============================
     // TODO: Update the below diagnostic information in accordance with the target hardware. The strings and version
@@ -502,7 +500,12 @@ void IndirectDeviceContext::InitAdapter()
     IDARG_OUT_ADAPTER_INIT AdapterInitOut;
     NTSTATUS Status = IddCxAdapterInitAsync(&AdapterInit, &AdapterInitOut);
 
-    if (NT_SUCCESS(Status))
+    if (!NT_SUCCESS(Status))
+    {
+        m_AdapterReady.store(false);
+        return Status;
+    }
+
     {
         // Store a reference to the WDF adapter handle
         m_Adapter = AdapterInitOut.AdapterObject;
@@ -511,11 +514,14 @@ void IndirectDeviceContext::InitAdapter()
         auto* pContext = WdfObjectGet_IndirectDeviceContextWrapper(AdapterInitOut.AdapterObject);
         pContext->pContext = this;
     }
+
+    return STATUS_SUCCESS;
 }
 
 NTSTATUS IndirectDeviceContext::ConnectMonitor(UINT ConnectorIndex)
 {
     std::lock_guard<std::mutex> lock(m_MonitorLock);
+    if (!m_AdapterReady.load()) return STATUS_DEVICE_NOT_READY;
     if (m_Monitor != nullptr) return STATUS_SUCCESS;
     WDF_OBJECT_ATTRIBUTES Attr;
     WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&Attr, IndirectMonitorContextWrapper);
@@ -606,11 +612,17 @@ NTSTATUS IddSampleAdapterInitFinished(IDDCX_ADAPTER AdapterObject, const IDARG_I
     // This is called when the OS has finished setting up the adapter for use by the IddCx driver. It's now possible
     // to report attached monitors.
 
-    UNREFERENCED_PARAMETER(AdapterObject);
-    if (!NT_SUCCESS(pInArgs->AdapterInitStatus)) return pInArgs->AdapterInitStatus;
+    auto* pDeviceContextWrapper = WdfObjectGet_IndirectDeviceContextWrapper(AdapterObject);
+    if (pDeviceContextWrapper == nullptr || pDeviceContextWrapper->pContext == nullptr)
+    {
+        return STATUS_DEVICE_NOT_READY;
+    }
+
+    // IddCx initialization is asynchronous. Do not allow CONNECT until this callback
+    // confirms that Windows has finished initializing the adapter.
+    pDeviceContextWrapper->pContext->SetAdapterReady(NT_SUCCESS(pInArgs->AdapterInitStatus));
 
     // The adapter starts without a monitor. The service requests arrival only after an authenticated session.
-
     return STATUS_SUCCESS;
 }
 
