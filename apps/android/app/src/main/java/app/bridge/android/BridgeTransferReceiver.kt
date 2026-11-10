@@ -18,6 +18,9 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
+private const val CLIPBOARD_TAG = 0x03
+private const val MAX_CLIPBOARD_TEXT_BYTES = 16 * 1024
+
 internal data class BridgeIncomingOffer(
     val deviceId: String,
     val handle: Long,
@@ -34,6 +37,7 @@ internal data class BridgeIncomingOffer(
 internal class BridgeTransferReceiver(
     context: Context,
     private val onOffer: (BridgeIncomingOffer) -> Unit,
+    private val onClipboardText: (String, String) -> Unit,
     private val onStatus: (String) -> Unit,
     private val onSessionEnded: (String, Long) -> Unit
 ) {
@@ -58,6 +62,14 @@ internal class BridgeTransferReceiver(
                         error("The secure device session has ended.")
                     }
                     if (packet.isEmpty()) continue
+                    if (packet[0].toInt() == CLIPBOARD_TAG) {
+                        val payloadSize = packet.size - 1
+                        if (payloadSize in 0..MAX_CLIPBOARD_TEXT_BYTES) {
+                            val text = String(packet, 1, payloadSize, Charsets.UTF_8)
+                            main.post { onClipboardText(deviceId, text) }
+                        }
+                        continue
+                    }
                     if (packet[0].toInt() == CONTROL_TAG) {
                         val control = JSONObject(String(packet, 1, packet.size - 1, Charsets.UTF_8))
                         if (control.optString("type") == "file_offer") {
@@ -318,6 +330,12 @@ internal class BridgeTransferReceiver(
         }
         // The sender may have disconnected; discard residual chunks before reuse.
         queue.clear()
+    }
+
+    fun sendClipboard(handle: Long, text: String) {
+        val payload = text.toByteArray(Charsets.UTF_8)
+        require(payload.size <= MAX_CLIPBOARD_TEXT_BYTES) { "Text exceeds the 16 KiB clipboard limit." }
+        sendBytes(handle, byteArrayOf(CLIPBOARD_TAG.toByte()) + payload)
     }
 
     fun cancelAll() { cancellations.values.forEach { it.set(true) } }
