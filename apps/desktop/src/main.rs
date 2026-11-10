@@ -2062,11 +2062,13 @@ impl eframe::App for BridgeApp {
                             match DesktopSession::start(pending.connection, pending.descriptor.attestation_public_key.clone()) {
                                 Ok(session) => {
                                     for existing in &self.active_sessions {
-                                if existing.remote_fingerprint.eq_ignore_ascii_case(&session.remote_fingerprint) {
-                                    existing.shutdown();
-                                }
-                            }
-                            self.active_sessions.retain(|existing| existing.remote_fingerprint != session.remote_fingerprint);
+                                        if existing.remote_fingerprint.eq_ignore_ascii_case(&session.remote_fingerprint) {
+                                            existing.shutdown();
+                                        }
+                                    }
+                                    self.active_sessions.retain(|existing| {
+                                        existing.remote_fingerprint != session.remote_fingerprint
+                                    });
                                     self.active_sessions.push(session);
                                 }
                                 Err(error) => self.network_status = format!("Could not start secure session dispatcher: {error}"),
