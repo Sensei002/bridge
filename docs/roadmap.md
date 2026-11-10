@@ -65,7 +65,7 @@ Architecture and acceptance gates: [docs/second-screen-architecture.md](second-s
 ### Windows virtual display foundation
 - [x] Select Microsoft IddCx / Indirect Display Driver (UMDF) as the Windows virtual-monitor architecture.
 - [x] Define separation between the existing Rust/egui UI, a Bridge Display Windows service, and the C++ UMDF display driver.
-- [ ] Add a WDK/Visual Studio C++ IddCx driver project based on Microsoft's official sample.
+- [x] Add a WDK/Visual Studio C++ IddCx driver project based on Microsoft's pinned official sample (build-only foundation; not installable as a Bridge feature yet).
 - [ ] Build and validate the driver package in GitHub Actions.
 - [ ] Implement virtual monitor arrival/removal and safe display-mode negotiation.
 - [ ] Package driver + service installation, upgrade, rollback, and removal with explicit elevation.
