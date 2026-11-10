@@ -96,6 +96,17 @@ fn validate_peer_attestation_descriptor(descriptor: &DeviceDescriptor) -> Result
 }
 
 #[cfg(windows)]
+fn decode_attestation_hex(value: &str, expected_bytes: usize) -> Result<Vec<u8>, String> {
+    if value.len() != expected_bytes * 2 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(format!("attestation field must be {} hexadecimal characters", expected_bytes * 2));
+    }
+    (0..value.len()).step_by(2)
+        .map(|index| u8::from_str_radix(&value[index..index + 2], 16)
+            .map_err(|error| error.to_string()))
+        .collect()
+}
+
+#[cfg(windows)]
 struct PendingApproval {
     connection: NoiseConnection,
     descriptor: DeviceDescriptor,
@@ -105,12 +116,23 @@ struct PendingApproval {
 }
 
 #[cfg(windows)]
+struct AndroidAttestationResponse {
+    request_id: Uuid,
+    session_id: Uuid,
+    nonce: String,
+    device_fingerprint: String,
+    signature: String,
+}
+
+#[cfg(windows)]
 struct DesktopSession {
     connection: Arc<std::sync::Mutex<NoiseConnection>>,
     incoming: std::sync::Mutex<Receiver<Vec<u8>>>,
     incoming_offers: std::sync::Mutex<Receiver<FileOffer>>,
     clipboard_incoming: std::sync::Mutex<Receiver<String>>,
-    challenge_responses: std::sync::Mutex<Receiver<(Uuid, String)>>,
+    challenge_responses: std::sync::Mutex<Receiver<AndroidAttestationResponse>>,
+    session_id: Uuid,
+    attestation_public_key: Option<String>,
     stop: Arc<std::sync::atomic::AtomicBool>,
     alive: Arc<std::sync::atomic::AtomicBool>,
     pub remote_fingerprint: String,
@@ -118,10 +140,11 @@ struct DesktopSession {
 
 #[cfg(windows)]
 impl DesktopSession {
-    fn start(connection: NoiseConnection) -> Result<Arc<Self>, String> {
+    fn start(connection: NoiseConnection, attestation_public_key: Option<String>) -> Result<Arc<Self>, String> {
         let reader_stream = connection.stream.try_clone().map_err(|error| error.to_string())?;
         reader_stream.set_read_timeout(Some(Duration::from_secs(15))).map_err(|error| error.to_string())?;
         let remote_fingerprint = connection.remote_fingerprint.clone();
+        let session_id = Uuid::new_v4();
         let connection = Arc::new(std::sync::Mutex::new(connection));
         let reader_connection = Arc::clone(&connection);
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -179,8 +202,13 @@ impl DesktopSession {
                         Ok(TransferPacket::Control(TransferControl::FileOffer { offer })) => {
                             if offer_sender.send(offer).is_err() { break; }
                         }
-                        Ok(TransferPacket::Control(TransferControl::DisplayChallengeResponse { request_id, nonce })) => {
-                            if let Err(mpsc::TrySendError::Disconnected(_)) = challenge_sender.try_send((request_id, nonce)) { break; }
+                        Ok(TransferPacket::Control(TransferControl::DisplayChallengeResponse {
+                            request_id, session_id, nonce, device_fingerprint, signature,
+                        })) => {
+                            let response = AndroidAttestationResponse {
+                                request_id, session_id, nonce, device_fingerprint, signature,
+                            };
+                            if let Err(mpsc::TrySendError::Disconnected(_)) = challenge_sender.try_send(response) { break; }
                         }
                         _ => {
                             if sender.send(plaintext).is_err() { break; }
@@ -227,7 +255,7 @@ impl DesktopSession {
                 }
             })
             .map_err(|error| error.to_string())?;
-        Ok(Arc::new(Self { connection, incoming: std::sync::Mutex::new(incoming), incoming_offers: std::sync::Mutex::new(incoming_offers), clipboard_incoming: std::sync::Mutex::new(clipboard_incoming), challenge_responses: std::sync::Mutex::new(challenge_responses), stop, alive, remote_fingerprint }))
+        Ok(Arc::new(Self { connection, incoming: std::sync::Mutex::new(incoming), incoming_offers: std::sync::Mutex::new(incoming_offers), clipboard_incoming: std::sync::Mutex::new(clipboard_incoming), challenge_responses: std::sync::Mutex::new(challenge_responses), session_id, attestation_public_key, stop, alive, remote_fingerprint }))
     }
 
     fn is_alive(&self) -> bool {
@@ -252,9 +280,9 @@ impl DesktopSession {
         result
     }
 
-    /// Forward a Windows-service challenge through this live authenticated Noise session.
-    /// The Android peer echoes it inside the encrypted channel; this method does not
-    /// itself authorize a display lease or enable any driver operation.
+    /// Request a signed Android proof over this live authenticated Noise session.
+    /// This validates the response context and shape only; the Windows service must
+    /// independently verify the Ed25519 signature against its pinned pairing key.
     fn relay_service_challenge(&self, nonce: &str, timeout: Duration) -> Result<(), String> {
         if nonce.len() != 64 || !nonce.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err("display-service challenge must be 64 hexadecimal characters".into());
@@ -264,7 +292,11 @@ impl DesktopSession {
         }
         let request_id = Uuid::new_v4();
         let packet = encode_packet(&TransferPacket::Control(
-            TransferControl::DisplayChallengeRequest { request_id, nonce: nonce.to_ascii_lowercase() },
+            TransferControl::DisplayChallengeRequest {
+                request_id,
+                session_id: self.session_id,
+                nonce: nonce.to_ascii_lowercase(),
+            },
         )).map_err(|error| error.to_string())?;
         self.send(&packet)?;
         let deadline = Instant::now() + timeout;
@@ -273,15 +305,29 @@ impl DesktopSession {
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                return Err("Android challenge response timed out".into());
+                return Err("Android signed attestation response timed out".into());
             }
             let response = responses.recv_timeout(remaining)
-                .map_err(|error| format!("Android challenge response unavailable: {error}"))?;
-            // Ignore delayed responses from an earlier timed-out request.
-            if response.0 != request_id { continue; }
-            if !response.1.eq_ignore_ascii_case(nonce) {
-                return Err("Android challenge response did not match the active request".into());
-            }
+                .map_err(|error| format!("Android signed attestation unavailable: {error}"))?;
+            if response.request_id != request_id { continue; }
+            let pinned_key = self.attestation_public_key.as_deref()
+                .ok_or_else(|| "trusted Android pairing record has no pinned attestation key".to_string())?;
+            let public_key = decode_attestation_hex(pinned_key, 32)?;
+            let proof_nonce = decode_attestation_hex(&response.nonce, 32)?;
+            let signature = decode_attestation_hex(&response.signature, 64)?;
+            let proof = bridge_security::peer_attestation::AndroidPeerAttestation {
+                nonce: proof_nonce.as_slice().try_into().map_err(|_| "invalid attestation nonce length")?,
+                session_id: response.session_id,
+                device_fingerprint: response.device_fingerprint.clone(),
+                signature: signature.as_slice().try_into().map_err(|_| "invalid attestation signature length")?,
+            };
+            bridge_security::peer_attestation::verify_android_peer_attestation(
+                &public_key,
+                &proof,
+                &decode_attestation_hex(nonce, 32)?,
+                self.session_id,
+                &self.remote_fingerprint,
+            ).map_err(|error| format!("Android attestation signature verification failed: {error}"))?;
             return Ok(());
         }
     }
@@ -1070,11 +1116,12 @@ impl eframe::App for BridgeApp {
                             let result = (|| -> Result<(), String> {
                                 let nonce = display_service::issue_challenge()?;
                                 session.relay_service_challenge(&nonce, Duration::from_secs(8))?;
-                                display_service::submit_challenge_response(&nonce)?;
+                                // The service currently accepts only the legacy echo. Do not
+                                // submit it: signed-proof verification is the next service IPC step.
                                 Ok(())
                             })();
                             let message = match result {
-                                Ok(()) => "Windows display service authenticated the active Android Noise session.".to_owned(),
+                                Ok(()) => "Android signed attestation proof received over Noise. Windows service signature verification is pending.".to_owned(),
                                 Err(error) => format!("Display-service session verification is not ready: {error}"),
                             };
                             let _ = status_tx.send(message);
@@ -1173,7 +1220,7 @@ impl eframe::App for BridgeApp {
                         }
                     }
                     self.network_status = format!("Secure session established with {}.", pairing.descriptor.display_name);
-                    match DesktopSession::start(pairing.connection) {
+                    match DesktopSession::start(pairing.connection, pairing.descriptor.attestation_public_key.clone()) {
                         Ok(session) => {
                             self.active_sessions.retain(|existing| existing.remote_fingerprint != session.remote_fingerprint);
                             self.active_sessions.push(session);
@@ -1834,7 +1881,7 @@ impl eframe::App for BridgeApp {
                             let _ = self.trust_store.revoke_and_save(&pending.descriptor.id, trust_store_path());
                             self.network_status = format!("Could not confirm pairing: {error}");
                         } else {
-                            match DesktopSession::start(pending.connection) {
+                            match DesktopSession::start(pending.connection, pending.descriptor.attestation_public_key.clone()) {
                                 Ok(session) => {
                                     self.active_sessions.retain(|existing| existing.remote_fingerprint != session.remote_fingerprint);
                                     self.active_sessions.push(session);

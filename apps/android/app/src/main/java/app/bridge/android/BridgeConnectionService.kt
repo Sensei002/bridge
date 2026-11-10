@@ -149,9 +149,7 @@ class BridgeConnectionService : Service() {
                 // The seed is reloaded only by the future signing path, never retained here.
                 val attestationSeed = BridgeIdentityStore.loadOrCreateAttestationSeed(this)
                 val attestationKeyResult = try {
-                    org.json.JSONObject(BridgeNative.attestationPublicKey(
-                        attestationSeed.joinToString("") { "%02x".format(it.toInt() and 0xff) }
-                    ))
+                    org.json.JSONObject(BridgeNative.attestationPublicKey(attestationSeed))
                 } finally {
                     attestationSeed.fill(0)
                 }
@@ -170,6 +168,7 @@ class BridgeConnectionService : Service() {
 
                 val receiver = BridgeTransferReceiver(
                     this,
+                    fingerprint,
                     onOffer = { offer ->
                         mainHandler.post {
                             if (!stopping && BridgeRuntimeState.incomingOffers.none { it.transferId == offer.transferId }) {
@@ -259,7 +258,9 @@ class BridgeConnectionService : Service() {
                     mainHandler.post {
                         if (!stopping) {
                             BridgeRuntimeState.connectedSessionHandles[peerId] = handle
-                            receiver.attach(peerId, handle)
+                            val peerPlatform = controller.trustedDevices()
+                                .firstOrNull { it.deviceId == peerId }?.platform
+                            receiver.attach(peerId, handle, allowDisplayAttestation = peerPlatform == "windows")
                         } else {
                             BridgeNative.sessionClose(handle)
                         }

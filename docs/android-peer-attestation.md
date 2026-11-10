@@ -27,11 +27,18 @@ The Ed25519 seed itself is not a native Android Keystore Ed25519 key: it is decr
 
 The shared Rust signing and strict verification primitives include tests for wrong keys, modified signatures, stale nonces, cross-session replay, and fingerprint mismatch. This implementation adds Android seed generation and Keystore-protected persistence.
 
-It does not yet:
-- Derive and exchange the Ed25519 public key as part of explicit pairing.
-- Pin that public key to the authenticated Android Noise fingerprint in the trusted pairing record.
-- Add the attestation request/response to the encrypted Noise control channel.
-- Send the signed attestation through the verified Windows named-pipe client.
-- Connect verification to the Windows service challenge registry or issue a lease.
+## Signed challenge transport
 
-Those are follow-on steps. Until the key is securely pinned during pairing and the complete round trip is verified by the service, lease issuance and driver CONNECT/DISCONNECT must remain disabled.
+The Android app now handles a display challenge only when the session is associated with an explicitly trusted Windows peer. It reloads the Keystore-wrapped Ed25519 seed for each request, signs the 32-byte nonce together with the request's UUID session ID and the Android Noise identity fingerprint, and clears the temporary seed buffer after signing. The signed proof is returned as a bounded control message inside the existing encrypted Noise session.
+
+The desktop binds the response to the outstanding request ID, its live session UUID, the exact challenge nonce, and the authenticated remote Noise fingerprint. It also enforces the fixed hexadecimal encoding lengths. The desktop does **not** treat this structural check as cryptographic verification.
+
+## Remaining implementation boundaries
+
+This step does not yet:
+- Independently verify the Ed25519 signature in the Windows Display Service against the public key pinned during pairing.
+- Relay the complete signed proof through the publisher-verified Windows named-pipe client.
+- Bind the Windows service's one-time challenge registry to the session UUID and attestation public key.
+- Issue or renew a display authorization lease.
+
+The legacy unsigned `CHALLENGE_RESPONSE` submission has been removed from the desktop path; the challenge is allowed to expire rather than accepting an echo as proof. Lease issuance and driver CONNECT/DISCONNECT remain disabled until the Windows service verifies the signed proof and the complete process-bound authorization chain is reviewed.
