@@ -29,6 +29,13 @@ impl Drop for OwnedPipe {
     }
 }
 
+/// A short-lived lease minted by the Windows service after Android proof verification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceLease {
+    pub id: uuid::Uuid,
+    pub expires_in_ms: u64,
+}
+
 /// Ask the service for a fresh process-pinned challenge.
 pub fn issue_challenge() -> Result<String, String> {
     parse_challenge(&request("CHALLENGE")?)
@@ -51,14 +58,14 @@ pub fn issue_attestation_challenge(
     parse_challenge(&request(&command)?)
 }
 
-/// Submit the signed proof; the service verifies it independently against its
-/// process-pinned challenge context and the public key supplied at issuance.
+/// Submit the signed proof; the service verifies it independently and returns
+/// the process- and peer-bound lease minted after successful verification.
 pub fn submit_attestation_response(
     nonce: &str,
     session_id: uuid::Uuid,
     device_fingerprint: &str,
     signature: &str,
-) -> Result<(), String> {
+) -> Result<ServiceLease, String> {
     if !is_hex(nonce, 64) || !is_hex(device_fingerprint, 64) || !is_hex(signature, 128) {
         return Err("invalid Android attestation response encoding".into());
     }
@@ -72,20 +79,53 @@ pub fn submit_attestation_response(
     parse_lease_response(&response)
 }
 
-fn parse_lease_response(response: &str) -> Result<(), String> {
+fn parse_lease_response(response: &str) -> Result<ServiceLease, String> {
     let value = response.trim()
         .strip_prefix("BRIDGE_DISPLAY/1 OK lease_issued id=")
         .ok_or_else(|| service_response_error(response))?;
     let (lease_id, ttl) = value.split_once(" expires_in_ms=")
         .ok_or_else(|| "display service returned a malformed lease".to_string())?;
-    uuid::Uuid::parse_str(lease_id)
+    let id = uuid::Uuid::parse_str(lease_id)
         .map_err(|_| "display service returned an invalid lease ID".to_string())?;
-    let ttl_ms: u64 = ttl.parse()
+    let expires_in_ms: u64 = ttl.parse()
         .map_err(|_| "display service returned an invalid lease lifetime".to_string())?;
-    if ttl_ms == 0 || ttl_ms > 15_000 {
+    if expires_in_ms == 0 || expires_in_ms > 15_000 {
         return Err("display service returned an out-of-policy lease lifetime".into());
     }
-    Ok(())
+    Ok(ServiceLease { id, expires_in_ms })
+}
+
+/// Request a driver connection using the exact service-issued lease identity.
+pub fn connect_with_lease(lease: &ServiceLease, device_fingerprint: &str) -> Result<(), String> {
+    mutate_with_lease("CONNECT", "connected", lease, device_fingerprint)
+}
+
+/// Request a driver disconnection using the exact service-issued lease identity.
+pub fn disconnect_with_lease(lease: &ServiceLease, device_fingerprint: &str) -> Result<(), String> {
+    mutate_with_lease("DISCONNECT", "disconnected", lease, device_fingerprint)
+}
+
+fn mutate_with_lease(
+    operation: &str,
+    expected_status: &str,
+    lease: &ServiceLease,
+    device_fingerprint: &str,
+) -> Result<(), String> {
+    if lease.expires_in_ms == 0 || lease.expires_in_ms > 15_000 || !is_hex(device_fingerprint, 64) {
+        return Err("invalid or expired display lease identity".into());
+    }
+    let command = format!(
+        "{operation} lease={} fingerprint={}",
+        lease.id,
+        device_fingerprint.to_ascii_lowercase(),
+    );
+    let response = request(&command)?;
+    let expected = format!("BRIDGE_DISPLAY/1 OK {expected_status}");
+    if response.trim() == expected {
+        Ok(())
+    } else {
+        Err(service_response_error(&response))
+    }
 }
 
 fn is_hex(value: &str, expected_len: usize) -> bool {
@@ -182,7 +222,7 @@ mod tests {
     fn accepts_only_valid_short_lived_service_leases() {
         let id = uuid::Uuid::new_v4();
         let response = format!("BRIDGE_DISPLAY/1 OK lease_issued id={id} expires_in_ms=15000");
-        assert!(parse_lease_response(&response).is_ok());
+        assert_eq!(parse_lease_response(&response).unwrap(), ServiceLease { id, expires_in_ms: 15_000 });
         assert!(parse_lease_response(&format!(
             "BRIDGE_DISPLAY/1 OK lease_issued id={id} expires_in_ms=0"
         )).is_err());
