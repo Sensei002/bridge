@@ -82,6 +82,7 @@ pub fn submit_attestation_response(
 fn parse_lease_response(response: &str) -> Result<ServiceLease, String> {
     let value = response.trim()
         .strip_prefix("BRIDGE_DISPLAY/1 OK lease_issued id=")
+        .or_else(|| response.trim().strip_prefix("BRIDGE_DISPLAY/1 OK lease_renewed id="))
         .ok_or_else(|| service_response_error(response))?;
     let (lease_id, ttl) = value.split_once(" expires_in_ms=")
         .ok_or_else(|| "display service returned a malformed lease".to_string())?;
@@ -93,6 +94,24 @@ fn parse_lease_response(response: &str) -> Result<ServiceLease, String> {
         return Err("display service returned an out-of-policy lease lifetime".into());
     }
     Ok(ServiceLease { id, expires_in_ms })
+}
+
+/// Renew the same lease while its original process and Android peer remain authenticated.
+pub fn renew_with_lease(lease: &ServiceLease, device_fingerprint: &str) -> Result<ServiceLease, String> {
+    if lease.expires_in_ms == 0 || lease.expires_in_ms > 15_000 || !is_hex(device_fingerprint, 64) {
+        return Err("invalid or expired display lease identity".into());
+    }
+    let command = format!(
+        "RENEW lease={} fingerprint={}",
+        lease.id,
+        device_fingerprint.to_ascii_lowercase(),
+    );
+    let response = request(&command)?;
+    let renewed = parse_lease_response(&response)?;
+    if renewed.id != lease.id {
+        return Err("display service changed the active lease ID during renewal".into());
+    }
+    Ok(renewed)
 }
 
 /// Request a driver connection using the exact service-issued lease identity.
@@ -223,6 +242,8 @@ mod tests {
         let id = uuid::Uuid::new_v4();
         let response = format!("BRIDGE_DISPLAY/1 OK lease_issued id={id} expires_in_ms=15000");
         assert_eq!(parse_lease_response(&response).unwrap(), ServiceLease { id, expires_in_ms: 15_000 });
+        let renewed = format!("BRIDGE_DISPLAY/1 OK lease_renewed id={id} expires_in_ms=14999");
+        assert_eq!(parse_lease_response(&renewed).unwrap(), ServiceLease { id, expires_in_ms: 14_999 });
         assert!(parse_lease_response(&format!(
             "BRIDGE_DISPLAY/1 OK lease_issued id={id} expires_in_ms=0"
         )).is_err());
