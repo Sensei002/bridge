@@ -27,6 +27,9 @@ pub struct DeviceDescriptor {
     pub display_name: String,
     pub platform: Platform,
     pub protocol_version: u16,
+    /// Optional Ed25519 attestation public key advertised inside the authenticated Noise session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attestation_public_key: Option<String>,
 }
 
 impl DeviceDescriptor {
@@ -34,6 +37,11 @@ impl DeviceDescriptor {
         if self.display_name.trim().is_empty() { return Err(ProtocolValidationError::EmptyDeviceName); }
         if self.display_name.len() > MAX_DEVICE_NAME_BYTES { return Err(ProtocolValidationError::DeviceNameTooLong); }
         if self.protocol_version != PROTOCOL_VERSION { return Err(ProtocolValidationError::UnsupportedVersion(self.protocol_version)); }
+        if let Some(key) = &self.attestation_public_key {
+            if key.len() != 64 || !key.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return Err(ProtocolValidationError::InvalidAttestationPublicKey);
+            }
+        }
         Ok(())
     }
 }
@@ -44,6 +52,7 @@ pub enum ProtocolValidationError {
     #[error("device name exceeds {MAX_DEVICE_NAME_BYTES} UTF-8 bytes")] DeviceNameTooLong,
     #[error("unsupported protocol version: {0}")] UnsupportedVersion(u16),
     #[error("pairing request has an invalid expiry window")] InvalidPairingWindow,
+    #[error("attestation public key must be 64 hexadecimal characters")] InvalidAttestationPublicKey,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -105,7 +114,7 @@ mod tests {
     use super::*;
 
     fn device() -> DeviceDescriptor {
-        DeviceDescriptor { id: DeviceId::new(), display_name: "Bridge test".into(), platform: Platform::Windows, protocol_version: PROTOCOL_VERSION }
+        DeviceDescriptor { id: DeviceId::new(), display_name: "Bridge test".into(), platform: Platform::Windows, protocol_version: PROTOCOL_VERSION, attestation_public_key: None }
     }
 
     #[test]
