@@ -48,6 +48,10 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 const HEARTBEAT_PING: &[u8] = b"\0BRIDGE_HEARTBEAT_PING_V1";
 #[cfg(windows)]
 const HEARTBEAT_PONG: &[u8] = b"\0BRIDGE_HEARTBEAT_PONG_V1";
+#[cfg(windows)]
+const CLIPBOARD_PACKET_TAG: u8 = 0x03;
+#[cfg(windows)]
+const MAX_CLIPBOARD_TEXT_BYTES: usize = 16 * 1024;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Page { Overview, Devices, Transfers, Clipboard, Tools, Settings }
@@ -89,6 +93,7 @@ struct DesktopSession {
     connection: Arc<std::sync::Mutex<NoiseConnection>>,
     incoming: std::sync::Mutex<Receiver<Vec<u8>>>,
     incoming_offers: std::sync::Mutex<Receiver<FileOffer>>,
+    clipboard_incoming: std::sync::Mutex<Receiver<String>>,
     stop: Arc<std::sync::atomic::AtomicBool>,
     alive: Arc<std::sync::atomic::AtomicBool>,
     pub remote_fingerprint: String,
@@ -108,6 +113,7 @@ impl DesktopSession {
         let reader_alive = Arc::clone(&alive);
         let (sender, incoming) = mpsc::sync_channel(8);
         let (offer_sender, incoming_offers) = mpsc::channel();
+        let (clipboard_sender, clipboard_incoming) = mpsc::channel();
         let reader_connection_for_thread = Arc::clone(&reader_connection);
         thread::Builder::new()
             .name("bridge-desktop-session-reader".into())
@@ -142,6 +148,15 @@ impl DesktopSession {
                         continue;
                     }
                     if plaintext == HEARTBEAT_PONG { continue; }
+                    if plaintext.first() == Some(&CLIPBOARD_PACKET_TAG) {
+                        let text = &plaintext[1..];
+                        if text.len() <= MAX_CLIPBOARD_TEXT_BYTES {
+                            if let Ok(text) = String::from_utf8(text.to_vec()) {
+                                let _ = clipboard_sender.send(text);
+                            }
+                        }
+                        continue;
+                    }
                     match decode_packet(&plaintext) {
                         Ok(TransferPacket::Control(TransferControl::FileOffer { offer })) => {
                             if offer_sender.send(offer).is_err() { break; }
@@ -191,7 +206,7 @@ impl DesktopSession {
                 }
             })
             .map_err(|error| error.to_string())?;
-        Ok(Arc::new(Self { connection, incoming: std::sync::Mutex::new(incoming), incoming_offers: std::sync::Mutex::new(incoming_offers), stop, alive, remote_fingerprint }))
+        Ok(Arc::new(Self { connection, incoming: std::sync::Mutex::new(incoming), incoming_offers: std::sync::Mutex::new(incoming_offers), clipboard_incoming: std::sync::Mutex::new(clipboard_incoming), stop, alive, remote_fingerprint }))
     }
 
     fn is_alive(&self) -> bool {
@@ -231,6 +246,10 @@ impl DesktopSession {
 
     fn try_receive_offer(&self) -> Option<FileOffer> {
         self.incoming_offers.lock().ok()?.try_recv().ok()
+    }
+
+    fn try_receive_clipboard_text(&self) -> Option<String> {
+        self.clipboard_incoming.lock().ok()?.try_recv().ok()
     }
 }
 
@@ -445,6 +464,9 @@ struct BridgeApp {
     selected: Page,
     show_pair_dialog: bool,
     clipboard_sync: bool,
+    clipboard_draft: String,
+    clipboard_received: Option<String>,
+    clipboard_status: String,
     launch_at_login: bool,
     notifications: bool,
     auto_accept: bool,
@@ -536,7 +558,10 @@ impl Default for BridgeApp {
         Self {
             selected: Page::Overview,
             show_pair_dialog: false,
-            clipboard_sync: true,
+            clipboard_sync: false,
+            clipboard_draft: String::new(),
+            clipboard_received: None,
+            clipboard_status: "Clipboard sharing is off.".into(),
             launch_at_login: false,
             notifications: true,
             auto_accept: false,
@@ -965,6 +990,14 @@ impl eframe::App for BridgeApp {
             // Remove sessions whose reader observed EOF or a transport failure.
             // Reconnected peers must never keep selecting an older dead session.
             self.active_sessions.retain(|session| session.is_alive());
+            if self.clipboard_sync {
+                for session in &self.active_sessions {
+                    while let Some(text) = session.try_receive_clipboard_text() {
+                        self.clipboard_received = Some(text);
+                        self.clipboard_status = "Received text from a trusted device.".into();
+                    }
+                }
+            }
             for session in &self.active_sessions {
                 while let Some(offer) = session.try_receive_offer() {
                     self.pending_incoming_transfers.push(PendingIncomingTransfer {
@@ -1504,26 +1537,53 @@ impl eframe::App for BridgeApp {
                             ui.horizontal(|ui| {
                                 ui.vertical(|ui| {
                                     eyebrow(ui, "Universal clipboard");
-                                    ui.label(egui::RichText::new("Copy here. Paste there.").size(20.0).strong());
-                                    muted(ui, "Share text between devices you have explicitly trusted.");
+                                    ui.label(egui::RichText::new("Share text securely").size(20.0).strong());
+                                    muted(ui, "Send text to your connected, trusted devices.");
                                 });
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    ui.checkbox(&mut self.clipboard_sync, "Enable clipboard sync");
+                                    ui.checkbox(&mut self.clipboard_sync, "Enable sharing");
                                 });
                             });
                         });
                         ui.add_space(14.0);
                         panel(ui, |ui| {
-                            ui.label(egui::RichText::new("Recent clipboard").size(16.0).strong());
-                            ui.add_space(14.0);
-                            ui.vertical_centered(|ui| {
-                                ui.label(egui::RichText::new("▤").size(34.0).color(ACCENT));
-                                ui.label(egui::RichText::new("Nothing copied yet").strong());
-                                muted(ui, "Your recent shared text will appear here.");
+                            ui.label(egui::RichText::new("Send text").size(16.0).strong());
+                            ui.add_enabled_ui(self.clipboard_sync, |ui| {
+                                ui.add(egui::TextEdit::multiline(&mut self.clipboard_draft)
+                                    .desired_rows(4)
+                                    .hint_text("Type or paste text to share…"));
+                                let connected = self.active_sessions.iter().filter(|session| session.is_alive()).count();
+                                if ui.add_enabled(!self.clipboard_draft.is_empty() && connected > 0,
+                                    egui::Button::new(format!("Send to {connected} connected device(s)"))).clicked() {
+                                    let text = self.clipboard_draft.as_bytes();
+                                    if text.len() > MAX_CLIPBOARD_TEXT_BYTES {
+                                        self.clipboard_status = "Text exceeds the 16 KiB clipboard limit.".into();
+                                    } else {
+                                        let mut packet = Vec::with_capacity(text.len() + 1);
+                                        packet.push(CLIPBOARD_PACKET_TAG);
+                                        packet.extend_from_slice(text);
+                                        let mut sent = 0usize;
+                                        for session in &self.active_sessions {
+                                            if session.is_alive() && session.send(&packet).is_ok() { sent += 1; }
+                                        }
+                                        self.clipboard_status = format!("Sent text to {sent} connected device(s).");
+                                        if sent > 0 { self.clipboard_draft.clear(); }
+                                    }
+                                }
                             });
                         });
                         ui.add_space(12.0);
-                        muted(ui, "Clipboard monitoring and sync are not active in this build.");
+                        panel(ui, |ui| {
+                            ui.label(egui::RichText::new("Received text").size(16.0).strong());
+                            if let Some(text) = &self.clipboard_received {
+                                ui.label(egui::RichText::new(text).monospace().size(12.0));
+                                muted(ui, "Select and copy the text above to paste it into another app.");
+                            } else {
+                                muted(ui, "No shared text received yet.");
+                            }
+                            muted(ui, &self.clipboard_status);
+                        });
+                        muted(ui, "Bridge never reads your system clipboard automatically. Sharing requires an explicit send action.");
                     }
                     Page::Tools => {
                         let tools = [
