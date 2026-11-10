@@ -65,7 +65,7 @@ Every push to `main` and every pull request validates Rust and builds:
 
 Push a version tag such as `v0.2.0` to build release assets and publish a GitHub Release automatically.
 
-**Signing note:** Windows output is unsigned, Android release artifacts are unsigned, and iOS archive is unsigned. Store distribution requires signing certificates/provisioning profiles and repository secrets; none are committed to this repository.
+**Signing note:** Windows output is currently unsigned. Bridge is preparing to apply for SignPath Foundation's free open-source Authenticode signing program for its own Windows user-mode binaries; approval and configuration are not yet complete. The IddCx driver requires a separate Microsoft Hardware Dev Center signing path. Android release signing is configured independently; iOS archive signing is not configured. See [Windows code-signing plan](docs/windows-code-signing.md).
 
 ## Windows desktop technology
 
