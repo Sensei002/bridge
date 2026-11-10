@@ -11,10 +11,8 @@ use std::{
 };
 use windows_sys::Win32::{
     Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE},
-    Storage::FileSystem::{
-        CreateFileW, ReadFile, WriteFile, FILE_GENERIC_READ, FILE_GENERIC_WRITE, OPEN_EXISTING,
-    },
-    System::Pipes::WaitNamedPipeW,
+    Storage::FileSystem::{CreateFileW, FILE_GENERIC_READ, FILE_GENERIC_WRITE, OPEN_EXISTING},
+    System::{IO::{ReadFile, WriteFile}, Pipes::WaitNamedPipeW},
 };
 
 const PIPE_NAME: &str = r"\\.\pipe\BridgeDisplayService";
