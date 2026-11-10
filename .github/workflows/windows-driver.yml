@@ -28,6 +28,8 @@ jobs:
 
       - name: Locate MSBuild
         uses: microsoft/setup-msbuild@v2
+        with:
+          msbuild-architecture: x64
 
       - name: Set up NuGet
         uses: NuGet/setup-nuget@v2
