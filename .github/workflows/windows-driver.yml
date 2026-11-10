@@ -38,10 +38,35 @@ jobs:
           nuget restore apps/windows-driver/packages.config -PackagesDirectory apps/windows-driver/packages
           if ($LASTEXITCODE -ne 0) { throw "Windows SDK/WDK NuGet restore failed (exit $LASTEXITCODE)." }
 
+      - name: Locate StampInf from restored WDK tools
+        shell: pwsh
+        run: |
+          $roots = @(
+            "apps/windows-driver/packages",
+            "${env:ProgramFiles(x86)}\Windows Kits\10",
+            "${env:ProgramFiles}\Windows Kits\10"
+          ) | Where-Object { $_ -and (Test-Path $_) }
+
+          $stampInf = Get-ChildItem -Path $roots -Recurse -File -Filter "stampinf.exe" -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match "\\(x86|x64)\\stampinf\.exe$" } |
+            Select-Object -First 1
+
+          if (-not $stampInf) {
+            Write-Host "WDK package contents:"
+            Get-ChildItem "apps/windows-driver/packages/Microsoft.Windows.WDK.x64.10.0.28000.2526" -Recurse -File |
+              Select-Object -ExpandProperty FullName | Write-Host
+            throw "stampinf.exe is missing from the restored WDK package and installed Windows Kits."
+          }
+
+          $stampInfDirectory = $stampInf.DirectoryName
+          Write-Host "Using StampInf: $($stampInf.FullName)"
+          Add-Content -Path $env:GITHUB_PATH -Value $stampInfDirectory
+          Add-Content -Path $env:GITHUB_ENV -Value "STAMPINF_TOOL_PATH=$stampInfDirectory"
+
       - name: Build IddCx driver and package
         shell: pwsh
         run: |
-          msbuild apps/windows-driver/IddSampleDriver/IddSampleDriver.vcxproj /m /t:Build /p:Configuration=Release /p:Platform=x64 /p:SignMode=Off /p:WindowsTargetPlatformVersion=10.0.28000.0 /p:TargetPlatformVersion=10.0.28000.0 /v:minimal
+          msbuild apps/windows-driver/IddSampleDriver/IddSampleDriver.vcxproj /m /t:Build /p:Configuration=Release /p:Platform=x64 /p:SignMode=Off /p:StampInfToolPath="$env:STAMPINF_TOOL_PATH" /p:WindowsTargetPlatformVersion=10.0.28000.0 /p:TargetPlatformVersion=10.0.28000.0 /v:minimal
           if ($LASTEXITCODE -ne 0) { throw "IddCx driver build failed (exit $LASTEXITCODE)." }
 
       - name: Verify driver package outputs
