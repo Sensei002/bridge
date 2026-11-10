@@ -52,7 +52,10 @@ impl ServiceChallengeRegistry {
     /// Remove expired challenges and return their process IDs so the caller can
     /// release the corresponding retained process handles.
     pub fn revoke_expired(&mut self) -> Vec<u32> {
-        let now = Instant::now();
+        self.revoke_expired_at(Instant::now())
+    }
+
+    fn revoke_expired_at(&mut self, now: Instant) -> Vec<u32> {
         let expired = self.pending.iter()
             .filter_map(|(process_id, pending)| (now >= pending.expires_at).then_some(*process_id))
             .collect::<Vec<_>>();
@@ -197,6 +200,16 @@ mod tests {
             registry.consume_for_process(42, &nonce),
             Err("no pending challenge for client process")
         );
+    }
+
+    #[test]
+    fn expiry_cleanup_returns_process_ids_for_handle_release() {
+        let mut registry = ServiceChallengeRegistry::default();
+        let issued = Instant::now();
+        registry.issue_at(42, issued).unwrap();
+        registry.issue_at(43, issued).unwrap();
+        assert_eq!(registry.revoke_expired_at(issued + CHALLENGE_TTL), vec![42, 43]);
+        assert!(registry.pending.is_empty());
     }
 
     #[test]
