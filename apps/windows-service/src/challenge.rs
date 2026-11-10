@@ -49,6 +49,19 @@ impl ServiceChallengeRegistry {
         self.consume_at(process_id, response, Instant::now())
     }
 
+    /// Remove expired challenges and return their process IDs so the caller can
+    /// release the corresponding retained process handles.
+    pub fn revoke_expired(&mut self) -> Vec<u32> {
+        let now = Instant::now();
+        let expired = self.pending.iter()
+            .filter_map(|(process_id, pending)| (now >= pending.expires_at).then_some(*process_id))
+            .collect::<Vec<_>>();
+        for process_id in &expired {
+            self.pending.remove(process_id);
+        }
+        expired
+    }
+
     /// Revoke any outstanding challenge for a process when its pipe closes or
     /// its retained process handle signals exit.
     pub fn revoke_process(&mut self, process_id: u32) -> bool {
