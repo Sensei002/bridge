@@ -7,7 +7,7 @@
 
 use std::{ffi::OsStr, io, os::windows::ffi::OsStrExt, path::Path};
 use windows_sys::Win32::{
-    Foundation::{CloseHandle, HANDLE, HWND},
+    Foundation::{CloseHandle, HANDLE},
     Security::{
         Cryptography::{
             CertGetCertificateContextProperty, CERT_CONTEXT, CERT_SHA256_HASH_PROP_ID,
@@ -96,7 +96,7 @@ pub fn verify_client_publisher(image_path: &Path) -> io::Result<()> {
     };
     let mut action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
     let trust_status = unsafe {
-        WinVerifyTrust(std::ptr::null_mut::<HWND>(), &mut action, &mut data as *mut _ as *mut _)
+        WinVerifyTrust(std::ptr::null_mut(), &mut action, &mut data as *mut _ as *mut _)
     };
 
     let signer_hash = if trust_status == 0 {
