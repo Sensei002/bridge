@@ -11,6 +11,7 @@ use std::{
 
 use bridge_network::{accept_noise_xx, connect_noise_xx, NoiseConnection};
 use bridge_protocol::{DeviceDescriptor, DeviceId};
+use uuid::Uuid;
 use serde::{Deserialize, Serialize};
 
 const MAX_ACTIVE_SESSIONS: usize = 32;
@@ -250,6 +251,40 @@ pub unsafe extern "C" fn bridge_attestation_public_key(seed_hex: *const c_char) 
     CString::new(json.to_string()).unwrap().into_raw()
 }
 
+/// Sign a Windows display-service challenge with the persisted Android attestation identity.
+#[no_mangle]
+pub unsafe extern "C" fn bridge_attestation_sign(
+    seed_hex: *const c_char,
+    nonce_hex: *const c_char,
+    session_id: *const c_char,
+    device_fingerprint: *const c_char,
+) -> *mut c_char {
+    if seed_hex.is_null() || nonce_hex.is_null() || session_id.is_null() || device_fingerprint.is_null() {
+        return CString::new(serde_json::json!({"ok": false, "error": "null attestation argument"}).to_string()).unwrap().into_raw();
+    }
+    let result = (|| -> Result<serde_json::Value, String> {
+        let mut seed = decode_hex(CStr::from_ptr(seed_hex).to_str().map_err(|e| e.to_string())?)?;
+        let nonce = decode_hex(CStr::from_ptr(nonce_hex).to_str().map_err(|e| e.to_string())?)?;
+        let session = Uuid::parse_str(CStr::from_ptr(session_id).to_str().map_err(|e| e.to_string())?)
+            .map_err(|e| format!("invalid attestation session ID: {e}"))?;
+        let fingerprint = CStr::from_ptr(device_fingerprint).to_str().map_err(|e| e.to_string())?;
+        let proof = bridge_security::peer_attestation::sign_android_peer_attestation(
+            &seed, &nonce, session, fingerprint,
+        ).map_err(|e| e.to_string());
+        seed.fill(0);
+        let proof = proof?;
+        Ok(serde_json::json!({
+            "ok": true,
+            "nonce": hex::encode(proof.nonce),
+            "session_id": proof.session_id,
+            "device_fingerprint": proof.device_fingerprint,
+            "signature": hex::encode(proof.signature),
+        }))
+    })();
+    let json = result.unwrap_or_else(|error| serde_json::json!({"ok": false, "error": error}));
+    CString::new(json.to_string()).unwrap().into_raw()
+}
+
 /// Establish an authenticated Noise XX session to the requested peer.
 ///
 /// # Safety
@@ -418,6 +453,25 @@ mod android_jni {
         let text: String = env.get_string(&seed_hex).map(|v| v.into()).unwrap_or_default();
         let input = CString::new(text).unwrap_or_default();
         let output = unsafe { bridge_attestation_public_key(input.as_ptr()) };
+        let response = unsafe { CStr::from_ptr(output).to_string_lossy().into_owned() };
+        unsafe { bridge_string_free(output); }
+        env.new_string(response).map(|value| value.into_raw()).unwrap_or(std::ptr::null_mut())
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_app_bridge_android_BridgeNative_attestationSign(
+        mut env: JNIEnv, _class: JClass, seed_hex: JString, nonce_hex: JString,
+        session_id: JString, device_fingerprint: JString
+    ) -> jstring {
+        let seed: String = env.get_string(&seed_hex).map(|v| v.into()).unwrap_or_default();
+        let nonce: String = env.get_string(&nonce_hex).map(|v| v.into()).unwrap_or_default();
+        let session: String = env.get_string(&session_id).map(|v| v.into()).unwrap_or_default();
+        let fingerprint: String = env.get_string(&device_fingerprint).map(|v| v.into()).unwrap_or_default();
+        let seed = CString::new(seed).unwrap_or_default();
+        let nonce = CString::new(nonce).unwrap_or_default();
+        let session = CString::new(session).unwrap_or_default();
+        let fingerprint = CString::new(fingerprint).unwrap_or_default();
+        let output = unsafe { bridge_attestation_sign(seed.as_ptr(), nonce.as_ptr(), session.as_ptr(), fingerprint.as_ptr()) };
         let response = unsafe { CStr::from_ptr(output).to_string_lossy().into_owned() };
         unsafe { bridge_string_free(output); }
         env.new_string(response).map(|value| value.into_raw()).unwrap_or(std::ptr::null_mut())
