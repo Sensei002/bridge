@@ -36,6 +36,7 @@ use windows_sys::Win32::{
 };
 
 mod driver;
+mod pipe_client;
 
 const SERVICE_NAME: &str = "BridgeDisplayService";
 const PIPE_NAME: &str = r"\\.\pipe\BridgeDisplayService";
@@ -168,7 +169,14 @@ fn run_pipe_server(shutdown: &mpsc::Receiver<()>) -> io::Result<()> {
                     ReadFile(pipe, request.as_mut_ptr(), request.len() as u32, &mut read, null_mut())
                 };
                 if read_ok != 0 {
-                    break (read, handle_request(&request[..read as usize]));
+                    let response = match pipe_client::identify(pipe) {
+                        Ok(caller) => {
+                            eprintln!("Bridge Display Service request from PID {} ({})", caller.process_id, caller.image_path.display());
+                            handle_request(&request[..read as usize], &caller)
+                        }
+                        Err(error) => format!("BRIDGE_DISPLAY/1 ERROR caller identity unavailable: {error}\\n").into_bytes(),
+                    };
+                    break (read, response);
                 }
                 match unsafe { GetLastError() } {
                     ERROR_NO_DATA if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
@@ -191,7 +199,7 @@ fn run_pipe_server(shutdown: &mpsc::Receiver<()>) -> io::Result<()> {
     Ok(())
 }
 
-fn handle_request(bytes: &[u8]) -> Vec<u8> {
+fn handle_request(bytes: &[u8], _caller: &pipe_client::PipeClientIdentity) -> Vec<u8> {
     use bridge_display_service::{DisplayStatus, Request};
     let request = match Request::parse(bytes) {
         Ok(request) => request,
