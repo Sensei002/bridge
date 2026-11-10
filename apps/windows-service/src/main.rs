@@ -280,7 +280,7 @@ fn handle_request(bytes: &[u8], caller: &pipe_client::PipeClientIdentity, challe
                     &public_key,
                 ).map_err(|message| io::Error::new(io::ErrorKind::PermissionDenied, message))?;
                 pinned_clients.insert(caller.process_id, caller.clone());
-                Ok(format!("BRIDGE_DISPLAY/1 CHALLENGE nonce={nonce}\\n").into_bytes())
+                Ok(format!("BRIDGE_DISPLAY/1 CHALLENGE nonce={nonce}\n").into_bytes())
             }),
         Request::AttestationResponse { nonce, session_id, device_fingerprint, signature } =>
             verify_publisher::verify_client_publisher(&caller.image_path).and_then(|_| {
@@ -303,7 +303,7 @@ fn handle_request(bytes: &[u8], caller: &pipe_client::PipeClientIdentity, challe
                     &device_fingerprint,
                     &signature,
                 ).map_err(|message| io::Error::new(io::ErrorKind::PermissionDenied, message))?;
-                Ok(b"BRIDGE_DISPLAY/1 OK attestation_verified\\n".to_vec())
+                Ok(b"BRIDGE_DISPLAY/1 OK attestation_verified\n".to_vec())
             }),
         // Fail closed until the service can verify the caller process and bind
         // this request to a live, authenticated Android Second Screen session.
