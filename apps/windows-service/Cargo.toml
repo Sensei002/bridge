@@ -6,6 +6,7 @@ license.workspace = true
 description = "Privileged Windows service for Bridge virtual display lifecycle"
 
 [dependencies]
+getrandom = "0.3"
 uuid = { workspace = true }
 
 [features]
