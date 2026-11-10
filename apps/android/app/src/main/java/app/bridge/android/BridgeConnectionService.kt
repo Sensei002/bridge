@@ -170,6 +170,7 @@ class BridgeConnectionService : Service() {
 
                 val receiver = BridgeTransferReceiver(
                     this,
+                    fingerprint,
                     onOffer = { offer ->
                         mainHandler.post {
                             if (!stopping && BridgeRuntimeState.incomingOffers.none { it.transferId == offer.transferId }) {
@@ -259,7 +260,9 @@ class BridgeConnectionService : Service() {
                     mainHandler.post {
                         if (!stopping) {
                             BridgeRuntimeState.connectedSessionHandles[peerId] = handle
-                            receiver.attach(peerId, handle)
+                            val peerPlatform = controller.trustedDevices()
+                                .firstOrNull { it.deviceId == peerId }?.platform
+                            receiver.attach(peerId, handle, allowDisplayAttestation = peerPlatform == "windows")
                         } else {
                             BridgeNative.sessionClose(handle)
                         }
