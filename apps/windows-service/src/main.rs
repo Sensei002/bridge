@@ -358,23 +358,55 @@ fn handle_request(
                     remaining_ms,
                 ).into_bytes())
             }),
-        // Fail closed until the service can verify the caller process and bind
-        // this request to a live, authenticated Android Second Screen session.
-        // Merely reaching the interactive-user named pipe is not authorization.
-        Request::Connect => verify_publisher::verify_client_publisher(&caller.image_path).and_then(|_| {
-            Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "CONNECT is disabled until driver lease enforcement is implemented",
-            ))
-        }),
-        Request::Disconnect => verify_publisher::verify_client_publisher(&caller.image_path).and_then(|_| {
-            Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "DISCONNECT is disabled until driver lease enforcement is implemented",
-            ))
-        }),
+        // Every driver mutation requires a currently active, exact lease identity.
+        Request::Connect { lease_id, device_fingerprint } =>
+            verify_publisher::verify_client_publisher(&caller.image_path).and_then(|_| {
+                validate_lease_owner(caller, &device_fingerprint, pinned_clients, lease_fingerprints)?;
+                leases.authorize_operation(lease_id, caller.process_id, &device_fingerprint)
+                    .map_err(|message| io::Error::new(io::ErrorKind::PermissionDenied, message))?;
+                driver::set_connected(true)
+            }),
+        Request::Disconnect { lease_id, device_fingerprint } =>
+            verify_publisher::verify_client_publisher(&caller.image_path).and_then(|_| {
+                validate_lease_owner(caller, &device_fingerprint, pinned_clients, lease_fingerprints)?;
+                leases.authorize_operation(lease_id, caller.process_id, &device_fingerprint)
+                    .map_err(|message| io::Error::new(io::ErrorKind::PermissionDenied, message))?;
+                driver::set_connected(false)?;
+                // A successful disconnect consumes the lease. A fresh attestation
+                // is required before the next connection can be authorized.
+                leases.revoke(lease_id);
+                lease_fingerprints.remove(&caller.process_id);
+                pinned_clients.remove(&caller.process_id);
+                Ok(b"BRIDGE_DISPLAY/1 OK disconnected\\n".to_vec())
+            }),
     };
     result.unwrap_or_else(|error| format!("BRIDGE_DISPLAY/1 ERROR {error}\n").into_bytes())
+}
+
+
+fn validate_lease_owner(
+    caller: &pipe_client::PipeClientIdentity,
+    device_fingerprint: &str,
+    pinned_clients: &HashMap<u32, pipe_client::PipeClientIdentity>,
+    lease_fingerprints: &HashMap<u32, String>,
+) -> io::Result<()> {
+    caller.ensure_alive()?;
+    let pinned = pinned_clients.get(&caller.process_id).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::PermissionDenied, "no attested desktop process is pinned")
+    })?;
+    pinned.ensure_alive()?;
+    let same_image = pinned.image_path.to_string_lossy()
+        .eq_ignore_ascii_case(&caller.image_path.to_string_lossy());
+    if !same_image {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "display lease process image changed"));
+    }
+    let expected_fingerprint = lease_fingerprints.get(&caller.process_id).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::PermissionDenied, "no attested device is pinned to this process")
+    })?;
+    if !expected_fingerprint.eq_ignore_ascii_case(device_fingerprint) {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "display lease device fingerprint mismatch"));
+    }
+    Ok(())
 }
 
 
