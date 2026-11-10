@@ -165,7 +165,7 @@ mod tests {
         let wrong = format!("{}0", &nonce[..63]);
         assert_eq!(
             registry.consume_for_process(42, &wrong),
-            Err("challenge response must be exactly 64 hexadecimal characters")
+            Err("client challenge response mismatch")
         );
         assert!(registry.consume_for_process(42, &nonce).is_ok());
     }
