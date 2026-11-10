@@ -1,75 +1,86 @@
-# Windows Code-Signing Plan
+# Bridge Windows Signing and Trust Plan
 
 ## Decision
 
-Bridge will pursue **SignPath Foundation's free open-source code-signing program** for its Windows user-mode software. This is the best first route because the repository is public, uses the MIT license, is actively maintained, has published releases, and documents its functionality.
+Bridge will use a **Bridge-owned, self-managed code-signing certificate**. The plan must remain zero-cost: no paid code-signing certificate, paid signing service, SignPath dependency, or paid timestamping service.
 
-SignPath Foundation issues and protects the signing certificate in its own name and keeps the private key in its hardware security module. If accepted, Windows will identify **SignPath Foundation** as the verified publisher. This is not a personal certificate for Sensei002 and must not be presented as one.
+The certificate is intended to sign Bridge's Windows driver package and, where useful for the service trust design, Bridge-owned Windows executables and installer. It is not a Microsoft-issued production driver signature. A self-signed certificate is not automatically trusted by Windows or by every PC.
 
-Application and approval are external steps. A repository maintainer must apply, complete the Foundation's review, configure the SignPath project, and authorize the GitHub trusted build system. No certificate, account, project ID, or signing token is assumed to exist until that process is complete.
+## Certificate ownership and private-key protection
 
-References:
-- [SignPath Foundation](https://signpath.org/)
-- [Eligibility and conditions](https://signpath.org/terms.html)
-- [SignPath GitHub trusted build system](https://docs.signpath.io/trusted-build-systems/github)
+- Create one long-lived Bridge code-signing certificate with a clearly identified subject, such as CN=Bridge Project.
+- Keep the private key out of Git, release assets, source archives, logs, and ordinary build artifacts.
+- Store the password-protected PFX as a GitHub Actions secret named BRIDGE_DRIVER_SIGNING_PFX_BASE64; store its password as BRIDGE_DRIVER_SIGNING_PFX_PASSWORD.
+- Store the public certificate thumbprint as a non-secret repository variable named BRIDGE_DRIVER_CERT_THUMBPRINT.
+- Restrict who can change workflows and access signing secrets. Do not expose secrets to pull-request workflows from forks or untrusted branches.
+- Use the same certificate for subsequent releases so installed PCs can continue to recognize the Bridge publisher. Plan certificate renewal and an overlap period before expiry.
+- Never generate a new signing identity on every CI run. That would break trust continuity and make updates require repeated certificate approval.
 
-## What can be prepared in this repository
+The certificate must be generated once in a controlled environment, exported as a password-protected PFX, and then added to GitHub Secrets by the repository owner. GitHub Actions cannot configure repository secrets through the normal workflow token; this setup is a one-time owner action.
 
-After acceptance and project configuration, the GitHub release pipeline can request signing for Bridge-owned Windows user-mode outputs, such as:
+## GitHub Actions signing pipeline
 
-- `bridge-desktop.exe`
-- `bridge-display-service.exe`
-- the final Bridge MSI installer
+The Windows driver workflow will:
 
-The signing request must originate only from the protected, reviewed release workflow on the approved release branch/tag. Never submit pull-request artifacts, arbitrary workflow-dispatch artifacts, developer-local binaries, or downloaded third-party executables for signing.
+1. Build the IddCx/UMDF driver and produce its INF, DLL, and catalog.
+2. On trusted pushes/releases only, import the PFX from GitHub Secrets into the ephemeral Windows runner.
+3. Confirm that the imported certificate thumbprint matches BRIDGE_DRIVER_CERT_THUMBPRINT.
+4. Sign the driver package catalog using SHA-256 and the Bridge certificate.
+5. Verify the catalog signature and signer identity before packaging.
+6. Export only the public .cer certificate alongside the signed driver package.
+7. Generate SHA-256 hashes for every packaged file and publish the signed package, public certificate, and hash manifest as CI/release artifacts.
+8. Delete temporary PFX material and certificate-store entries even when a step fails.
 
-The private signing key must never be exported, stored in GitHub Secrets, committed, or placed on a runner. GitHub Actions should submit the build artifact to SignPath's trusted GitHub integration and wait for the signed result. The workflow must verify the returned signature before attaching the artifact to a release.
+Pull-request builds must never receive signing secrets and must remain unsigned validation builds. A trusted release build must fail if signing secrets or thumbprint configuration are missing; it must never silently label an unsigned package as signed.
 
-Signing remains disabled until SignPath has approved Bridge and supplied the required organization/project configuration. Missing configuration must never silently produce a release described as signed.
+## Installer and first-run trust flow
 
-## Important: the IddCx driver is a separate signing problem
+The intended Windows installation experience is:
 
-SignPath Foundation's open-source Authenticode program must **not** be assumed to provide a Microsoft-trusted Windows driver package signature.
+1. Download the Bridge installer and verify its published SHA-256 hash.
+2. Run the installer; Windows may initially show an Unknown Publisher warning because the installer is not yet trusted.
+3. Before installing the driver, show the Bridge certificate subject and thumbprint and ask an administrator to approve trusting that exact certificate.
+4. Install the public certificate into the appropriate Windows certificate stores only after explicit approval.
+5. Verify the signed driver catalog, expected Bridge signer thumbprint, and package file hashes.
+6. Install the driver package through the supported Windows PnP driver installation path.
+7. Re-verify signatures and hashes before any driver update. Reject mismatched, unsigned, or tampered packages.
 
-The Bridge IddCx UMDF driver package needs its own Windows Hardware Dev Center / Partner Center submission path. Microsoft's driver documentation says attestation signing requires a Hardware Dev Center account associated with an EV code-signing certificate; Microsoft signs the submitted driver package. That is a separate identity, certificate, account, cost, and approval path from SignPath's free user-mode application signing.
+The public certificate may be bundled with the installer, but bundling alone does not make it trusted. The installer must not silently add a root certificate or lower Windows security settings.
 
-- [Microsoft driver code-signing requirements](https://learn.microsoft.com/en-us/windows-hardware/drivers/dashboard/code-signing-reqs)
-- [Driver signing options and attestation requirements](https://learn.microsoft.com/en-us/windows-hardware/drivers/dashboard/driver-signing-offerings)
-- [Partner Center for Windows Hardware](https://learn.microsoft.com/en-us/windows-hardware/drivers/dashboard/)
+## Windows compatibility boundary
 
-Until a driver package has been accepted and signed through the required Microsoft process, do not install it on a normal Windows machine. Do not disable Secure Boot or Windows driver-signature enforcement as a workaround.
+A self-signed certificate provides a Bridge identity; it does **not** turn a test signature into a Microsoft-trusted production signature. Windows policy varies by version, Secure Boot state, Memory Integrity/HVCI, and driver package type. Test-signed packages may require Test Mode and/or explicit certificate trust, and some configurations can reject them.
 
-## SignPath Foundation eligibility checklist
+Therefore:
+- Do not claim universal installation on every Windows PC until tested on clean Windows 10/11 machines with Secure Boot and Memory Integrity enabled.
+- Do not disable Secure Boot, Memory Integrity, or BitLocker as an automatic installer step.
+- Do not enable Test Mode automatically.
+- If Windows refuses the package under its normal security policy, stop and explain the exact limitation. Do not bypass the policy.
+- Use a disposable/recoverable test PC for initial installation testing. Do not install the current unsigned driver on a daily-use PC.
 
-Before applying, confirm the following accurately:
+For broad public distribution, investigate a no-cost Microsoft-supported route for this exact UMDF package before deciding that a paid certificate is necessary. The project does not authorize spending money as a workaround.
 
-- Repository is public and source code is available under the MIT license.
-- Bridge is actively maintained and already has public releases.
-- Project functionality and downloads are documented.
-- All code submitted for signing is Bridge's own maintained code; do not submit third-party upstream binaries as if Bridge authored them.
-- The team responsible for signing is the same team responsible for developing and maintaining the repository.
-- The project has a public privacy statement. Bridge's README currently states that it does not silently upload data or use a background relay; maintain a dedicated privacy page before the application if SignPath requests one.
-- Team roles, commit/review policy, and signing approvers are accurately declared. Do not invent additional maintainers or approvers.
+## Windows app and service signing
 
-SignPath may request changes or decline the application. Approval is not guaranteed. Existing unsigned releases remain unsigned; signing applies only to artifacts approved and produced after activation.
+The desktop app, display service, and MSI may remain unsigned initially. If the service authorization design requires publisher verification, either:
+- sign the relevant Bridge-owned executable with the same Bridge certificate and validate its pinned thumbprint; or
+- replace Authenticode publisher verification with a separately reviewed, robust process/session authorization mechanism.
 
-## Publisher identity and service authorization
-
-Once the first official signed Bridge desktop executable is available:
-
-1. Verify the actual Authenticode signer certificate from the signed executable.
-2. Record the certificate identity and public-key/certificate pinning strategy, including a safe rotation plan.
-3. Provision the accepted publisher identity to the Windows service through an administrator-controlled installer/configuration path.
-4. Implement and test WinVerifyTrust verification plus exact signer pinning.
-5. Keep CONNECT/DISCONNECT disabled if the pin is missing, malformed, expired, revoked, or mismatched.
-
-Do not hard-code an assumed SignPath thumbprint now. Certificate details must come from the actual issued signing certificate, and renewal/rotation must be planned rather than guessed.
+Do not treat PID, process path, file name, or a caller-supplied hash as proof of identity. Do not enable CONNECT/DISCONNECT until the service authorization gates are implemented and tested.
 
 ## Current status
 
-- Windows desktop/MSI/service builds: unsigned.
-- SignPath Foundation application: not yet submitted or approved.
-- SignPath organization/project configuration and GitHub integration: not configured.
-- Microsoft Hardware Dev Center EV certificate/account: not configured.
-- IddCx driver: unsigned; no end-user installation.
+- Windows desktop/MSI/service: unsigned.
+- Bridge-owned driver-signing certificate: not generated/configured.
+- GitHub signing secrets and thumbprint variable: not configured.
+- Driver CI: builds an unsigned x64 UMDF package for pull-request validation.
+- Signed driver artifact and public certificate: not yet produced.
+- Installer trust prompt, signature/hash verification, and driver installation: not implemented.
 - Display-service CONNECT/DISCONNECT: fail-closed and disabled.
+
+## References
+
+- [Microsoft: Test-signing driver packages](https://learn.microsoft.com/en-us/windows-hardware/drivers/install/test-signing-driver-packages)
+- [Microsoft: Installing test-signed driver packages](https://learn.microsoft.com/en-us/windows-hardware/drivers/install/installing-test-signed-driver-packages)
+- [Microsoft: TESTSIGNING boot configuration](https://learn.microsoft.com/en-us/windows-hardware/drivers/install/the-testsigning-boot-configuration-option)
+- [Microsoft: Installing an unsigned driver during development and test](https://learn.microsoft.com/en-us/windows-hardware/drivers/install/installing-an-unsigned-driver-during-development-and-test)
