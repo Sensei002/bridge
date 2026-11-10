@@ -22,8 +22,8 @@ const PROCESS_SYNCHRONIZE: u32 = 0x0010_0000;
 /// mistaken for the original client between identification and authorization.
 ///
 /// This remains attribution, not publisher authentication: image paths are not
-/// proof of signer identity. Mutating display commands remain fail-closed until
-/// the service verifies the signed client and binds an authenticated Noise peer.
+/// proof of signer identity. The service separately verifies the publisher and
+/// requires an active process- and peer-bound attestation lease for mutations.
 #[derive(Debug, Clone)]
 pub struct PipeClientIdentity {
     pub process_id: u32,
