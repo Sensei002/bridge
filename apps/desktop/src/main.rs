@@ -117,7 +117,7 @@ impl DesktopSession {
         let (sender, incoming) = mpsc::sync_channel(8);
         let (offer_sender, incoming_offers) = mpsc::channel();
         let (clipboard_sender, clipboard_incoming) = mpsc::sync_channel(4);
-        let (challenge_sender, challenge_responses) = mpsc::channel();
+        let (challenge_sender, challenge_responses) = mpsc::sync_channel(8);
         let reader_connection_for_thread = Arc::clone(&reader_connection);
         thread::Builder::new()
             .name("bridge-desktop-session-reader".into())
@@ -166,7 +166,7 @@ impl DesktopSession {
                             if offer_sender.send(offer).is_err() { break; }
                         }
                         Ok(TransferPacket::Control(TransferControl::DisplayChallengeResponse { request_id, nonce })) => {
-                            if challenge_sender.send((request_id, nonce)).is_err() { break; }
+                            if let Err(mpsc::TrySendError::Disconnected(_)) = challenge_sender.try_send((request_id, nonce)) { break; }
                         }
                         _ => {
                             if sender.send(plaintext).is_err() { break; }
@@ -241,6 +241,7 @@ impl DesktopSession {
     /// Forward a Windows-service challenge through this live authenticated Noise session.
     /// The Android peer echoes it inside the encrypted channel; this method does not
     /// itself authorize a display lease or enable any driver operation.
+    #[allow(dead_code)] // Consumed by the named-pipe challenge integration in the next service phase.
     fn relay_service_challenge(&self, nonce: &str, timeout: Duration) -> Result<(), String> {
         if nonce.len() != 64 || !nonce.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err("display-service challenge must be 64 hexadecimal characters".into());
@@ -253,14 +254,23 @@ impl DesktopSession {
             TransferControl::DisplayChallengeRequest { request_id, nonce: nonce.to_ascii_lowercase() },
         )).map_err(|error| error.to_string())?;
         self.send(&packet)?;
-        let response = self.challenge_responses.lock()
-            .map_err(|_| "display challenge response lock poisoned")?
-            .recv_timeout(timeout)
-            .map_err(|error| format!("Android challenge response unavailable: {error}"))?;
-        if response.0 != request_id || !response.1.eq_ignore_ascii_case(nonce) {
-            return Err("Android challenge response did not match the active request".into());
+        let deadline = Instant::now() + timeout;
+        let responses = self.challenge_responses.lock()
+            .map_err(|_| "display challenge response lock poisoned")?;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err("Android challenge response timed out".into());
+            }
+            let response = responses.recv_timeout(remaining)
+                .map_err(|error| format!("Android challenge response unavailable: {error}"))?;
+            // Ignore delayed responses from an earlier timed-out request.
+            if response.0 != request_id { continue; }
+            if !response.1.eq_ignore_ascii_case(nonce) {
+                return Err("Android challenge response did not match the active request".into());
+            }
+            return Ok(());
         }
-        Ok(())
     }
 
     fn receive_timeout(&self, timeout: Duration) -> Result<Vec<u8>, String> {
