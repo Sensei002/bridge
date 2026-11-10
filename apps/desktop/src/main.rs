@@ -1144,7 +1144,7 @@ impl eframe::App for BridgeApp {
                                 Ok(())
                             })();
                             let message = match result {
-                                Ok(()) => "Android peer attestation independently verified by the Windows service for this live session.".to_owned(),
+                                Ok(()) => "Android peer independently verified; Windows service issued a 15-second process- and device-bound display lease.".to_owned(),
                                 Err(error) => format!("Display-service session verification is not ready: {error}"),
                             };
                             let _ = status_tx.send(message);
