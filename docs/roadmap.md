@@ -67,8 +67,10 @@ Architecture and acceptance gates: [docs/second-screen-architecture.md](second-s
 - [x] Define separation between the existing Rust/egui UI, a Bridge Display Windows service, and the C++ UMDF display driver.
 - [x] Add a WDK/Visual Studio C++ IddCx driver project based on Microsoft's pinned official sample (build-only foundation; not installable as a Bridge feature yet).
 - [x] Build and validate the unsigned x64 driver package in GitHub Actions (CI artifact only; not yet installable for normal use).
-- [ ] Replace the sample demonstration monitors with one Bridge-branded virtual monitor and conservative portrait mode list.
-- [ ] Implement virtual monitor arrival/removal and safe display-mode negotiation.
+- [x] Replace the sample demonstration monitors with one Bridge-branded virtual monitor and conservative portrait mode list.
+- [x] Add restricted driver-side connect/disconnect/status control IOCTLs; monitor arrival is no longer automatic at adapter startup.
+- [ ] Implement the Bridge Display Service control client, service identity/ACL, and authenticated-session monitor lifecycle binding.
+- [ ] Validate virtual monitor arrival/removal and safe display-mode negotiation on a disposable Windows test machine.
 - [ ] Package driver + service installation, upgrade, rollback, and removal with explicit elevation.
 - [ ] Establish a supported driver signing/distribution process.
 
