@@ -247,6 +247,7 @@ NTSTATUS IddSampleDeviceD0Entry(WDFDEVICE Device, WDF_POWER_DEVICE_STATE Previou
     // This function is called by WDF to start the device in the fully-on power state.
 
     auto* pContext = WdfObjectGet_IndirectDeviceContextWrapper(Device);
+    if (pContext == nullptr || pContext->pContext == nullptr) return STATUS_DEVICE_NOT_READY;
     return pContext->pContext->InitAdapter();
 }
 
@@ -459,6 +460,8 @@ IndirectDeviceContext::~IndirectDeviceContext()
 
 NTSTATUS IndirectDeviceContext::InitAdapter()
 {
+    m_AdapterReady.store(false);
+
     // ==============================
     // TODO: Update the below diagnostic information in accordance with the target hardware. The strings and version
     // numbers are used for telemetry and may be displayed to the user in some situations.
