@@ -264,7 +264,8 @@ pub unsafe extern "C" fn bridge_attestation_sign(
     }
     let result = (|| -> Result<serde_json::Value, String> {
         let nonce = decode_hex(CStr::from_ptr(nonce_hex).to_str().map_err(|e| e.to_string())?)?;
-        let session = Uuid::parse_str(CStr::from_ptr(session_id).to_str().map_err(|e| format!("invalid attestation session ID: {e}"))?)?;
+        let session = Uuid::parse_str(CStr::from_ptr(session_id).to_str().map_err(|e| e.to_string())?)
+            .map_err(|e| format!("invalid attestation session ID: {e}"))?;
         let fingerprint = CStr::from_ptr(device_fingerprint).to_str().map_err(|e| e.to_string())?;
         let mut seed = decode_hex(CStr::from_ptr(seed_hex).to_str().map_err(|e| e.to_string())?)?;
         let proof = bridge_security::peer_attestation::sign_android_peer_attestation(
