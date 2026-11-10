@@ -16,6 +16,7 @@ Environment:
 --*/
 
 #include "Driver.h"
+#include "BridgeDisplayControl.h"
 #include "Driver.tmh"
 
 using namespace std;
@@ -95,6 +96,7 @@ EVT_WDF_DEVICE_D0_ENTRY IddSampleDeviceD0Entry;
 
 EVT_IDD_CX_ADAPTER_INIT_FINISHED IddSampleAdapterInitFinished;
 EVT_IDD_CX_ADAPTER_COMMIT_MODES IddSampleAdapterCommitModes;
+EVT_IDD_CX_DEVICE_IO_CONTROL IddSampleDeviceIoControl;
 
 EVT_IDD_CX_PARSE_MONITOR_DESCRIPTION IddSampleParseMonitorDescription;
 EVT_IDD_CX_MONITOR_GET_DEFAULT_DESCRIPTION_MODES IddSampleMonitorGetDefaultModes;
@@ -187,6 +189,7 @@ NTSTATUS IddSampleDeviceAdd(WDFDRIVER Driver, PWDFDEVICE_INIT pDeviceInit)
     // redirects IoDeviceControl requests to an internal queue. This sample does not need this.
     // IddConfig.EvtIddCxDeviceIoControl = IddSampleIoDeviceControl;
 
+    IddConfig.EvtIddCxDeviceIoControl = IddSampleDeviceIoControl;
     IddConfig.EvtIddCxAdapterInitFinished = IddSampleAdapterInitFinished;
 
     IddConfig.EvtIddCxParseMonitorDescription = IddSampleParseMonitorDescription;
@@ -214,6 +217,11 @@ NTSTATUS IddSampleDeviceAdd(WDFDRIVER Driver, PWDFDEVICE_INIT pDeviceInit)
         }
     };
 
+    UNICODE_STRING DeviceSddl;
+    RtlInitUnicodeString(&DeviceSddl, L"D:P(A;;GA;;;SY)(A;;GA;;;BA)");
+    Status = WdfDeviceInitAssignSDDLString(pDeviceInit, &DeviceSddl);
+    if (!NT_SUCCESS(Status)) return Status;
+
     WDFDEVICE Device = nullptr;
     Status = WdfDeviceCreate(&pDeviceInit, &Attr, &Device);
     if (!NT_SUCCESS(Status))
@@ -222,12 +230,15 @@ NTSTATUS IddSampleDeviceAdd(WDFDRIVER Driver, PWDFDEVICE_INIT pDeviceInit)
     }
 
     Status = IddCxDeviceInitialize(Device);
+    if (!NT_SUCCESS(Status)) return Status;
 
-    // Create a new device context object and attach it to the WDF device object
+    static const GUID BridgeDisplayInterfaceGuid = BRIDGE_DISPLAY_INTERFACE_GUID;
+    Status = WdfDeviceCreateDeviceInterface(Device, &BridgeDisplayInterfaceGuid, nullptr);
+    if (!NT_SUCCESS(Status)) return Status;
+
     auto* pContext = WdfObjectGet_IndirectDeviceContextWrapper(Device);
     pContext->pContext = new IndirectDeviceContext(Device);
-
-    return Status;
+    return STATUS_SUCCESS;
 }
 
 _Use_decl_annotations_
@@ -440,7 +451,8 @@ void SwapChainProcessor::RunCore()
 #pragma region IndirectDeviceContext
 
 IndirectDeviceContext::IndirectDeviceContext(_In_ WDFDEVICE WdfDevice) :
-    m_WdfDevice(WdfDevice)
+    m_WdfDevice(WdfDevice),
+    m_Monitor(nullptr)
 {
     m_Adapter = {};
 }
@@ -503,59 +515,53 @@ void IndirectDeviceContext::InitAdapter()
     }
 }
 
-void IndirectDeviceContext::FinishInit(UINT ConnectorIndex)
+NTSTATUS IndirectDeviceContext::ConnectMonitor(UINT ConnectorIndex)
 {
-    // ==============================
-    // TODO: In a real driver, the EDID should be retrieved dynamically from a connected physical monitor. The EDIDs
-    // provided here are purely for demonstration.
-    // Monitor manufacturers are required to correctly fill in physical monitor attributes in order to allow the OS
-    // to optimize settings like viewing distance and scale factor. Manufacturers should also use a unique serial
-    // number every single device to ensure the OS can tell the monitors apart.
-    // ==============================
-
+    std::lock_guard<std::mutex> lock(m_MonitorLock);
+    if (m_Monitor != nullptr) return STATUS_SUCCESS;
     WDF_OBJECT_ATTRIBUTES Attr;
     WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&Attr, IndirectMonitorContextWrapper);
-
-    // In the sample driver, we report a monitor right away but a real driver would do this when a monitor connection event occurs
     IDDCX_MONITOR_INFO MonitorInfo = {};
     MonitorInfo.Size = sizeof(MonitorInfo);
     MonitorInfo.MonitorType = DISPLAYCONFIG_OUTPUT_TECHNOLOGY_HDMI;
     MonitorInfo.ConnectorIndex = ConnectorIndex;
-
-    // EDID-less Bridge monitor: supported modes are reported by the default-mode callback.
     MonitorInfo.MonitorDescription.Size = sizeof(MonitorInfo.MonitorDescription);
     MonitorInfo.MonitorDescription.Type = IDDCX_MONITOR_DESCRIPTION_TYPE_EDID;
     MonitorInfo.MonitorDescription.DataSize = 0;
     MonitorInfo.MonitorDescription.pData = nullptr;
-
-    // ==============================
-    // TODO: The monitor's container ID should be distinct from "this" device's container ID if the monitor is not
-    // permanently attached to the display adapter device object. The container ID is typically made unique for each
-    // monitor and can be used to associate the monitor with other devices, like audio or input devices. In this
-    // sample we generate a random container ID GUID, but it's best practice to choose a stable container ID for a
-    // unique monitor or to use "this" device's container ID for a permanent/integrated monitor.
-    // ==============================
-
-    // Create a container ID
-    CoCreateGuid(&MonitorInfo.MonitorContainerId);
-
+    MonitorInfo.MonitorContainerId = GUID_NULL;
     IDARG_IN_MONITORCREATE MonitorCreate = {};
     MonitorCreate.ObjectAttributes = &Attr;
     MonitorCreate.pMonitorInfo = &MonitorInfo;
-
-    // Create a monitor object with the specified monitor descriptor
-    IDARG_OUT_MONITORCREATE MonitorCreateOut;
+    IDARG_OUT_MONITORCREATE MonitorCreateOut = {};
     NTSTATUS Status = IddCxMonitorCreate(m_Adapter, &MonitorCreate, &MonitorCreateOut);
-    if (NT_SUCCESS(Status))
-    {
-        // Create a new monitor context object and attach it to the Idd monitor object
-        auto* pMonitorContextWrapper = WdfObjectGet_IndirectMonitorContextWrapper(MonitorCreateOut.MonitorObject);
-        pMonitorContextWrapper->pContext = new IndirectMonitorContext(MonitorCreateOut.MonitorObject);
+    if (!NT_SUCCESS(Status)) return Status;
+    auto* pMonitorContextWrapper = WdfObjectGet_IndirectMonitorContextWrapper(MonitorCreateOut.MonitorObject);
+    pMonitorContextWrapper->pContext = new IndirectMonitorContext(MonitorCreateOut.MonitorObject);
+    IDARG_OUT_MONITORARRIVAL ArrivalOut = {};
+    Status = IddCxMonitorArrival(MonitorCreateOut.MonitorObject, &ArrivalOut);
+    if (!NT_SUCCESS(Status)) { WdfObjectDelete((WDFOBJECT)MonitorCreateOut.MonitorObject); return Status; }
+    m_Monitor = MonitorCreateOut.MonitorObject;
+    return STATUS_SUCCESS;
+}
 
-        // Tell the OS that the monitor has been plugged in
-        IDARG_OUT_MONITORARRIVAL ArrivalOut;
-        Status = IddCxMonitorArrival(MonitorCreateOut.MonitorObject, &ArrivalOut);
-    }
+NTSTATUS IndirectDeviceContext::DisconnectMonitor()
+{
+    std::lock_guard<std::mutex> lock(m_MonitorLock);
+    if (m_Monitor == nullptr) return STATUS_SUCCESS;
+    NTSTATUS Status = IddCxMonitorDeparture(m_Monitor);
+    if (NT_SUCCESS(Status)) m_Monitor = nullptr;
+    return Status;
+}
+
+void IndirectDeviceContext::GetDisplayStatus(BRIDGE_DISPLAY_STATUS& Status)
+{
+    std::lock_guard<std::mutex> lock(m_MonitorLock);
+    Status = {};
+    Status.Size = sizeof(Status);
+    Status.Version = BRIDGE_DISPLAY_CONTROL_VERSION;
+    Status.IsConnected = (m_Monitor != nullptr) ? 1u : 0u;
+    Status.SupportedModeCount = ARRAYSIZE(s_BridgeMonitorModes);
 }
 
 IndirectMonitorContext::IndirectMonitorContext(_In_ IDDCX_MONITOR Monitor) :
@@ -603,13 +609,41 @@ NTSTATUS IddSampleAdapterInitFinished(IDDCX_ADAPTER AdapterObject, const IDARG_I
     // to report attached monitors.
 
     auto* pDeviceContextWrapper = WdfObjectGet_IndirectDeviceContextWrapper(AdapterObject);
-    if (NT_SUCCESS(pInArgs->AdapterInitStatus))
-    {
-        // One logical Android display is exposed by this adapter.
-        pDeviceContextWrapper->pContext->FinishInit(0);
-    }
+    if (!NT_SUCCESS(pInArgs->AdapterInitStatus)) return pInArgs->AdapterInitStatus;
+
+    // The adapter starts without a monitor. The service requests arrival only after an authenticated session.
 
     return STATUS_SUCCESS;
+}
+
+_Use_decl_annotations_
+VOID IddSampleDeviceIoControl(WDFDEVICE Device, WDFREQUEST Request, size_t OutputBufferLength, size_t InputBufferLength, ULONG IoControlCode)
+{
+    auto* pDeviceContextWrapper = WdfObjectGet_IndirectDeviceContextWrapper(Device);
+    if (pDeviceContextWrapper == nullptr || pDeviceContextWrapper->pContext == nullptr) { WdfRequestComplete(Request, STATUS_DEVICE_NOT_READY); return; }
+    auto* DeviceContext = pDeviceContextWrapper->pContext;
+    NTSTATUS Status = STATUS_INVALID_DEVICE_REQUEST;
+    switch (IoControlCode)
+    {
+    case IOCTL_BRIDGE_DISPLAY_CONNECT:
+        Status = (InputBufferLength == 0 && OutputBufferLength == 0) ? DeviceContext->ConnectMonitor(0) : STATUS_INVALID_BUFFER_SIZE;
+        break;
+    case IOCTL_BRIDGE_DISPLAY_DISCONNECT:
+        Status = (InputBufferLength == 0 && OutputBufferLength == 0) ? DeviceContext->DisconnectMonitor() : STATUS_INVALID_BUFFER_SIZE;
+        break;
+    case IOCTL_BRIDGE_DISPLAY_QUERY:
+        if (InputBufferLength != 0 || OutputBufferLength < sizeof(BRIDGE_DISPLAY_STATUS)) { Status = STATUS_BUFFER_TOO_SMALL; break; }
+        else {
+            PBRIDGE_DISPLAY_STATUS pStatus = nullptr;
+            Status = WdfRequestRetrieveOutputBuffer(Request, sizeof(BRIDGE_DISPLAY_STATUS), reinterpret_cast<PVOID*>(&pStatus), nullptr);
+            if (NT_SUCCESS(Status)) { DeviceContext->GetDisplayStatus(*pStatus); WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, sizeof(BRIDGE_DISPLAY_STATUS)); return; }
+        }
+        break;
+    default:
+        Status = STATUS_INVALID_DEVICE_REQUEST;
+        break;
+    }
+    WdfRequestComplete(Request, Status);
 }
 
 _Use_decl_annotations_
