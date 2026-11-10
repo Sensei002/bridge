@@ -72,20 +72,37 @@ internal class BridgeTransferReceiver(
                     }
                     if (packet[0].toInt() == CONTROL_TAG) {
                         val control = JSONObject(String(packet, 1, packet.size - 1, Charsets.UTF_8))
-                        if (control.optString("type") == "file_offer") {
-                            val value = control.getJSONObject("offer")
-                            val offer = BridgeIncomingOffer(
-                                deviceId, handle,
-                                value.getString("transfer_id"),
-                                value.getString("file_name"),
-                                value.getLong("file_size"),
-                                value.getString("sha256")
-                            )
-                            validate(offer)
-                            pending[offer.transferId] = offer
-                            main.post { onOffer(offer) }
-                        } else {
-                            queue.put(packet)
+                        when (control.optString("type")) {
+                            "file_offer" -> {
+                                val value = control.getJSONObject("offer")
+                                val offer = BridgeIncomingOffer(
+                                    deviceId, handle,
+                                    value.getString("transfer_id"),
+                                    value.getString("file_name"),
+                                    value.getLong("file_size"),
+                                    value.getString("sha256")
+                                )
+                                validate(offer)
+                                pending[offer.transferId] = offer
+                                main.post { onOffer(offer) }
+                            }
+                            "display_challenge_request" -> {
+                                // Echo only a well-formed one-time challenge received
+                                // inside this already-authenticated Noise session.
+                                val requestId = control.getString("request_id")
+                                val nonce = control.getString("nonce")
+                                require(requestId.matches(Regex("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}"))) {
+                                    "Invalid display challenge request ID."
+                                }
+                                require(nonce.matches(Regex("[0-9a-fA-F]{64}"))) {
+                                    "Invalid display challenge nonce."
+                                }
+                                sendControl(handle, JSONObject()
+                                    .put("type", "display_challenge_response")
+                                    .put("request_id", requestId)
+                                    .put("nonce", nonce))
+                            }
+                            else -> queue.put(packet)
                         }
                     } else {
                         queue.put(packet)

@@ -68,6 +68,10 @@ pub enum TransferControl {
     FileReject { transfer_id: Uuid, reason: String },
     FileComplete { transfer_id: Uuid },
     FileCancel { transfer_id: Uuid },
+    /// Relay a one-time challenge issued by the local Windows display service.
+    DisplayChallengeRequest { request_id: Uuid, nonce: String },
+    /// Echoed only over the authenticated Noise session that received the request.
+    DisplayChallengeResponse { request_id: Uuid, nonce: String },
 }
 
 pub fn encode_control(message: &TransferControl) -> Result<Vec<u8>, TransferError> {
@@ -75,6 +79,8 @@ pub fn encode_control(message: &TransferControl) -> Result<Vec<u8>, TransferErro
         TransferControl::FileOffer { offer } => offer.validate()?,
         TransferControl::FileReject { reason, .. } if reason.len() > 256 =>
             return Err(TransferError::InvalidOffer("rejection reason is too long".into())),
+        TransferControl::DisplayChallengeRequest { nonce, .. }
+        | TransferControl::DisplayChallengeResponse { nonce, .. } => validate_challenge_nonce(nonce)?,
         _ => {}
     }
     serde_json::to_vec(message).map_err(|error| TransferError::InvalidOffer(error.to_string()))
@@ -94,7 +100,20 @@ pub fn decode_control(bytes: &[u8]) -> Result<TransferControl, TransferError> {
             return Err(TransferError::InvalidOffer("rejection reason is too long".into()));
         }
     }
+    if let TransferControl::DisplayChallengeRequest { nonce, .. }
+    | TransferControl::DisplayChallengeResponse { nonce, .. } = &message {
+        validate_challenge_nonce(nonce)?;
+    }
     Ok(message)
+}
+
+fn validate_challenge_nonce(nonce: &str) -> Result<(), TransferError> {
+    if nonce.len() != 64 || !nonce.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(TransferError::InvalidOffer(
+            "display challenge must be exactly 64 hexadecimal characters".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -384,6 +403,28 @@ mod tests {
         let offer = offer(b"hello", "hello.txt");
         let encoded = encode_control(&TransferControl::FileOffer { offer: offer.clone() }).unwrap();
         assert_eq!(decode_control(&encoded).unwrap(), TransferControl::FileOffer { offer });
+    }
+
+    #[test]
+    fn display_challenge_messages_round_trip_and_reject_malformed_nonces() {
+        let request_id = Uuid::new_v4();
+        let nonce = "a5".repeat(32);
+        for message in [
+            TransferControl::DisplayChallengeRequest { request_id, nonce: nonce.clone() },
+            TransferControl::DisplayChallengeResponse { request_id, nonce: nonce.clone() },
+        ] {
+            let encoded = encode_control(&message).unwrap();
+            assert_eq!(decode_control(&encoded).unwrap(), message);
+            let packet = TransferPacket::Control(message.clone());
+            assert_eq!(decode_packet(&encode_packet(&packet).unwrap()).unwrap(), packet);
+        }
+        let malformed = TransferControl::DisplayChallengeRequest {
+            request_id,
+            nonce: "not-a-nonce".into(),
+        };
+        assert!(encode_control(&malformed).is_err());
+        let malformed_json = format!(r#"{{"type":"display_challenge_response","request_id":"{request_id}","nonce":"bad"}}"#);
+        assert!(decode_control(malformed_json.as_bytes()).is_err());
     }
 
     #[test]
