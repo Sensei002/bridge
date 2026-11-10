@@ -8,10 +8,12 @@ pub mod challenge;
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const MAX_REQUEST_BYTES: usize = 256;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request {
     Ping,
     Query,
+    Challenge,
+    ChallengeResponse(String),
     Connect,
     Disconnect,
 }
@@ -25,6 +27,14 @@ impl Request {
         match text.trim() {
             "BRIDGE_DISPLAY/1 PING" => Ok(Self::Ping),
             "BRIDGE_DISPLAY/1 QUERY" => Ok(Self::Query),
+            "BRIDGE_DISPLAY/1 CHALLENGE" => Ok(Self::Challenge),
+            value if value.starts_with("BRIDGE_DISPLAY/1 CHALLENGE_RESPONSE ") => {
+                let nonce = &value["BRIDGE_DISPLAY/1 CHALLENGE_RESPONSE ".len()..];
+                if nonce.len() != 64 || !nonce.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                    return Err("challenge response must be exactly 64 hexadecimal characters");
+                }
+                Ok(Self::ChallengeResponse(nonce.to_ascii_lowercase()))
+            }
             "BRIDGE_DISPLAY/1 CONNECT" => Ok(Self::Connect),
             "BRIDGE_DISPLAY/1 DISCONNECT" => Ok(Self::Disconnect),
             _ => Err("unsupported display-service request"),
@@ -56,6 +66,10 @@ mod tests {
     fn parses_only_versioned_commands() {
         assert_eq!(Request::parse(b"BRIDGE_DISPLAY/1 PING"), Ok(Request::Ping));
         assert_eq!(Request::parse(b"BRIDGE_DISPLAY/1 QUERY"), Ok(Request::Query));
+        assert_eq!(Request::parse(b"BRIDGE_DISPLAY/1 CHALLENGE"), Ok(Request::Challenge));
+        let nonce = "ab".repeat(32);
+        assert_eq!(Request::parse(format!("BRIDGE_DISPLAY/1 CHALLENGE_RESPONSE {nonce}").as_bytes()), Ok(Request::ChallengeResponse(nonce)));
+        assert!(Request::parse(b"BRIDGE_DISPLAY/1 CHALLENGE_RESPONSE invalid").is_err());
         assert_eq!(Request::parse(b"BRIDGE_DISPLAY/1 CONNECT"), Ok(Request::Connect));
         assert_eq!(Request::parse(b"BRIDGE_DISPLAY/1 DISCONNECT"), Ok(Request::Disconnect));
         assert!(Request::parse(b"CONNECT").is_err());
