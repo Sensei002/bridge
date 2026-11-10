@@ -22,21 +22,21 @@ concurrency:
 jobs:
   build-iddcx:
     name: Build x64 IddCx UMDF package
-    runs-on: windows-latest
+    runs-on: windows-2025-vs2026
     steps:
       - uses: actions/checkout@v4
 
       - name: Locate MSBuild
         uses: microsoft/setup-msbuild@v2
 
-      - name: Install matching Windows SDK and WDK
+      - name: Set up NuGet
+        uses: NuGet/setup-nuget@v2
+
+      - name: Restore Microsoft Windows SDK and WDK packages
         shell: pwsh
         run: |
-          winget install --id Microsoft.WindowsSDK.10.0.28000 --exact --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
-          if ($LASTEXITCODE -ne 0) { throw "Windows SDK 10.0.28000 installation failed (exit $LASTEXITCODE)." }
-
-          winget install --id Microsoft.WindowsWDK.10.0.28000 --exact --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
-          if ($LASTEXITCODE -ne 0) { throw "Windows WDK 10.0.28000 installation failed (exit $LASTEXITCODE)." }
+          nuget restore apps/windows-driver/packages.config -PackagesDirectory apps/windows-driver/packages
+          if ($LASTEXITCODE -ne 0) { throw "Windows SDK/WDK NuGet restore failed (exit $LASTEXITCODE)." }
 
       - name: Build IddCx driver and package
         shell: pwsh
