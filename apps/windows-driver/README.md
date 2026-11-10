@@ -11,7 +11,7 @@ This directory contains Bridge's development IddCx/UMDF virtual-display driver.
 - Provides a versioned IddCx IOCTL contract for connect, disconnect, and status queries.
 - Restricts the driver interface to LocalSystem and local administrators.
 - Advertises an initial portrait mode profile: 1080x2340@60, 720x1560@60, and 540x1170@60.
-- Uploads the unsigned development package as a CI artifact for inspection.
+- Uploads an unsigned package for pull-request validation; trusted release builds will sign the catalog with the protected Bridge certificate once the signing secrets are configured.
 
 ## Scope and limitations
 
@@ -19,9 +19,7 @@ This directory contains Bridge's development IddCx/UMDF virtual-display driver.
 - The service executable, service installer, authenticated-session binding, and service-side watchdog are not implemented in this milestone.
 - The modes are an initial driver-side capability list, not a guarantee that the current Android decoder/network path can sustain them. Runtime capability negotiation must gate production use.
 - The Microsoft sample swap-chain loop still releases frames without encoding or transmitting them.
-- This package is unsigned and is not ready for installation on a daily-use Windows machine.
-
-Do not install this unsigned package outside a dedicated test environment. Next we will implement the Windows service-side control client and a disposable-machine arrival/removal test before enabling normal installation.
+- The current CI artifact is unsigned and is not ready for installation. The target signing design uses a stable Bridge-owned certificate stored as protected GitHub Actions secrets. The signed catalog and public certificate will be packaged only from trusted release builds. A self-signed certificate does not guarantee acceptance under every Windows security configuration; validate on clean Windows machines without disabling Secure Boot or Memory Integrity. Do not install the current unsigned package on a daily-use PC.
 
 ## Upstream source and license
 

@@ -69,7 +69,9 @@ Architecture and acceptance gates: [docs/second-screen-architecture.md](second-s
 - [x] Build and validate the unsigned x64 driver package in GitHub Actions (CI artifact only; not yet installable for normal use).
 - [x] Replace the sample demonstration monitors with one Bridge-branded virtual monitor and conservative portrait mode list.
 - [x] Add restricted driver-side connect/disconnect/status control IOCTLs; monitor arrival is no longer automatic at adapter startup.
-- [ ] Implement the Bridge Display Service control client, service identity/ACL, and authenticated-session monitor lifecycle binding.
+- [x] Add a separate Rust Windows service executable, bounded versioned named-pipe protocol, and driver QUERY/CONNECT/DISCONNECT client (development scaffold; not yet production-secure or installable).
+- [ ] Validate named-pipe caller identity and bind lifecycle commands to an authenticated trusted Android Second Screen session (CONNECT/DISCONNECT currently fail closed).
+- [ ] Add service account configuration, recovery policy, and elevated installer lifecycle.
 - [ ] Validate virtual monitor arrival/removal and safe display-mode negotiation on a disposable Windows test machine.
 - [ ] Package driver + service installation, upgrade, rollback, and removal with explicit elevation.
 - [ ] Establish a supported driver signing/distribution process.

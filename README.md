@@ -65,7 +65,7 @@ Every push to `main` and every pull request validates Rust and builds:
 
 Push a version tag such as `v0.2.0` to build release assets and publish a GitHub Release automatically.
 
-**Signing note:** Windows output is unsigned, Android release artifacts are unsigned, and iOS archive is unsigned. Store distribution requires signing certificates/provisioning profiles and repository secrets; none are committed to this repository.
+**Signing note:** Windows desktop/MSI/service output is currently unsigned. Bridge's zero-cost plan is to own and protect a code-signing certificate, sign the IddCx driver package in trusted GitHub Actions runs, and ship the public certificate with the installer for explicit administrator approval. The private key will never be included in releases. A self-signed certificate is not automatically trusted by Windows, and broad compatibility with Secure Boot/Memory Integrity configurations must be validated before public rollout. Android release signing is configured independently; iOS archive signing is not configured. See [Windows signing and trust plan](docs/windows-code-signing.md).
 
 ## Windows desktop technology
 

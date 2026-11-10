@@ -44,6 +44,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build native Windows app
         run: cargo build --release --manifest-path apps/desktop/Cargo.toml
+      - name: Build Bridge Display Service
+        run: cargo build --release --manifest-path apps/windows-service/Cargo.toml --features service-bin --target x86_64-pc-windows-msvc
       - uses: actions/upload-artifact@v4
         with:
           name: bridge-windows-native

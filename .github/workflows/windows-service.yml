@@ -1,0 +1,45 @@
+name: Windows Display Service
+
+on:
+  pull_request:
+    paths:
+      - "apps/windows-service/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/windows-service.yml"
+  push:
+    branches: [development]
+    paths:
+      - "apps/windows-service/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/windows-service.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bridge-windows-service-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-service:
+    name: Build x64 Bridge Display Service
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+      - name: Test service protocol
+        run: cargo test -p bridge-display-service
+      - name: Build Windows service executable
+        run: cargo build --release --manifest-path apps/windows-service/Cargo.toml --features service-bin --target x86_64-pc-windows-msvc
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bridge-display-service-unsigned-x64
+          path: target/x86_64-pc-windows-msvc/release/bridge-display-service.exe
+          if-no-files-found: error
+          retention-days: 14

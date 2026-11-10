@@ -6,7 +6,7 @@ on:
       - "apps/windows-driver/**"
       - ".github/workflows/windows-driver.yml"
   push:
-    branches: [development]
+    branches: [development, stable]
     paths:
       - "apps/windows-driver/**"
       - ".github/workflows/windows-driver.yml"
@@ -26,8 +26,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Locate MSBuild
-        uses: microsoft/setup-msbuild@v2
+      - name: Reject manual runs from untrusted branches
+        if: github.event_name == 'workflow_dispatch'
+        shell: pwsh
+        run: |
+          $trustedRefs = @("refs/heads/development", "refs/heads/stable")
+          if ($env:GITHUB_REF -notin $trustedRefs) {
+            throw "Manual driver builds are permitted only from development or stable."
+          }
+
+      - uses: microsoft/setup-msbuild@v2
         with:
           msbuild-architecture: x64
 
@@ -54,9 +62,6 @@ jobs:
             Select-Object -First 1
 
           if (-not $stampInf) {
-            Write-Host "WDK package contents:"
-            Get-ChildItem "apps/windows-driver/packages/Microsoft.Windows.WDK.x64.10.0.28000.2526" -Recurse -File |
-              Select-Object -ExpandProperty FullName | Write-Host
             throw "stampinf.exe is missing from the restored WDK package and installed Windows Kits."
           }
 
@@ -71,7 +76,7 @@ jobs:
           msbuild apps/windows-driver/IddSampleDriver/IddSampleDriver.vcxproj /m /t:Build /p:Configuration=Release /p:Platform=x64 /p:SignMode=Off /p:StampInfToolPath="$env:STAMPINF_TOOL_PATH" /p:WindowsTargetPlatformVersion=10.0.28000.0 /p:TargetPlatformVersion=10.0.28000.0 /v:minimal
           if ($LASTEXITCODE -ne 0) { throw "IddCx driver build failed (exit $LASTEXITCODE)." }
 
-      - name: Verify driver package outputs
+      - name: Verify and stage unsigned driver package
         shell: pwsh
         run: |
           $root = "apps/windows-driver/IddSampleDriver"
@@ -83,17 +88,126 @@ jobs:
           if (-not $inf) { throw "Driver INF was not produced." }
           if (-not $cat) { throw "Driver catalog was not produced." }
 
-          Write-Host "Driver DLL: $($dll.FullName)"
-          Write-Host "Driver INF: $($inf.FullName)"
-          Write-Host "Driver CAT: $($cat.FullName)"
-
           $package = "bridge-iddcx-package"
           New-Item -ItemType Directory -Force -Path $package | Out-Null
           Copy-Item $dll.FullName, $inf.FullName, $cat.FullName -Destination $package
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload unsigned driver package for the signing job
+        uses: actions/upload-artifact@v4
         with:
           name: bridge-iddcx-unsigned-x64
+          path: bridge-iddcx-package/*
+          if-no-files-found: error
+          retention-days: 1
+
+  sign-iddcx:
+    name: Approve, sign, and verify driver package
+    needs: build-iddcx
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/development' || github.ref == 'refs/heads/stable'))
+    runs-on: windows-2025-vs2026
+    environment:
+      name: bridge-driver-signing
+    steps:
+      - name: Download unsigned driver package
+        uses: actions/download-artifact@v4
+        with:
+          name: bridge-iddcx-unsigned-x64
+          path: bridge-iddcx-package
+
+      - name: Sign and verify driver catalog with Bridge certificate
+        shell: pwsh
+        env:
+          BRIDGE_DRIVER_SIGNING_PFX_BASE64: ${{ secrets.BRIDGE_DRIVER_SIGNING_PFX_BASE64 }}
+          BRIDGE_DRIVER_SIGNING_PFX_PASSWORD: ${{ secrets.BRIDGE_DRIVER_SIGNING_PFX_PASSWORD }}
+          BRIDGE_DRIVER_CERT_THUMBPRINT: ${{ vars.BRIDGE_DRIVER_CERT_THUMBPRINT }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          foreach ($name in @("BRIDGE_DRIVER_SIGNING_PFX_BASE64", "BRIDGE_DRIVER_SIGNING_PFX_PASSWORD", "BRIDGE_DRIVER_CERT_THUMBPRINT")) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+              throw "Required signing configuration is missing: $name"
+            }
+          }
+
+          $expectedThumbprint = ($env:BRIDGE_DRIVER_CERT_THUMBPRINT -replace "\s", "").ToUpperInvariant()
+          $pfxPath = Join-Path $env:RUNNER_TEMP "bridge-driver-signing.pfx"
+          $package = "bridge-iddcx-package"
+          $catPath = Join-Path $package "IddSampleDriver.cat"
+          $infPath = Join-Path $package "IddSampleDriver.inf"
+          $cerPath = Join-Path $package "Bridge-Driver-CodeSigning.cer"
+          $imported = $null
+          $rootThumbprint = $null
+
+          try {
+            $pfxBytes = [Convert]::FromBase64String($env:BRIDGE_DRIVER_SIGNING_PFX_BASE64)
+            [IO.File]::WriteAllBytes($pfxPath, $pfxBytes)
+            $securePassword = ConvertTo-SecureString $env:BRIDGE_DRIVER_SIGNING_PFX_PASSWORD -AsPlainText -Force
+            $imported = Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation "Cert:\CurrentUser\My" -Password $securePassword
+            if (-not $imported) { throw "The signing PFX did not import a certificate." }
+
+            $signingCert = @($imported) | Where-Object { $_.HasPrivateKey } | Select-Object -First 1
+            if (-not $signingCert) { throw "The imported PFX does not contain an accessible private key." }
+            $actualThumbprint = $signingCert.Thumbprint.ToUpperInvariant()
+            if ($actualThumbprint -ne $expectedThumbprint) {
+              throw "Imported certificate thumbprint does not match BRIDGE_DRIVER_CERT_THUMBPRINT."
+            }
+
+            Export-Certificate -Cert $signingCert -FilePath $cerPath -Type CERT | Out-Null
+            Import-Certificate -FilePath $cerPath -CertStoreLocation "Cert:\CurrentUser\Root" | Out-Null
+            $rootThumbprint = $signingCert.Thumbprint
+
+            $kitRoots = @(
+              "${env:ProgramFiles(x86)}\Windows Kits\10\bin",
+              "${env:ProgramFiles}\Windows Kits\10\bin"
+            ) | Where-Object { $_ -and (Test-Path $_) }
+            $signtool = Get-ChildItem -Path $kitRoots -Recurse -File -Filter "signtool.exe" -ErrorAction SilentlyContinue |
+              Where-Object { $_.FullName -match "\\x64\\signtool\.exe$" } |
+              Sort-Object FullName -Descending |
+              Select-Object -First 1
+            if (-not $signtool) { throw "The x64 Windows SDK SignTool was not found on the runner." }
+
+            Write-Host "Signing catalog with Bridge certificate $actualThumbprint"
+            & $signtool.FullName sign /v /fd SHA256 /f $pfxPath /p $env:BRIDGE_DRIVER_SIGNING_PFX_PASSWORD /d "Bridge Indirect Display Driver" $catPath
+            if ($LASTEXITCODE -ne 0) { throw "SignTool catalog signing failed (exit $LASTEXITCODE)." }
+
+            & $signtool.FullName verify /pa /v $catPath
+            if ($LASTEXITCODE -ne 0) { throw "SignTool could not verify the signed catalog." }
+
+            & $signtool.FullName verify /pa /v /c $catPath $infPath
+            if ($LASTEXITCODE -ne 0) { throw "The INF does not verify against the signed driver catalog." }
+
+            $signature = Get-AuthenticodeSignature -FilePath $catPath
+            if ($signature.Status -ne "Valid") { throw "Catalog Authenticode status is $($signature.Status), not Valid." }
+            if (-not $signature.SignerCertificate -or $signature.SignerCertificate.Thumbprint.ToUpperInvariant() -ne $expectedThumbprint) {
+              throw "The catalog signer identity does not match the configured Bridge certificate."
+            }
+
+            $manifest = Get-ChildItem $package -File | Where-Object { $_.Name -ne "SHA256SUMS.txt" } | Sort-Object Name
+            $lines = foreach ($file in $manifest) {
+              $hash = (Get-FileHash -Algorithm SHA256 -Path $file.FullName).Hash.ToLowerInvariant()
+              "$hash  $($file.Name)"
+            }
+            $lines | Set-Content -Path (Join-Path $package "SHA256SUMS.txt") -Encoding ascii
+
+            Write-Host "Self-signed test package signed and verified. This is not a Microsoft production signature."
+          }
+          finally {
+            if ($rootThumbprint) {
+              Remove-Item -Path "Cert:\CurrentUser\Root\$rootThumbprint" -ErrorAction SilentlyContinue
+            }
+            if ($imported) {
+              foreach ($cert in @($imported)) {
+                Remove-Item -Path "Cert:\CurrentUser\My\$($cert.Thumbprint)" -ErrorAction SilentlyContinue
+              }
+            }
+            if (Test-Path $pfxPath) { Remove-Item -Path $pfxPath -Force }
+            Remove-Variable securePassword -ErrorAction SilentlyContinue
+            Remove-Variable pfxBytes -ErrorAction SilentlyContinue
+          }
+
+      - name: Upload signed driver package
+        uses: actions/upload-artifact@v4
+        with:
+          name: bridge-iddcx-self-signed-test-x64
           path: bridge-iddcx-package/*
           if-no-files-found: error
           retention-days: 14

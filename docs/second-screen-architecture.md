@@ -30,6 +30,12 @@ Introduce separate components:
 
 Driver installation and device configuration require elevation. Normal use of the desktop UI should not require running the whole app as administrator. Package the driver and service with the Windows installer only after installation, upgrade, rollback, and uninstall behaviour are defined.
 
+### Display service control boundary (development slice)
+
+The first Rust service implementation lives in `apps/windows-service` as a separate Windows service executable. It exposes a versioned local named-pipe protocol (`\\.\pipe\BridgeDisplayService`) and uses the Bridge device-interface GUID to send the driver's QUERY, CONNECT, and DISCONNECT IOCTLs. The protocol parser is portable and unit-tested; a dedicated Windows GitHub Actions workflow builds the x64 service executable.
+
+For each accepted pipe connection, the service now obtains the client PID from the connected pipe and resolves its executable image path through a process handle. This provides process attribution for audit and a future signed-client policy, but **does not authenticate the executable publisher or prove a live Android session**. The service therefore continues to reject CONNECT and DISCONNECT; PING and read-only QUERY remain available. The service library now includes a tested single-device session-lease state machine with a 15-second maximum TTL, peer-fingerprint binding, renewal, expiry, replacement, and explicit revocation. It is not exposed over IPC or wired to the live Noise session yet. The next security slice must establish a signed desktop-client identity and a cryptographically verifiable binding to the live authenticated Noise session before any lease can be issued or monitor lifecycle operation enabled. The service installer must explicitly choose a driver-authorized identity (initially LocalSystem), while the desktop UI remains unprivileged. The detailed publisher-verification, one-time Noise-session challenge, ephemeral attestation, lease-renewal, replay-protection, and fail-closed requirements are specified in [Windows Display Service Authentication Design](windows-service-authentication.md).
+
 ## Media pipeline
 
 Target a low-latency hardware-assisted pipeline:
