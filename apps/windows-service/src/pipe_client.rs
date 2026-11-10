@@ -5,12 +5,12 @@ use windows_sys::Win32::{
         Pipes::GetNamedPipeClientProcessId,
         Threading::{
             OpenProcess, QueryFullProcessImageNameW, WaitForSingleObject,
-            PROCESS_QUERY_LIMITED_INFORMATION, SYNCHRONIZE,
+            PROCESS_QUERY_LIMITED_INFORMATION,
         },
     },
 };
 
-/// Kernel-reported identity metadata for the process connected to the service pipe.
+/// `SYNCHRONIZE` is the standard process synchronization access right from WinNT.\n/// windows-sys 0.59 does not expose this generic access mask in its generated\n/// Threading module, so keep the documented SDK value local.\nconst PROCESS_SYNCHRONIZE: u32 = 0x0010_0000;\n\n/// Kernel-reported identity metadata for the process connected to the service pipe.
 ///
 /// The process handle is deliberately retained for the complete request lifetime.
 /// This pins the kernel process object, preventing a PID from being recycled and
@@ -67,7 +67,7 @@ pub fn identify(pipe: HANDLE) -> io::Result<PipeClientIdentity> {
     // SYNCHRONIZE lets us retain and check this exact process object rather than
     // reopening a PID later, which would be vulnerable to PID reuse.
     let process = unsafe {
-        OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, 0, process_id)
+        OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE, 0, process_id)
     };
     if process.is_null() {
         return Err(io::Error::last_os_error());
