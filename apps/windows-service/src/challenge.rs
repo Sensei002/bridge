@@ -191,6 +191,9 @@ impl ServiceChallengeRegistry {
             self.pending.remove(&process_id);
             return Err("client challenge expired");
         }
+        if pending.attestation.is_some() {
+            return Err("signed Android attestation is required for this challenge");
+        }
         if !constant_time_eq(&pending.nonce, &supplied) {
             return Err("client challenge response mismatch");
         }
@@ -339,6 +342,90 @@ mod tests {
         assert_eq!(
             registry.consume_for_process(42, "not-a-nonce"),
             Err("challenge response must be exactly 64 hexadecimal characters")
+        );
+    }
+
+
+    #[test]
+    fn signed_attestation_is_verified_by_service_against_pinned_pairing_key() {
+        const FINGERPRINT: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let seed = [7_u8; 32];
+        let public_key = bridge_security::peer_attestation::attestation_public_key(&seed).unwrap();
+        let session_id = uuid::Uuid::new_v4();
+        let mut registry = ServiceChallengeRegistry::default();
+        let nonce_hex = registry.issue_attestation_after_client_verification(
+            42, session_id, FINGERPRINT, &public_key
+        ).unwrap();
+        assert_eq!(
+            registry.consume_for_process(42, &nonce_hex),
+            Err("signed Android attestation is required for this challenge")
+        );
+        let nonce = decode_hex(&nonce_hex).unwrap();
+        let proof = bridge_security::peer_attestation::sign_android_peer_attestation(
+            &seed, &nonce, session_id, FINGERPRINT
+        ).unwrap();
+        assert_eq!(
+            registry.consume_signed_attestation_for_process(
+                42, &nonce_hex, proof.session_id, &proof.device_fingerprint, &encode_hex(&proof.signature)
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            registry.consume_signed_attestation_for_process(
+                42, &nonce_hex, proof.session_id, &proof.device_fingerprint, &encode_hex(&proof.signature)
+            ),
+            Err("no pending challenge for client process")
+        );
+    }
+
+    #[test]
+    fn signed_attestation_rejects_wrong_key_and_consumes_failed_attempt() {
+        const FINGERPRINT: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let trusted_seed = [7_u8; 32];
+        let attacker_seed = [8_u8; 32];
+        let public_key = bridge_security::peer_attestation::attestation_public_key(&trusted_seed).unwrap();
+        let session_id = uuid::Uuid::new_v4();
+        let mut registry = ServiceChallengeRegistry::default();
+        let nonce_hex = registry.issue_attestation_after_client_verification(
+            42, session_id, FINGERPRINT, &public_key
+        ).unwrap();
+        let nonce = decode_hex(&nonce_hex).unwrap();
+        let forged = bridge_security::peer_attestation::sign_android_peer_attestation(
+            &attacker_seed, &nonce, session_id, FINGERPRINT
+        ).unwrap();
+        assert_eq!(
+            registry.consume_signed_attestation_for_process(
+                42, &nonce_hex, session_id, FINGERPRINT, &encode_hex(&forged.signature)
+            ),
+            Err("Android attestation signature or context verification failed")
+        );
+        assert_eq!(
+            registry.consume_signed_attestation_for_process(
+                42, &nonce_hex, session_id, FINGERPRINT, &encode_hex(&forged.signature)
+            ),
+            Err("no pending challenge for client process")
+        );
+    }
+
+    #[test]
+    fn signed_attestation_rejects_session_or_fingerprint_mismatch() {
+        const FINGERPRINT: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let seed = [7_u8; 32];
+        let public_key = bridge_security::peer_attestation::attestation_public_key(&seed).unwrap();
+        let session_id = uuid::Uuid::new_v4();
+        let mut registry = ServiceChallengeRegistry::default();
+        let nonce_hex = registry.issue_attestation_after_client_verification(
+            42, session_id, FINGERPRINT, &public_key
+        ).unwrap();
+        let nonce = decode_hex(&nonce_hex).unwrap();
+        let proof = bridge_security::peer_attestation::sign_android_peer_attestation(
+            &seed, &nonce, session_id, FINGERPRINT
+        ).unwrap();
+        assert_eq!(
+            registry.consume_signed_attestation_for_process(
+                42, &nonce_hex, uuid::Uuid::new_v4(), FINGERPRINT, &encode_hex(&proof.signature)
+            ),
+            Err("Android attestation signature or context verification failed")
         );
     }
 
