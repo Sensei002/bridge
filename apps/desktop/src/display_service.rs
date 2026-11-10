@@ -107,7 +107,11 @@ pub fn renew_with_lease(lease: &ServiceLease, device_fingerprint: &str) -> Resul
         device_fingerprint.to_ascii_lowercase(),
     );
     let response = request(&command)?;
-    parse_lease_response(&response)
+    let renewed = parse_lease_response(&response)?;
+    if renewed.id != lease.id {
+        return Err("display service changed the active lease ID during renewal".into());
+    }
+    Ok(renewed)
 }
 
 /// Request a driver connection using the exact service-issued lease identity.

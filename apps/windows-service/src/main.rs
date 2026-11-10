@@ -371,7 +371,7 @@ fn handle_request(
                 ).map_err(|message| io::Error::new(io::ErrorKind::PermissionDenied, message))?;
                 let remaining_ms = lease.remaining(Instant::now()).as_millis();
                 Ok(format!(
-                    "BRIDGE_DISPLAY/1 OK lease_renewed id={} expires_in_ms={}\\n",
+                    "BRIDGE_DISPLAY/1 OK lease_renewed id={} expires_in_ms={}\n",
                     lease.id,
                     remaining_ms,
                 ).into_bytes())
