@@ -171,8 +171,17 @@ fn run_pipe_server(shutdown: &mpsc::Receiver<()>) -> io::Result<()> {
                 if read_ok != 0 {
                     let response = match pipe_client::identify(pipe) {
                         Ok(caller) => {
-                            eprintln!("Bridge Display Service request from PID {} ({})", caller.process_id, caller.image_path.display());
-                            handle_request(&request[..read as usize], &caller)
+                            if let Err(error) = caller.ensure_alive() {
+                                format!("BRIDGE_DISPLAY/1 ERROR client process is no longer valid: {error}\\n").into_bytes()
+                            } else {
+                                eprintln!("Bridge Display Service request from PID {} ({})", caller.process_id, caller.image_path.display());
+                                let response = handle_request(&request[..read as usize], &caller);
+                                if caller.ensure_alive().is_ok() {
+                                    response
+                                } else {
+                                    b"BRIDGE_DISPLAY/1 ERROR client process exited during request\\n".to_vec()
+                                }
+                            }
                         }
                         Err(error) => format!("BRIDGE_DISPLAY/1 ERROR caller identity unavailable: {error}\\n").into_bytes(),
                     };

@@ -162,7 +162,8 @@ mod tests {
     fn wrong_response_does_not_consume_valid_challenge() {
         let mut registry = ServiceChallengeRegistry::default();
         let nonce = registry.issue_for_test(42, Instant::now()).unwrap();
-        let wrong = format!("{}0", &nonce[..63]);
+        let replacement = if nonce.as_bytes()[63] == b'0' { '1' } else { '0' };
+        let wrong = format!("{}{}", &nonce[..63], replacement);
         assert_eq!(
             registry.consume_for_process(42, &wrong),
             Err("client challenge response mismatch")
