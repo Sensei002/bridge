@@ -528,6 +528,16 @@ NTSTATUS IndirectDeviceContext::ConnectMonitor(UINT ConnectorIndex)
     if (m_Monitor != nullptr) return STATUS_SUCCESS;
     WDF_OBJECT_ATTRIBUTES Attr;
     WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&Attr, IndirectMonitorContextWrapper);
+    Attr.EvtCleanupCallback = [](WDFOBJECT Object)
+    {
+        // Release the monitor context and stop its swap-chain worker before WDF destroys the object.
+        auto* pContext = WdfObjectGet_IndirectMonitorContextWrapper(Object);
+        if (pContext)
+        {
+            pContext->Cleanup();
+        }
+    };
+
     IDDCX_MONITOR_INFO MonitorInfo = {};
     MonitorInfo.Size = sizeof(MonitorInfo);
     MonitorInfo.MonitorType = DISPLAYCONFIG_OUTPUT_TECHNOLOGY_HDMI;
