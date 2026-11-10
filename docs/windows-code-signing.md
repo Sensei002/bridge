@@ -20,18 +20,21 @@ The certificate must be generated once in a controlled environment, exported as 
 
 ## GitHub Actions signing pipeline
 
-The Windows driver workflow will:
+The Windows driver workflow:
 
-1. Build the IddCx/UMDF driver and produce its INF, DLL, and catalog.
-2. On trusted pushes/releases only, import the PFX from GitHub Secrets into the ephemeral Windows runner.
-3. Confirm that the imported certificate thumbprint matches BRIDGE_DRIVER_CERT_THUMBPRINT.
-4. Sign the driver package catalog using SHA-256 and the Bridge certificate.
-5. Verify the catalog signature and signer identity before packaging.
-6. Export only the public .cer certificate alongside the signed driver package.
-7. Generate SHA-256 hashes for every packaged file and publish the signed package, public certificate, and hash manifest as CI/release artifacts.
-8. Delete temporary PFX material and certificate-store entries even when a step fails.
+1. Builds the IddCx/UMDF driver and produces its INF, DLL, and catalog.
+2. Keeps pull-request builds unsigned; PR jobs do not receive signing secrets.
+3. Signs only trusted pushes to development/stable, or manual runs explicitly dispatched from those branches.
+4. Imports the PFX into the ephemeral Windows runner and confirms its thumbprint matches BRIDGE_DRIVER_CERT_THUMBPRINT.
+5. Signs the driver package catalog using SHA-256.
+6. Verifies the catalog signature, the INF's membership in the catalog, and the signer thumbprint.
+7. Exports only the public .cer certificate and creates a SHA-256 manifest for the package.
+8. Uploads a clearly labelled self-signed-test artifact. The PFX and password are never included.
+9. Removes temporary PFX material and imported certificate-store entries in a finally block.
 
-Pull-request builds must never receive signing secrets and must remain unsigned validation builds. A trusted release build must fail if signing secrets or thumbprint configuration are missing; it must never silently label an unsigned package as signed.
+A trusted signing run must fail if signing configuration is missing or the thumbprint does not match. It must never silently label an unsigned package as signed. No timestamp service is configured in this zero-cost initial pipeline; certificate expiry and renewal therefore remain explicit lifecycle concerns.
+
+The signing workflow change is currently under CI validation. The first signed artifact will not be produced by pull-request CI; it requires a trusted-branch push or manual dispatch from development/stable.
 
 ## Installer and first-run trust flow
 
@@ -49,20 +52,23 @@ The public certificate may be bundled with the installer, but bundling alone doe
 
 ## Windows compatibility boundary
 
-A self-signed certificate provides a Bridge identity; it does **not** turn a test signature into a Microsoft-trusted production signature. Windows policy varies by version, Secure Boot state, Memory Integrity/HVCI, and driver package type. Test-signed packages may require Test Mode and/or explicit certificate trust, and some configurations can reject them.
+A self-signed certificate provides a Bridge identity; it does **not** turn a test signature into a Microsoft-trusted production driver signature. Windows policy varies by version, Secure Boot state, Memory Integrity/HVCI, and driver package type. Test-signed packages can be rejected by normal Windows driver policy even when the catalog signature is cryptographically valid and the certificate is trusted locally.
 
 Therefore:
+
 - Do not claim universal installation on every Windows PC until tested on clean Windows 10/11 machines with Secure Boot and Memory Integrity enabled.
 - Do not disable Secure Boot, Memory Integrity, or BitLocker as an automatic installer step.
 - Do not enable Test Mode automatically.
 - If Windows refuses the package under its normal security policy, stop and explain the exact limitation. Do not bypass the policy.
-- Use a disposable/recoverable test PC for initial installation testing. Do not install the current unsigned driver on a daily-use PC.
+- Use a disposable/recoverable test PC for initial installation testing. Do not install the current unsigned or self-signed-test driver on a daily-use PC.
+- Investigate Microsoft's current Windows Driver Policy and WHCP/Hardware Dev Center requirements before planning public distribution. A self-signed test catalog is not evidence that the package qualifies for production distribution.
 
 For broad public distribution, investigate a no-cost Microsoft-supported route for this exact UMDF package before deciding that a paid certificate is necessary. The project does not authorize spending money as a workaround.
 
 ## Windows app and service signing
 
 The desktop app, display service, and MSI may remain unsigned initially. If the service authorization design requires publisher verification, either:
+
 - sign the relevant Bridge-owned executable with the same Bridge certificate and validate its pinned thumbprint; or
 - replace Authenticode publisher verification with a separately reviewed, robust process/session authorization mechanism.
 
@@ -71,16 +77,18 @@ Do not treat PID, process path, file name, or a caller-supplied hash as proof of
 ## Current status
 
 - Windows desktop/MSI/service: unsigned.
-- Bridge-owned driver-signing certificate: not generated/configured.
-- GitHub signing secrets and thumbprint variable: not configured.
-- Driver CI: builds an unsigned x64 UMDF package for pull-request validation.
-- Signed driver artifact and public certificate: not yet produced.
-- Installer trust prompt, signature/hash verification, and driver installation: not implemented.
+- Bridge-owned driver-signing certificate: generated by the repository owner; GitHub secrets and thumbprint variable configured by the owner.
+- Driver CI: PR builds remain unsigned; trusted development/stable branch runs are configured to produce a self-signed-test catalog artifact.
+- First signed artifact: pending a trusted-branch signing run and CI verification.
+- Installer trust prompt, signature/hash verification at installation time, and driver installation: not implemented.
 - Display-service CONNECT/DISCONNECT: fail-closed and disabled.
+- Public Windows distribution: not approved; clean-machine compatibility and current Microsoft driver-policy requirements remain to be validated.
 
 ## References
 
 - [Microsoft: Test-signing driver packages](https://learn.microsoft.com/en-us/windows-hardware/drivers/install/test-signing-driver-packages)
+- [Microsoft: Test-signing a driver package's catalog file](https://learn.microsoft.com/en-us/windows-hardware/drivers/install/test-signing-a-driver-package-s-catalog-file)
+- [Microsoft: SignTool](https://learn.microsoft.com/en-us/windows-hardware/drivers/devtest/signtool)
+- [Microsoft Support: The Windows Driver Policy](https://support.microsoft.com/en-us/windows/hardware/drivers/the-windows-driver-policy)
 - [Microsoft: Installing test-signed driver packages](https://learn.microsoft.com/en-us/windows-hardware/drivers/install/installing-test-signed-driver-packages)
 - [Microsoft: TESTSIGNING boot configuration](https://learn.microsoft.com/en-us/windows-hardware/drivers/install/the-testsigning-boot-configuration-option)
-- [Microsoft: Installing an unsigned driver during development and test](https://learn.microsoft.com/en-us/windows-hardware/drivers/install/installing-an-unsigned-driver-during-development-and-test)
