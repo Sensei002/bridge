@@ -32,7 +32,7 @@ jobs:
         run: |
           $trustedRefs = @("refs/heads/development", "refs/heads/stable")
           if ($env:GITHUB_REF -notin $trustedRefs) {
-            throw "Manual driver signing/build runs are permitted only from development or stable."
+            throw "Manual driver builds are permitted only from development or stable."
           }
 
       - uses: microsoft/setup-msbuild@v2
@@ -76,8 +76,7 @@ jobs:
           msbuild apps/windows-driver/IddSampleDriver/IddSampleDriver.vcxproj /m /t:Build /p:Configuration=Release /p:Platform=x64 /p:SignMode=Off /p:StampInfToolPath="$env:STAMPINF_TOOL_PATH" /p:WindowsTargetPlatformVersion=10.0.28000.0 /p:TargetPlatformVersion=10.0.28000.0 /v:minimal
           if ($LASTEXITCODE -ne 0) { throw "IddCx driver build failed (exit $LASTEXITCODE)." }
 
-      - name: Verify driver package outputs
-        id: package
+      - name: Verify and stage unsigned driver package
         shell: pwsh
         run: |
           $root = "apps/windows-driver/IddSampleDriver"
@@ -92,10 +91,30 @@ jobs:
           $package = "bridge-iddcx-package"
           New-Item -ItemType Directory -Force -Path $package | Out-Null
           Copy-Item $dll.FullName, $inf.FullName, $cat.FullName -Destination $package
-          "kind=unsigned" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Upload unsigned driver package for the signing job
+        uses: actions/upload-artifact@v4
+        with:
+          name: bridge-iddcx-unsigned-x64
+          path: bridge-iddcx-package/*
+          if-no-files-found: error
+          retention-days: 1
+
+  sign-iddcx:
+    name: Approve, sign, and verify driver package
+    needs: build-iddcx
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/development' || github.ref == 'refs/heads/stable'))
+    runs-on: windows-2025-vs2026
+    environment:
+      name: bridge-driver-signing
+    steps:
+      - name: Download unsigned driver package
+        uses: actions/download-artifact@v4
+        with:
+          name: bridge-iddcx-unsigned-x64
+          path: bridge-iddcx-package
 
       - name: Sign and verify driver catalog with Bridge certificate
-        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/development' || github.ref == 'refs/heads/stable'))
         shell: pwsh
         env:
           BRIDGE_DRIVER_SIGNING_PFX_BASE64: ${{ secrets.BRIDGE_DRIVER_SIGNING_PFX_BASE64 }}
@@ -169,7 +188,6 @@ jobs:
             }
             $lines | Set-Content -Path (Join-Path $package "SHA256SUMS.txt") -Encoding ascii
 
-            "kind=self-signed-test" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
             Write-Host "Self-signed test package signed and verified. This is not a Microsoft production signature."
           }
           finally {
@@ -186,9 +204,10 @@ jobs:
             Remove-Variable pfxBytes -ErrorAction SilentlyContinue
           }
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload signed driver package
+        uses: actions/upload-artifact@v4
         with:
-          name: bridge-iddcx-${{ steps.package.outputs.kind }}-x64
+          name: bridge-iddcx-self-signed-test-x64
           path: bridge-iddcx-package/*
           if-no-files-found: error
           retention-days: 14
