@@ -226,6 +226,30 @@ fn to_json(result: Result<PairResult, String>) -> CString {
         .unwrap_or_else(|_| CString::new("{\"ok\":false,\"error\":\"invalid response\"}").unwrap())
 }
 
+/// Derive the raw Ed25519 public key from a 32-byte attestation seed encoded as hex.
+/// The private seed is never returned or persisted by this function.
+///
+/// # Safety
+/// `seed_hex` must be null or point to a valid NUL-terminated UTF-8 C string.
+/// The returned allocation must be released with `bridge_string_free`.
+#[no_mangle]
+pub unsafe extern "C" fn bridge_attestation_public_key(seed_hex: *const c_char) -> *mut c_char {
+    if seed_hex.is_null() {
+        return CString::new("{\\"ok\\":false,\\"error\\":\\"null seed\\"}").unwrap().into_raw();
+    }
+    let result: Result<String, String> = CStr::from_ptr(seed_hex).to_str()
+        .map_err(|error: std::str::Utf8Error| error.to_string())
+        .and_then(decode_hex)
+        .and_then(|seed| bridge_security::peer_attestation::attestation_public_key(&seed)
+            .map_err(|error| error.to_string()))
+        .map(|key| key.iter().map(|byte| format!("{byte:02x}")).collect());
+    let json = match result {
+        Ok(public_key) => serde_json::json!({"ok": true, "public_key": public_key}),
+        Err(error) => serde_json::json!({"ok": false, "error": error}),
+    };
+    CString::new(json.to_string()).unwrap().into_raw()
+}
+
 /// Establish an authenticated Noise XX session to the requested peer.
 ///
 /// # Safety
@@ -382,6 +406,18 @@ mod android_jni {
         let text: String = env.get_string(&private_key_hex).map(|v| v.into()).unwrap_or_default();
         let input = CString::new(text).unwrap_or_default();
         let output = unsafe { bridge_identity_fingerprint(input.as_ptr()) };
+        let response = unsafe { CStr::from_ptr(output).to_string_lossy().into_owned() };
+        unsafe { bridge_string_free(output); }
+        env.new_string(response).map(|value| value.into_raw()).unwrap_or(std::ptr::null_mut())
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_app_bridge_android_BridgeNative_attestationPublicKey(
+        mut env: JNIEnv, _class: JClass, seed_hex: JString
+    ) -> jstring {
+        let text: String = env.get_string(&seed_hex).map(|v| v.into()).unwrap_or_default();
+        let input = CString::new(text).unwrap_or_default();
+        let output = unsafe { bridge_attestation_public_key(input.as_ptr()) };
         let response = unsafe { CStr::from_ptr(output).to_string_lossy().into_owned() };
         unsafe { bridge_string_free(output); }
         env.new_string(response).map(|value| value.into_raw()).unwrap_or(std::ptr::null_mut())
