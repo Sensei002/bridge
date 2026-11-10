@@ -16,7 +16,7 @@ This is the privileged Windows service boundary for Bridge Second Screen. It is 
 
 ## Security and installation boundary
 
-The client PID and image path are **attribution metadata, not authorization**. A path does not prove that a binary was published by Bridge, and a process identity does not prove that an authenticated Android Second Screen session is alive. The service does not yet validate a publisher signature, bind the caller to the active Windows logon, or receive a cryptographically verifiable session lease.
+The client PID and image path are **attribution metadata, not authorization**. A path does not prove that a binary was published by Bridge, and a process identity does not prove that an authenticated Android Second Screen session is alive. The service validates the pinned Authenticode publisher for challenge commands, but does not yet bind the caller to the active Windows logon or receive a cryptographically verifiable session lease.
 
 The current interactive-user pipe ACL is intentionally a development boundary only. CONNECT and DISCONNECT remain fail-closed and are rejected. PING and read-only QUERY remain available without publisher authentication; challenge issuance/consumption additionally requires a valid pinned publisher signature. A successful challenge response proves only that the signed desktop client completed its Noise-session relay step; it does not issue a lease or authorize driver operations. Do not enable monitor lifecycle operations until the service has a verified Bridge desktop-client identity and a live authenticated-session binding with expiry/revocation handling.
 
