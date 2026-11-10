@@ -221,7 +221,9 @@ fn run_pipe_server(shutdown: &mpsc::Receiver<()>) -> io::Result<()> {
                                     response
                                 } else {
                                     challenges.revoke_process(caller.process_id);
-                                    leases.revoke_process(caller.process_id);
+                                    if leases.revoke_process(caller.process_id) {
+                                        disconnect_driver_if_connected("desktop process exited during IPC");
+                                    }
                                     lease_fingerprints.remove(&caller.process_id);
                                     pinned_clients.remove(&caller.process_id);
                                     b"BRIDGE_DISPLAY/1 ERROR client process exited during request\n".to_vec()
@@ -250,6 +252,10 @@ fn run_pipe_server(shutdown: &mpsc::Receiver<()>) -> io::Result<()> {
             }
         }
     }
+    disconnect_driver_if_connected("service stopped");
+    leases.clear();
+    lease_fingerprints.clear();
+    pinned_clients.clear();
     Ok(())
 }
 
