@@ -625,6 +625,9 @@ NTSTATUS IddSampleAdapterInitFinished(IDDCX_ADAPTER AdapterObject, const IDARG_I
     // confirms that Windows has finished initializing the adapter.
     pDeviceContextWrapper->pContext->SetAdapterReady(NT_SUCCESS(pInArgs->AdapterInitStatus));
 
+    // Preserve the adapter initialization failure so IddCx and WDF can observe it.
+    if (!NT_SUCCESS(pInArgs->AdapterInitStatus)) return pInArgs->AdapterInitStatus;
+
     // The adapter starts without a monitor. The service requests arrival only after an authenticated session.
     return STATUS_SUCCESS;
 }
