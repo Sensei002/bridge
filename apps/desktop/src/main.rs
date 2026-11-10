@@ -1548,6 +1548,7 @@ impl eframe::App for BridgeApp {
                         ui.add_space(14.0);
                         panel(ui, |ui| {
                             ui.label(egui::RichText::new("Send text").size(16.0).strong());
+                            #[cfg(windows)]
                             ui.add_enabled_ui(self.clipboard_sync, |ui| {
                                 ui.add(egui::TextEdit::multiline(&mut self.clipboard_draft)
                                     .desired_rows(4)
@@ -1571,13 +1572,16 @@ impl eframe::App for BridgeApp {
                                     }
                                 }
                             });
+                            #[cfg(not(windows))]
+                            muted(ui, "Clipboard sharing is currently available in the Windows build.");
                         });
                         ui.add_space(12.0);
                         panel(ui, |ui| {
                             ui.label(egui::RichText::new("Received text").size(16.0).strong());
                             if let Some(text) = &self.clipboard_received {
-                                ui.label(egui::RichText::new(text).monospace().size(12.0));
-                                muted(ui, "Select and copy the text above to paste it into another app.");
+                                let mut received_text = text.clone();
+                                ui.add(egui::TextEdit::multiline(&mut received_text).desired_rows(4));
+                                muted(ui, "Select the text above and press Ctrl+C to copy it.");
                             } else {
                                 muted(ui, "No shared text received yet.");
                             }
