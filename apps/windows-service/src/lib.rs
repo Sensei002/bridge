@@ -268,6 +268,21 @@ impl SessionLeaseRegistry {
         Ok(renewed)
     }
 
+    /// Validate the complete lease identity immediately before a privileged driver operation.
+    pub fn authorize_operation(
+        &mut self,
+        lease_id: uuid::Uuid,
+        process_id: u32,
+        remote_fingerprint: &str,
+    ) -> Result<(), &'static str> {
+        let lease = self.active_for(process_id, remote_fingerprint)
+            .ok_or("no active display lease for this process and device")?;
+        if lease.id != lease_id {
+            return Err("display lease ID does not match the active lease");
+        }
+        Ok(())
+    }
+
     /// Revoke only when the exact process that owns the lease is being removed.
     pub fn revoke_process(&mut self, process_id: u32) -> bool {
         if self.active.as_ref().is_some_and(|lease| lease.process_id == process_id) {
@@ -351,6 +366,18 @@ mod lease_tests {
         assert!(registry.renew_after_authentication(uuid::Uuid::new_v4(), 42, FINGERPRINT, MAX_SESSION_LEASE).is_err());
         assert!(registry.renew_after_authentication(lease.id, 43, FINGERPRINT, MAX_SESSION_LEASE).is_err());
         assert!(registry.renew_after_authentication(lease.id, 42, FINGERPRINT, MAX_SESSION_LEASE).is_ok());
+    }
+
+    #[test]
+    fn operation_authorization_requires_exact_lease_process_and_peer() {
+        let mut registry = SessionLeaseRegistry::default();
+        let lease = registry.issue_after_authentication(42, FINGERPRINT, MAX_SESSION_LEASE).unwrap();
+        assert!(registry.authorize_operation(lease.id, 42, FINGERPRINT).is_ok());
+        assert!(registry.authorize_operation(uuid::Uuid::new_v4(), 42, FINGERPRINT).is_err());
+        assert!(registry.authorize_operation(lease.id, 43, FINGERPRINT).is_err());
+        assert!(registry.authorize_operation(lease.id, 42, &"f".repeat(64)).is_err());
+        registry.revoke(lease.id);
+        assert!(registry.authorize_operation(lease.id, 42, FINGERPRINT).is_err());
     }
 
     #[test]
