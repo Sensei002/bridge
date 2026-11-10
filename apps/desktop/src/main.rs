@@ -125,6 +125,14 @@ struct AndroidAttestationResponse {
 }
 
 #[cfg(windows)]
+struct VerifiedAndroidAttestation {
+    nonce: String,
+    session_id: Uuid,
+    device_fingerprint: String,
+    signature: String,
+}
+
+#[cfg(windows)]
 struct DesktopSession {
     connection: Arc<std::sync::Mutex<NoiseConnection>>,
     incoming: std::sync::Mutex<Receiver<Vec<u8>>>,
@@ -283,7 +291,7 @@ impl DesktopSession {
     /// Request a signed Android proof over this live authenticated Noise session.
     /// This validates the response context and shape only; the Windows service must
     /// independently verify the Ed25519 signature against its pinned pairing key.
-    fn relay_service_challenge(&self, nonce: &str, timeout: Duration) -> Result<(), String> {
+    fn relay_service_challenge(&self, nonce: &str, timeout: Duration) -> Result<VerifiedAndroidAttestation, String> {
         if nonce.len() != 64 || !nonce.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err("display-service challenge must be 64 hexadecimal characters".into());
         }
@@ -328,7 +336,12 @@ impl DesktopSession {
                 self.session_id,
                 &self.remote_fingerprint,
             ).map_err(|error| format!("Android attestation signature verification failed: {error}"))?;
-            return Ok(());
+            return Ok(VerifiedAndroidAttestation {
+                nonce: response.nonce,
+                session_id: response.session_id,
+                device_fingerprint: response.device_fingerprint,
+                signature: response.signature,
+            });
         }
     }
 
@@ -1114,14 +1127,24 @@ impl eframe::App for BridgeApp {
                         .name("bridge-display-challenge-relay".into())
                         .spawn(move || {
                             let result = (|| -> Result<(), String> {
-                                let nonce = display_service::issue_challenge()?;
-                                session.relay_service_challenge(&nonce, Duration::from_secs(8))?;
-                                // The service currently accepts only the legacy echo. Do not
-                                // submit it: signed-proof verification is the next service IPC step.
+                                let pinned_key = session.attestation_public_key.as_deref()
+                                    .ok_or_else(|| "trusted Android pairing record has no pinned attestation key".to_string())?;
+                                let nonce = display_service::issue_attestation_challenge(
+                                    session.session_id,
+                                    &session.remote_fingerprint,
+                                    pinned_key,
+                                )?;
+                                let proof = session.relay_service_challenge(&nonce, Duration::from_secs(8))?;
+                                display_service::submit_attestation_response(
+                                    &proof.nonce,
+                                    proof.session_id,
+                                    &proof.device_fingerprint,
+                                    &proof.signature,
+                                )?;
                                 Ok(())
                             })();
                             let message = match result {
-                                Ok(()) => "Android signed attestation proof received over Noise. Windows service signature verification is pending.".to_owned(),
+                                Ok(()) => "Android peer attestation independently verified by the Windows service for this live session.".to_owned(),
                                 Err(error) => format!("Display-service session verification is not ready: {error}"),
                             };
                             let _ = status_tx.send(message);
