@@ -37,6 +37,7 @@ use windows_sys::Win32::{
 
 mod driver;
 mod pipe_client;
+mod verify_publisher;
 
 const SERVICE_NAME: &str = "BridgeDisplayService";
 const PIPE_NAME: &str = r"\\.\pipe\BridgeDisplayService";
@@ -208,7 +209,7 @@ fn run_pipe_server(shutdown: &mpsc::Receiver<()>) -> io::Result<()> {
     Ok(())
 }
 
-fn handle_request(bytes: &[u8], _caller: &pipe_client::PipeClientIdentity) -> Vec<u8> {
+fn handle_request(bytes: &[u8], caller: &pipe_client::PipeClientIdentity) -> Vec<u8> {
     use bridge_display_service::{DisplayStatus, Request};
     let request = match Request::parse(bytes) {
         Ok(request) => request,
@@ -228,14 +229,18 @@ fn handle_request(bytes: &[u8], _caller: &pipe_client::PipeClientIdentity) -> Ve
         // Fail closed until the service can verify the caller process and bind
         // this request to a live, authenticated Android Second Screen session.
         // Merely reaching the interactive-user named pipe is not authorization.
-        Request::Connect => Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "CONNECT is disabled until authenticated session binding is implemented",
-        )),
-        Request::Disconnect => Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "DISCONNECT is disabled until authenticated session binding is implemented",
-        )),
+        Request::Connect => verify_publisher::verify_client_publisher(&caller.image_path).and_then(|_| {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "CONNECT is disabled until authenticated session binding is implemented",
+            ))
+        }),
+        Request::Disconnect => verify_publisher::verify_client_publisher(&caller.image_path).and_then(|_| {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "DISCONNECT is disabled until authenticated session binding is implemented",
+            ))
+        }),
     };
     result.unwrap_or_else(|error| format!("BRIDGE_DISPLAY/1 ERROR {error}\n").into_bytes())
 }
