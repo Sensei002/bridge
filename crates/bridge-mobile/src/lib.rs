@@ -229,7 +229,7 @@ fn to_json(result: Result<PairResult, String>) -> CString {
 
 fn derive_attestation_public_key(seed: &mut [u8]) -> Result<String, String> {
     let result = bridge_security::peer_attestation::attestation_public_key(seed)
-        .map(|key| hex::encode(key))
+        .map(hex::encode)
         .map_err(|error| error.to_string());
     seed.fill(0);
     result
