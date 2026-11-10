@@ -278,6 +278,10 @@ fn sign_attestation_seed(
 }
 
 /// Sign a Windows display-service challenge with the persisted Android attestation identity.
+///
+/// # Safety
+/// Each pointer must be null or point to a valid NUL-terminated UTF-8 C string.
+/// The returned allocation must be released with `bridge_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn bridge_attestation_sign(
     seed_hex: *const c_char,
