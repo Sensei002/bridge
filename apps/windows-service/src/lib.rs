@@ -96,9 +96,12 @@ mod tests {
 /// Maximum time a desktop-session authorization lease may remain valid without renewal.
 pub const MAX_SESSION_LEASE: std::time::Duration = std::time::Duration::from_secs(15);
 
+/// A short-lived authorization lease bound to both the originating Windows
+/// process and the authenticated remote device fingerprint.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionLease {
     pub id: uuid::Uuid,
+    pub process_id: u32,
     pub remote_fingerprint: String,
     expires_at: std::time::Instant,
 }
@@ -113,10 +116,9 @@ impl SessionLease {
     }
 }
 
-/// Single-display lease state. Issuance/renewal must only be called after the
-/// service independently authenticates the Bridge desktop client and its live
-/// Noise-session assertion. This registry is not an authentication mechanism
-/// and is deliberately not exposed over the named pipe yet.
+/// Single-display lease state. Callers must authenticate the signed desktop
+/// process and verify a cryptographic assertion from its live Noise peer before
+/// invoking issue/renew. This registry does not perform authentication itself.
 #[derive(Debug, Default)]
 pub struct SessionLeaseRegistry {
     active: Option<SessionLease>,
@@ -125,13 +127,16 @@ pub struct SessionLeaseRegistry {
 impl SessionLeaseRegistry {
     pub fn issue_after_authentication(
         &mut self,
+        process_id: u32,
         remote_fingerprint: &str,
         ttl: std::time::Duration,
     ) -> Result<SessionLease, &'static str> {
+        validate_process_id(process_id)?;
         validate_fingerprint(remote_fingerprint)?;
         validate_lease_ttl(ttl)?;
         let lease = SessionLease {
             id: uuid::Uuid::new_v4(),
+            process_id,
             remote_fingerprint: remote_fingerprint.to_ascii_lowercase(),
             expires_at: std::time::Instant::now() + ttl,
         };
@@ -142,9 +147,11 @@ impl SessionLeaseRegistry {
     pub fn renew_after_authentication(
         &mut self,
         lease_id: uuid::Uuid,
+        process_id: u32,
         remote_fingerprint: &str,
         ttl: std::time::Duration,
     ) -> Result<SessionLease, &'static str> {
+        validate_process_id(process_id)?;
         validate_fingerprint(remote_fingerprint)?;
         validate_lease_ttl(ttl)?;
         let current = self.active.as_ref().ok_or("no active session lease")?;
@@ -152,16 +159,30 @@ impl SessionLeaseRegistry {
             self.active = None;
             return Err("session lease expired");
         }
-        if current.id != lease_id || !current.remote_fingerprint.eq_ignore_ascii_case(remote_fingerprint) {
+        if current.id != lease_id
+            || current.process_id != process_id
+            || !current.remote_fingerprint.eq_ignore_ascii_case(remote_fingerprint)
+        {
             return Err("session lease identity mismatch");
         }
         let renewed = SessionLease {
             id: current.id,
+            process_id: current.process_id,
             remote_fingerprint: current.remote_fingerprint.clone(),
             expires_at: std::time::Instant::now() + ttl,
         };
         self.active = Some(renewed.clone());
         Ok(renewed)
+    }
+
+    /// Revoke only when the exact process that owns the lease is being removed.
+    pub fn revoke_process(&mut self, process_id: u32) -> bool {
+        if self.active.as_ref().is_some_and(|lease| lease.process_id == process_id) {
+            self.active = None;
+            true
+        } else {
+            false
+        }
     }
 
     pub fn revoke(&mut self, lease_id: uuid::Uuid) -> bool {
@@ -173,17 +194,31 @@ impl SessionLeaseRegistry {
         }
     }
 
-    pub fn active_for(&mut self, remote_fingerprint: &str) -> Option<&SessionLease> {
+    pub fn active_for(
+        &mut self,
+        process_id: u32,
+        remote_fingerprint: &str,
+    ) -> Option<&SessionLease> {
         let now = std::time::Instant::now();
         if self.active.as_ref().is_some_and(|lease| !lease.is_valid_at(now)) {
             self.active = None;
         }
-        self.active.as_ref().filter(|lease| lease.remote_fingerprint.eq_ignore_ascii_case(remote_fingerprint))
+        self.active.as_ref().filter(|lease| {
+            lease.process_id == process_id
+                && lease.remote_fingerprint.eq_ignore_ascii_case(remote_fingerprint)
+        })
     }
 
     pub fn clear(&mut self) {
         self.active = None;
     }
+}
+
+fn validate_process_id(process_id: u32) -> Result<(), &'static str> {
+    if process_id == 0 {
+        return Err("process ID must be nonzero");
+    }
+    Ok(())
 }
 
 fn validate_fingerprint(value: &str) -> Result<(), &'static str> {
@@ -206,51 +241,63 @@ mod lease_tests {
     const FINGERPRINT: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     #[test]
-    fn issues_single_device_lease_and_replaces_previous_owner() {
+    fn issues_single_process_and_peer_bound_lease_and_replaces_previous_owner() {
         let mut registry = SessionLeaseRegistry::default();
-        let first = registry.issue_after_authentication(FINGERPRINT, MAX_SESSION_LEASE).unwrap();
-        let second = registry.issue_after_authentication(&"A".repeat(64), MAX_SESSION_LEASE).unwrap();
+        let first = registry.issue_after_authentication(42, FINGERPRINT, MAX_SESSION_LEASE).unwrap();
+        let second = registry.issue_after_authentication(43, &"A".repeat(64), MAX_SESSION_LEASE).unwrap();
         assert_ne!(first.id, second.id);
-        assert!(registry.active_for(FINGERPRINT).is_none());
-        assert!(registry.active_for(&"a".repeat(64)).is_some());
+        assert!(registry.active_for(42, FINGERPRINT).is_none());
+        assert!(registry.active_for(43, &"a".repeat(64)).is_some());
     }
 
     #[test]
-    fn renewal_requires_matching_lease_and_peer_identity() {
+    fn renewal_requires_matching_lease_process_and_peer_identity() {
         let mut registry = SessionLeaseRegistry::default();
-        let lease = registry.issue_after_authentication(FINGERPRINT, MAX_SESSION_LEASE).unwrap();
-        assert!(registry.renew_after_authentication(lease.id, &"f".repeat(64), MAX_SESSION_LEASE).is_err());
-        assert!(registry.renew_after_authentication(uuid::Uuid::new_v4(), FINGERPRINT, MAX_SESSION_LEASE).is_err());
-        assert!(registry.renew_after_authentication(lease.id, FINGERPRINT, MAX_SESSION_LEASE).is_ok());
+        let lease = registry.issue_after_authentication(42, FINGERPRINT, MAX_SESSION_LEASE).unwrap();
+        assert!(registry.renew_after_authentication(lease.id, 42, &"f".repeat(64), MAX_SESSION_LEASE).is_err());
+        assert!(registry.renew_after_authentication(uuid::Uuid::new_v4(), 42, FINGERPRINT, MAX_SESSION_LEASE).is_err());
+        assert!(registry.renew_after_authentication(lease.id, 43, FINGERPRINT, MAX_SESSION_LEASE).is_err());
+        assert!(registry.renew_after_authentication(lease.id, 42, FINGERPRINT, MAX_SESSION_LEASE).is_ok());
+    }
+
+    #[test]
+    fn process_revocation_cannot_revoke_another_process_lease() {
+        let mut registry = SessionLeaseRegistry::default();
+        registry.issue_after_authentication(42, FINGERPRINT, MAX_SESSION_LEASE).unwrap();
+        assert!(!registry.revoke_process(43));
+        assert!(registry.active_for(42, FINGERPRINT).is_some());
+        assert!(registry.revoke_process(42));
+        assert!(registry.active_for(42, FINGERPRINT).is_none());
     }
 
     #[test]
     fn explicit_revocation_and_clear_remove_authorization() {
         let mut registry = SessionLeaseRegistry::default();
-        let lease = registry.issue_after_authentication(FINGERPRINT, MAX_SESSION_LEASE).unwrap();
+        let lease = registry.issue_after_authentication(42, FINGERPRINT, MAX_SESSION_LEASE).unwrap();
         assert!(!registry.revoke(uuid::Uuid::new_v4()));
         assert!(registry.revoke(lease.id));
-        assert!(registry.active_for(FINGERPRINT).is_none());
-        let lease = registry.issue_after_authentication(FINGERPRINT, MAX_SESSION_LEASE).unwrap();
+        assert!(registry.active_for(42, FINGERPRINT).is_none());
+        let lease = registry.issue_after_authentication(42, FINGERPRINT, MAX_SESSION_LEASE).unwrap();
         registry.clear();
-        assert!(registry.active_for(FINGERPRINT).is_none());
+        assert!(registry.active_for(42, FINGERPRINT).is_none());
         assert!(!registry.revoke(lease.id));
     }
 
     #[test]
-    fn rejects_invalid_fingerprints_and_unbounded_ttls() {
+    fn rejects_invalid_process_ids_fingerprints_and_unbounded_ttls() {
         let mut registry = SessionLeaseRegistry::default();
-        assert!(registry.issue_after_authentication("not-a-fingerprint", MAX_SESSION_LEASE).is_err());
-        assert!(registry.issue_after_authentication(FINGERPRINT, std::time::Duration::ZERO).is_err());
-        assert!(registry.issue_after_authentication(FINGERPRINT, MAX_SESSION_LEASE + std::time::Duration::from_millis(1)).is_err());
+        assert!(registry.issue_after_authentication(0, FINGERPRINT, MAX_SESSION_LEASE).is_err());
+        assert!(registry.issue_after_authentication(42, "not-a-fingerprint", MAX_SESSION_LEASE).is_err());
+        assert!(registry.issue_after_authentication(42, FINGERPRINT, std::time::Duration::ZERO).is_err());
+        assert!(registry.issue_after_authentication(42, FINGERPRINT, MAX_SESSION_LEASE + std::time::Duration::from_millis(1)).is_err());
     }
 
     #[test]
     fn expired_lease_is_not_returned() {
         let mut registry = SessionLeaseRegistry::default();
-        let lease = registry.issue_after_authentication(FINGERPRINT, std::time::Duration::from_millis(1)).unwrap();
+        let lease = registry.issue_after_authentication(42, FINGERPRINT, std::time::Duration::from_millis(1)).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(5));
-        assert!(registry.active_for(FINGERPRINT).is_none());
+        assert!(registry.active_for(42, FINGERPRINT).is_none());
         assert!(!registry.revoke(lease.id));
     }
 }

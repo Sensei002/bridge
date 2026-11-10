@@ -21,7 +21,7 @@ The client PID and image path are **attribution metadata, not authorization**. A
 
 The current interactive-user pipe ACL is intentionally a development boundary only. CONNECT and DISCONNECT remain fail-closed and are rejected. PING and read-only QUERY remain available without publisher authentication; challenge issuance/consumption additionally requires a valid pinned publisher signature. A successful challenge response proves only that the signed desktop client completed its Noise-session relay step with the selected active Android peer; it does not issue a lease or authorize driver operations. The desktop relay remains fail-closed when the service is absent or the configured publisher pin does not match. Do not enable monitor lifecycle operations until the service has a verified Bridge desktop-client identity and a live authenticated-session binding with expiry/revocation handling.
 
-The service library now contains a bounded single-device lease state machine: 15-second maximum TTL, peer-fingerprint binding, renewal, expiry, replacement, and explicit revocation. Unit tests cover these transitions. This state machine is not exposed over IPC and is not yet wired to a live Noise session; issuance must only happen after independent client and session authentication. CONNECT/DISCONNECT remain rejected.
+The service library now contains a bounded single-device lease state machine: 15-second maximum TTL, desktop process-ID binding, peer-fingerprint binding, renewal, expiry, replacement, and process/lease revocation. Unit tests cover these transitions. The registry is not exposed over IPC and is not yet wired to a live Noise session; issuance must only happen after independent client authentication and a cryptographically verifiable assertion from the paired Android peer. CONNECT/DISCONNECT remain rejected.
 
 The SCM installer/account configuration, service recovery policy, production signing, and driver signing are not complete. The service must be installed under an identity authorized by the driver's INF security descriptor (currently LocalSystem or an administrator), while the desktop UI remains unprivileged. Do not install the unsigned driver/service on a daily-use machine.
 
@@ -37,3 +37,8 @@ Requests are one message per named-pipe connection, UTF-8, at most 256 bytes:
 - `BRIDGE_DISPLAY/1 DISCONNECT` (currently rejected)
 
 The service responds with a versioned status or error line. Unknown versions, malformed UTF-8, empty messages, and oversized requests are rejected.
+
+
+## Authentication proof requirement before lease IPC
+
+The current challenge relay is not, by itself, a proof the privileged service can independently verify: the service sees a response from its signed desktop client, but it cannot distinguish a nonce actually echoed by Android over Noise from a desktop client that simply resubmits the nonce. The next protocol stage must add a peer-authenticated proof that the service can verify against a pairing-bound Android public key (or an equivalently strong independently verifiable mechanism). Do not expose lease issuance/renewal over the pipe or enable driver IOCTLs until that proof, process-handle binding, and disconnect/expiry revocation are implemented and tested.
