@@ -6,7 +6,7 @@ use std::{
     ptr::{null, null_mut},
     sync::mpsc,
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use windows_service::{
     define_windows_service,
@@ -19,12 +19,12 @@ use windows_service::{
 };
 use windows_sys::Win32::{
     Foundation::{
-        CloseHandle, GetLastError, ERROR_NO_DATA, ERROR_PIPE_CONNECTED,
+        CloseHandle, GetLastError, ERROR_BROKEN_PIPE, ERROR_NO_DATA, ERROR_PIPE_CONNECTED,
         ERROR_PIPE_LISTENING, HANDLE, INVALID_HANDLE_VALUE,
     },
-    Security::{
-        ConvertStringSecurityDescriptorToSecurityDescriptorW, SECURITY_ATTRIBUTES,
-        SDDL_REVISION_1,
+    Security::{SECURITY_ATTRIBUTES},
+    Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
     },
     Storage::FileSystem::{ReadFile, WriteFile},
     System::{
@@ -161,24 +161,27 @@ fn run_pipe_server(shutdown: &mpsc::Receiver<()>) -> io::Result<()> {
 
         if connected {
             let mut request = [0_u8; bridge_display_service::MAX_REQUEST_BYTES];
-            let mut read = 0_u32;
-            let read_ok = unsafe {
-                ReadFile(pipe, request.as_mut_ptr(), request.len() as u32, &mut read, null_mut())
-            };
-            let response = if read_ok != 0 {
-                handle_request(&request[..read as usize])
-            } else {
-                let error = unsafe { GetLastError() };
-                if error == ERROR_NO_DATA {
-                    b"BRIDGE_DISPLAY/1 ERROR empty request\n".to_vec()
-                } else {
-                    b"BRIDGE_DISPLAY/1 ERROR read failed\n".to_vec()
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let (read, response) = loop {
+                let mut read = 0_u32;
+                let read_ok = unsafe {
+                    ReadFile(pipe, request.as_mut_ptr(), request.len() as u32, &mut read, null_mut())
+                };
+                if read_ok != 0 {
+                    break (read, handle_request(&request[..read as usize]));
+                }
+                match unsafe { GetLastError() } {
+                    ERROR_NO_DATA if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+                    ERROR_BROKEN_PIPE => break (0, b"BRIDGE_DISPLAY/1 ERROR client disconnected\\n".to_vec()),
+                    _ => break (0, b"BRIDGE_DISPLAY/1 ERROR read failed\\n".to_vec()),
                 }
             };
             let mut written = 0_u32;
-            let _ = unsafe {
-                WriteFile(pipe, response.as_ptr(), response.len() as u32, &mut written, null_mut())
-            };
+            if read > 0 {
+                let _ = unsafe {
+                    WriteFile(pipe, response.as_ptr(), response.len() as u32, &mut written, null_mut())
+                };
+            }
             unsafe {
                 DisconnectNamedPipe(pipe);
                 CloseHandle(pipe);
