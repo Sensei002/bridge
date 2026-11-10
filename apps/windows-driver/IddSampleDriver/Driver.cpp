@@ -232,12 +232,12 @@ NTSTATUS IddSampleDeviceAdd(WDFDRIVER Driver, PWDFDEVICE_INIT pDeviceInit)
     Status = IddCxDeviceInitialize(Device);
     if (!NT_SUCCESS(Status)) return Status;
 
+    auto* pContext = WdfObjectGet_IndirectDeviceContextWrapper(Device);
+    pContext->pContext = new IndirectDeviceContext(Device);
+
     static const GUID BridgeDisplayInterfaceGuid = BRIDGE_DISPLAY_INTERFACE_GUID;
     Status = WdfDeviceCreateDeviceInterface(Device, &BridgeDisplayInterfaceGuid, nullptr);
     if (!NT_SUCCESS(Status)) return Status;
-
-    auto* pContext = WdfObjectGet_IndirectDeviceContextWrapper(Device);
-    pContext->pContext = new IndirectDeviceContext(Device);
     return STATUS_SUCCESS;
 }
 
@@ -608,7 +608,7 @@ NTSTATUS IddSampleAdapterInitFinished(IDDCX_ADAPTER AdapterObject, const IDARG_I
     // This is called when the OS has finished setting up the adapter for use by the IddCx driver. It's now possible
     // to report attached monitors.
 
-    auto* pDeviceContextWrapper = WdfObjectGet_IndirectDeviceContextWrapper(AdapterObject);
+    UNREFERENCED_PARAMETER(AdapterObject);
     if (!NT_SUCCESS(pInArgs->AdapterInitStatus)) return pInArgs->AdapterInitStatus;
 
     // The adapter starts without a monitor. The service requests arrival only after an authenticated session.
