@@ -1,6 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 #[cfg(windows)]
+mod display_service;
+#[cfg(windows)]
 mod identity_store;
 #[cfg(windows)]
 mod updater;
@@ -241,7 +243,6 @@ impl DesktopSession {
     /// Forward a Windows-service challenge through this live authenticated Noise session.
     /// The Android peer echoes it inside the encrypted channel; this method does not
     /// itself authorize a display lease or enable any driver operation.
-    #[allow(dead_code)] // Consumed by the named-pipe challenge integration in the next service phase.
     fn relay_service_challenge(&self, nonce: &str, timeout: Duration) -> Result<(), String> {
         if nonce.len() != 64 || !nonce.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err("display-service challenge must be 64 hexadecimal characters".into());
@@ -527,6 +528,8 @@ struct BridgeApp {
     #[cfg(windows)]
     active_sessions: Vec<Arc<DesktopSession>>,
     #[cfg(windows)]
+    display_challenge_session: Option<String>,
+    #[cfg(windows)]
     pending_incoming_transfers: Vec<PendingIncomingTransfer>,
     #[cfg(windows)]
     selected_transfer_fingerprint: Option<String>,
@@ -622,6 +625,8 @@ impl Default for BridgeApp {
             pending_pairings: Vec::new(),
             #[cfg(windows)]
             active_sessions: Vec::new(),
+            #[cfg(windows)]
+            display_challenge_session: None,
             #[cfg(windows)]
             pending_incoming_transfers: Vec::new(),
             #[cfg(windows)]
@@ -1034,6 +1039,32 @@ impl eframe::App for BridgeApp {
             // Remove sessions whose reader observed EOF or a transport failure.
             // Reconnected peers must never keep selecting an older dead session.
             self.active_sessions.retain(|session| session.is_alive());
+            let challenge_session = self.active_sessions.first().cloned();
+            let challenge_fingerprint = challenge_session.as_ref().map(|session| session.remote_fingerprint.clone());
+            if self.display_challenge_session != challenge_fingerprint {
+                self.display_challenge_session = challenge_fingerprint;
+                if let Some(session) = challenge_session {
+                    let status_tx = self.network_tx.clone();
+                    let spawn_result = thread::Builder::new()
+                        .name("bridge-display-challenge-relay".into())
+                        .spawn(move || {
+                            let result = (|| -> Result<(), String> {
+                                let nonce = display_service::issue_challenge()?;
+                                session.relay_service_challenge(&nonce, Duration::from_secs(8))?;
+                                display_service::submit_challenge_response(&nonce)?;
+                                Ok(())
+                            })();
+                            let message = match result {
+                                Ok(()) => "Windows display service authenticated the active Android Noise session.".to_owned(),
+                                Err(error) => format!("Display-service session verification is not ready: {error}"),
+                            };
+                            let _ = status_tx.send(message);
+                        });
+                    if let Err(error) = spawn_result {
+                        self.network_status = format!("Could not start display-service relay: {error}");
+                    }
+                }
+            }
             for session in &self.active_sessions {
                 while let Some(text) = session.try_receive_clipboard_text() {
                     if self.clipboard_sync {
