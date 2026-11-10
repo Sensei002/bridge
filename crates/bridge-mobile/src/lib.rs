@@ -533,11 +533,11 @@ mod tests {
         let responder_key = generate_static_keypair().unwrap();
         let initiator_device = DeviceDescriptor {
             id: DeviceId::new(), display_name: "Bridge iPhone".into(),
-            platform: Platform::Ios, protocol_version: PROTOCOL_VERSION,
+            platform: Platform::Ios, protocol_version: PROTOCOL_VERSION, attestation_public_key: None,
         };
         let responder_device = DeviceDescriptor {
             id: DeviceId::new(), display_name: "Bridge Android".into(),
-            platform: Platform::Android, protocol_version: PROTOCOL_VERSION,
+            platform: Platform::Android, protocol_version: PROTOCOL_VERSION, attestation_public_key: None,
         };
         let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
         let responder_device_id = responder_device.id;
