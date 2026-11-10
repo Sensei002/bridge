@@ -38,6 +38,7 @@ AddReg = MyDevice_HardwareDeviceSettings
 
 [MyDevice_HardwareDeviceSettings]
 HKR,, "UpperFilters",  %REG_MULTI_SZ%, "IndirectKmd"
+HKR,, "Security",, "D:P(A;;GA;;;SY)(A;;GA;;;BA)"
 HKR, "WUDF", "DeviceGroupId", %REG_SZ%, "BridgeIndirectDisplayGroup"
 
 [MyDevice_Install.NT.Services]
