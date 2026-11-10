@@ -8,7 +8,6 @@ use std::{
     collections::HashMap,
     time::{Duration, Instant},
 };
-use uuid::Uuid;
 
 /// Challenges must be answered quickly and may be consumed exactly once.
 pub const CHALLENGE_TTL: Duration = Duration::from_secs(10);
@@ -61,13 +60,8 @@ impl ServiceChallengeRegistry {
             return Err("invalid client process ID");
         }
 
-        // UUID v4 uses the platform CSPRNG. Two independent UUIDs provide
-        // 256 random bits; the UUID version/variant bits are not used here:
-        // raw random bytes are obtained from the UUID crate's random source.
         let mut nonce = [0_u8; NONCE_BYTES];
-        nonce[..16].copy_from_slice(Uuid::new_v4().as_bytes());
-        nonce[16..].copy_from_slice(Uuid::new_v4().as_bytes());
-
+        getrandom::fill(&mut nonce).map_err(|_| "cryptographic random generator unavailable")?;
         self.pending.insert(
             process_id,
             PendingChallenge {
