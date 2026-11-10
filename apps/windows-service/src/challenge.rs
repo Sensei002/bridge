@@ -1,7 +1,7 @@
 //! One-time, process-bound challenges for the Windows display-service handshake.
 //!
-//! This registry is deliberately not wired to the named pipe. Callers must first
-//! verify the desktop executable's publisher and retain a live process handle.
+//! The named-pipe server exposes this registry only after verifying the desktop
+//! executable's publisher and retaining the exact live process handle.
 //! A PID alone is not a durable process identity and must never authorize a lease.
 
 use std::{
