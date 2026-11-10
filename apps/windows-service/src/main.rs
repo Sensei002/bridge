@@ -26,7 +26,7 @@ use windows_sys::Win32::{
     Security::Authorization::{
         ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
     },
-    Storage::FileSystem::{ReadFile, WriteFile, PIPE_ACCESS_DUPLEX},
+    Storage::FileSystem::{ReadFile, WriteFile, FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX},
     System::{
         Pipes::{
             ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_NOWAIT,
@@ -119,7 +119,7 @@ fn create_pipe() -> io::Result<HANDLE> {
     let pipe = unsafe {
         CreateNamedPipeW(
             name.as_ptr(),
-            PIPE_ACCESS_DUPLEX,
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
             PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_NOWAIT | PIPE_REJECT_REMOTE_CLIENTS,
             1,
             512,
