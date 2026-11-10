@@ -60,7 +60,8 @@
 
 ## Device capabilities
 - [ ] Capability permission model
-- [ ] Universal clipboard (text first)
+- [x] Explicit text sharing between connected trusted Windows and Android devices (16 KiB cap; opt-in; no background clipboard monitoring)
+- [ ] Automatic clipboard monitoring/sync (deferred for Android background-access restrictions and additional privacy controls)
 - [ ] Local file transfer with explicit destination approval
 - [ ] Presence and device status
 - [ ] Android notification bridge (subject to platform permissions)
