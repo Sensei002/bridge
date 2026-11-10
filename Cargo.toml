@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/bridge-protocol", "crates/bridge-core", "crates/bridge-security", "crates/bridge-network", "crates/bridge-transfer", "crates/bridge-mobile", "apps/desktop"]
+members = ["crates/bridge-protocol", "crates/bridge-core", "crates/bridge-security", "crates/bridge-network", "crates/bridge-transfer", "crates/bridge-mobile", "apps/desktop", "apps/windows-service"]
 
 [workspace.package]
 version = "0.2.0"
