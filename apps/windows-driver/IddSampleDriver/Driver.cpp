@@ -22,57 +22,24 @@ using namespace std;
 using namespace Microsoft::IndirectDisp;
 using namespace Microsoft::WRL;
 
-#pragma region SampleMonitors
+#pragma region BridgeMonitorModes
 
-static constexpr DWORD IDD_SAMPLE_MONITOR_COUNT = 3; // If monitor count > ARRAYSIZE(s_SampleMonitors), we create edid-less monitors
-
-// Default modes reported for edid-less monitors. The first mode is set as preferred
-static const struct IndirectSampleMonitor::SampleMonitorMode s_SampleDefaultModes[] = 
+// Initial portrait profile for the first Bridge Android target.
+// Actual modes will be gated by runtime encoder/decoder and transport capability.
+struct BridgeMonitorMode
 {
-    { 1920, 1080, 60 },
-    { 1600,  900, 60 },
-    { 1024,  768, 75 },
+    DWORD Width;
+    DWORD Height;
+    DWORD VSync;
 };
 
-// FOR SAMPLE PURPOSES ONLY, Static info about monitors that will be reported to OS
-static const struct IndirectSampleMonitor s_SampleMonitors[] =
+static constexpr DWORD IDD_BRIDGE_MONITOR_COUNT = 1;
+
+static const BridgeMonitorMode s_BridgeMonitorModes[] =
 {
-    // Modified EDID from Dell S2719DGF
-    {
-        {
-            0x00,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0x00,0x10,0xAC,0xE6,0xD0,0x55,0x5A,0x4A,0x30,0x24,0x1D,0x01,
-            0x04,0xA5,0x3C,0x22,0x78,0xFB,0x6C,0xE5,0xA5,0x55,0x50,0xA0,0x23,0x0B,0x50,0x54,0x00,0x02,0x00,
-            0xD1,0xC0,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x58,0xE3,0x00,
-            0xA0,0xA0,0xA0,0x29,0x50,0x30,0x20,0x35,0x00,0x55,0x50,0x21,0x00,0x00,0x1A,0x00,0x00,0x00,0xFF,
-            0x00,0x37,0x4A,0x51,0x58,0x42,0x59,0x32,0x0A,0x20,0x20,0x20,0x20,0x20,0x00,0x00,0x00,0xFC,0x00,
-            0x53,0x32,0x37,0x31,0x39,0x44,0x47,0x46,0x0A,0x20,0x20,0x20,0x20,0x00,0x00,0x00,0xFD,0x00,0x28,
-            0x9B,0xFA,0xFA,0x40,0x01,0x0A,0x20,0x20,0x20,0x20,0x20,0x20,0x00,0x2C
-        },
-        {
-            { 2560, 1440, 144 },
-            { 1920, 1080,  60 },
-            { 1024,  768,  60 },
-        },
-        0
-    },
-    // Modified EDID from Lenovo Y27fA
-    {
-        {
-            0x00,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0x00,0x30,0xAE,0xBF,0x65,0x01,0x01,0x01,0x01,0x20,0x1A,0x01,
-            0x04,0xA5,0x3C,0x22,0x78,0x3B,0xEE,0xD1,0xA5,0x55,0x48,0x9B,0x26,0x12,0x50,0x54,0x00,0x08,0x00,
-            0xA9,0xC0,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x68,0xD8,0x00,
-            0x18,0xF1,0x70,0x2D,0x80,0x58,0x2C,0x45,0x00,0x53,0x50,0x21,0x00,0x00,0x1E,0x00,0x00,0x00,0x10,
-            0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xFD,0x00,
-            0x30,0x92,0xB4,0xB4,0x22,0x01,0x0A,0x20,0x20,0x20,0x20,0x20,0x20,0x00,0x00,0x00,0xFC,0x00,0x4C,
-            0x45,0x4E,0x20,0x59,0x32,0x37,0x66,0x41,0x0A,0x20,0x20,0x20,0x00,0x11
-        },
-        {
-            { 3840, 2160,  60 },
-            { 1600,  900,  60 },
-            { 1024,  768,  60 },
-        },
-        0
-    }
+    { 1080, 2340, 60 },
+    {  720, 1560, 60 },
+    {  540, 1170, 60 },
 };
 
 #pragma endregion
@@ -495,15 +462,15 @@ void IndirectDeviceContext::InitAdapter()
     AdapterCaps.Size = sizeof(AdapterCaps);
 
     // Declare basic feature support for the adapter (required)
-    AdapterCaps.MaxMonitorsSupported = IDD_SAMPLE_MONITOR_COUNT;
+    AdapterCaps.MaxMonitorsSupported = IDD_BRIDGE_MONITOR_COUNT;
     AdapterCaps.EndPointDiagnostics.Size = sizeof(AdapterCaps.EndPointDiagnostics);
     AdapterCaps.EndPointDiagnostics.GammaSupport = IDDCX_FEATURE_IMPLEMENTATION_NONE;
     AdapterCaps.EndPointDiagnostics.TransmissionType = IDDCX_TRANSMISSION_TYPE_WIRED_OTHER;
 
     // Declare your device strings for telemetry (required)
-    AdapterCaps.EndPointDiagnostics.pEndPointFriendlyName = L"IddSample Device";
-    AdapterCaps.EndPointDiagnostics.pEndPointManufacturerName = L"Microsoft";
-    AdapterCaps.EndPointDiagnostics.pEndPointModelName = L"IddSample Model";
+    AdapterCaps.EndPointDiagnostics.pEndPointFriendlyName = L"Bridge Virtual Display";
+    AdapterCaps.EndPointDiagnostics.pEndPointManufacturerName = L"Bridge";
+    AdapterCaps.EndPointDiagnostics.pEndPointModelName = L"Bridge Second Screen";
 
     // Declare your hardware and firmware versions (required)
     IDDCX_ENDPOINT_VERSION Version = {};
@@ -555,18 +522,11 @@ void IndirectDeviceContext::FinishInit(UINT ConnectorIndex)
     MonitorInfo.MonitorType = DISPLAYCONFIG_OUTPUT_TECHNOLOGY_HDMI;
     MonitorInfo.ConnectorIndex = ConnectorIndex;
 
+    // EDID-less Bridge monitor: supported modes are reported by the default-mode callback.
     MonitorInfo.MonitorDescription.Size = sizeof(MonitorInfo.MonitorDescription);
     MonitorInfo.MonitorDescription.Type = IDDCX_MONITOR_DESCRIPTION_TYPE_EDID;
-    if (ConnectorIndex >= ARRAYSIZE(s_SampleMonitors))
-    {
-        MonitorInfo.MonitorDescription.DataSize = 0;
-        MonitorInfo.MonitorDescription.pData = nullptr;
-    }
-    else
-    {
-        MonitorInfo.MonitorDescription.DataSize = IndirectSampleMonitor::szEdidBlock;
-        MonitorInfo.MonitorDescription.pData = const_cast<BYTE*>(s_SampleMonitors[ConnectorIndex].pEdidBlock);
-    }
+    MonitorInfo.MonitorDescription.DataSize = 0;
+    MonitorInfo.MonitorDescription.pData = nullptr;
 
     // ==============================
     // TODO: The monitor's container ID should be distinct from "this" device's container ID if the monitor is not
@@ -645,10 +605,8 @@ NTSTATUS IddSampleAdapterInitFinished(IDDCX_ADAPTER AdapterObject, const IDARG_I
     auto* pDeviceContextWrapper = WdfObjectGet_IndirectDeviceContextWrapper(AdapterObject);
     if (NT_SUCCESS(pInArgs->AdapterInitStatus))
     {
-        for (DWORD i = 0; i < IDD_SAMPLE_MONITOR_COUNT; i++)
-        {
-            pDeviceContextWrapper->pContext->FinishInit(i);
-        }
+        // One logical Android display is exposed by this adapter.
+        pDeviceContextWrapper->pContext->FinishInit(0);
     }
 
     return STATUS_SUCCESS;
@@ -674,53 +632,12 @@ NTSTATUS IddSampleAdapterCommitModes(IDDCX_ADAPTER AdapterObject, const IDARG_IN
 _Use_decl_annotations_
 NTSTATUS IddSampleParseMonitorDescription(const IDARG_IN_PARSEMONITORDESCRIPTION* pInArgs, IDARG_OUT_PARSEMONITORDESCRIPTION* pOutArgs)
 {
-    // ==============================
-    // TODO: In a real driver, this function would be called to generate monitor modes for an EDID by parsing it. In
-    // this sample driver, we hard-code the EDID, so this function can generate known modes.
-    // ==============================
+    UNREFERENCED_PARAMETER(pInArgs);
+    UNREFERENCED_PARAMETER(pOutArgs);
 
-    pOutArgs->MonitorModeBufferOutputCount = IndirectSampleMonitor::szModeList;
-
-    if (pInArgs->MonitorModeBufferInputCount < IndirectSampleMonitor::szModeList)
-    {
-        // Return success if there was no buffer, since the caller was only asking for a count of modes
-        return (pInArgs->MonitorModeBufferInputCount > 0) ? STATUS_BUFFER_TOO_SMALL : STATUS_SUCCESS;
-    }
-    else
-    {
-        // In the sample driver, we have reported some static information about connected monitors
-        // Check which of the reported monitors this call is for by comparing it to the pointer of
-        // our known EDID blocks.
-
-        if (pInArgs->MonitorDescription.DataSize != IndirectSampleMonitor::szEdidBlock)
-            return STATUS_INVALID_PARAMETER;
-
-        DWORD SampleMonitorIdx = 0;
-        for(; SampleMonitorIdx < ARRAYSIZE(s_SampleMonitors); SampleMonitorIdx++)
-        {
-            if (memcmp(pInArgs->MonitorDescription.pData, s_SampleMonitors[SampleMonitorIdx].pEdidBlock, IndirectSampleMonitor::szEdidBlock) == 0)
-            {
-                // Copy the known modes to the output buffer
-                for (DWORD ModeIndex = 0; ModeIndex < IndirectSampleMonitor::szModeList; ModeIndex++)
-                {
-                    pInArgs->pMonitorModes[ModeIndex] = CreateIddCxMonitorMode(
-                        s_SampleMonitors[SampleMonitorIdx].pModeList[ModeIndex].Width,
-                        s_SampleMonitors[SampleMonitorIdx].pModeList[ModeIndex].Height,
-                        s_SampleMonitors[SampleMonitorIdx].pModeList[ModeIndex].VSync,
-                        IDDCX_MONITOR_MODE_ORIGIN_MONITORDESCRIPTOR
-                    );
-                }
-
-                // Set the preferred mode as represented in the EDID
-                pOutArgs->PreferredMonitorModeIdx = s_SampleMonitors[SampleMonitorIdx].ulPreferredModeIdx;
-        
-                return STATUS_SUCCESS;
-            }
-        }
-
-        // This EDID block does not belong to the monitors we reported earlier
-        return STATUS_INVALID_PARAMETER;
-    }
+    // Bridge reports an EDID-less monitor and supplies modes through
+    // IddSampleMonitorGetDefaultModes. EDID parsing is not used in this phase.
+    return STATUS_INVALID_PARAMETER;
 }
 
 _Use_decl_annotations_
@@ -728,33 +645,30 @@ NTSTATUS IddSampleMonitorGetDefaultModes(IDDCX_MONITOR MonitorObject, const IDAR
 {
     UNREFERENCED_PARAMETER(MonitorObject);
 
-    // ==============================
-    // TODO: In a real driver, this function would be called to generate monitor modes for a monitor with no EDID.
-    // Drivers should report modes that are guaranteed to be supported by the transport protocol and by nearly all
-    // monitors (such 640x480, 800x600, or 1024x768). If the driver has access to monitor modes from a descriptor other
-    // than an EDID, those modes would also be reported here.
-    // ==============================
+    const UINT modeCount = ARRAYSIZE(s_BridgeMonitorModes);
+    pOutArgs->DefaultMonitorModeBufferOutputCount = modeCount;
 
     if (pInArgs->DefaultMonitorModeBufferInputCount == 0)
     {
-        pOutArgs->DefaultMonitorModeBufferOutputCount = ARRAYSIZE(s_SampleDefaultModes); 
+        return STATUS_SUCCESS;
     }
-    else
+
+    if (pInArgs->DefaultMonitorModeBufferInputCount < modeCount)
     {
-        for (DWORD ModeIndex = 0; ModeIndex < ARRAYSIZE(s_SampleDefaultModes); ModeIndex++)
-        {
-            pInArgs->pDefaultMonitorModes[ModeIndex] = CreateIddCxMonitorMode(
-                s_SampleDefaultModes[ModeIndex].Width,
-                s_SampleDefaultModes[ModeIndex].Height,
-                s_SampleDefaultModes[ModeIndex].VSync,
-                IDDCX_MONITOR_MODE_ORIGIN_DRIVER
-            );
-        }
-
-        pOutArgs->DefaultMonitorModeBufferOutputCount = ARRAYSIZE(s_SampleDefaultModes); 
-        pOutArgs->PreferredMonitorModeIdx = 0;
+        return STATUS_BUFFER_TOO_SMALL;
     }
 
+    for (UINT modeIndex = 0; modeIndex < modeCount; ++modeIndex)
+    {
+        pInArgs->pDefaultMonitorModes[modeIndex] = CreateIddCxMonitorMode(
+            s_BridgeMonitorModes[modeIndex].Width,
+            s_BridgeMonitorModes[modeIndex].Height,
+            s_BridgeMonitorModes[modeIndex].VSync,
+            IDDCX_MONITOR_MODE_ORIGIN_DRIVER
+        );
+    }
+
+    pOutArgs->PreferredMonitorModeIdx = 0;
     return STATUS_SUCCESS;
 }
 
@@ -764,29 +678,26 @@ NTSTATUS IddSampleMonitorQueryModes(IDDCX_MONITOR MonitorObject, const IDARG_IN_
     UNREFERENCED_PARAMETER(MonitorObject);
 
     vector<IDDCX_TARGET_MODE> TargetModes;
+    TargetModes.reserve(ARRAYSIZE(s_BridgeMonitorModes));
 
-    // Create a set of modes supported for frame processing and scan-out. These are typically not based on the
-    // monitor's descriptor and instead are based on the static processing capability of the device. The OS will
-    // report the available set of modes for a given output as the intersection of monitor modes with target modes.
-
-    TargetModes.push_back(CreateIddCxTargetMode(3840, 2160, 60));
-    TargetModes.push_back(CreateIddCxTargetMode(2560, 1440, 144));
-    TargetModes.push_back(CreateIddCxTargetMode(2560, 1440, 90));
-    TargetModes.push_back(CreateIddCxTargetMode(2560, 1440, 60));
-    TargetModes.push_back(CreateIddCxTargetMode(1920, 1080, 144));
-    TargetModes.push_back(CreateIddCxTargetMode(1920, 1080, 90));
-    TargetModes.push_back(CreateIddCxTargetMode(1920, 1080, 60));
-    TargetModes.push_back(CreateIddCxTargetMode(1600,  900, 60));
-    TargetModes.push_back(CreateIddCxTargetMode(1024,  768, 75));
-    TargetModes.push_back(CreateIddCxTargetMode(1024,  768, 60));
-
-    pOutArgs->TargetModeBufferOutputCount = (UINT) TargetModes.size();
-
-    if (pInArgs->TargetModeBufferInputCount >= TargetModes.size())
+    for (const auto& mode : s_BridgeMonitorModes)
     {
-        copy(TargetModes.begin(), TargetModes.end(), pInArgs->pTargetModes);
+        TargetModes.push_back(CreateIddCxTargetMode(mode.Width, mode.Height, mode.VSync));
     }
 
+    pOutArgs->TargetModeBufferOutputCount = static_cast<UINT>(TargetModes.size());
+
+    if (pInArgs->TargetModeBufferInputCount == 0)
+    {
+        return STATUS_SUCCESS;
+    }
+
+    if (pInArgs->TargetModeBufferInputCount < TargetModes.size())
+    {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    copy(TargetModes.begin(), TargetModes.end(), pInArgs->pTargetModes);
     return STATUS_SUCCESS;
 }
 

@@ -1,28 +1,31 @@
-# Bridge Windows Indirect Display Driver (development foundation)
+# Bridge Windows Indirect Display Driver
 
-This directory contains the first **build-only** IddCx/UMDF driver foundation for Bridge Second Screen.
+This directory contains Bridge's development IddCx/UMDF virtual-display driver.
 
-## What this milestone does
+## Current implementation
 
-- Vendors Microsoft's official IddSampleDriver source as a pinned reference baseline.
-- Gives the package a Bridge-specific root hardware ID and a unique UMDF DeviceGroupId.
+- Based on Microsoft's pinned IddSampleDriver reference implementation.
+- Uses a Bridge-specific root hardware ID and UMDF DeviceGroupId.
 - Builds the x64 UMDF driver package in GitHub Actions with a matched Windows SDK/WDK toolchain.
-- Publishes the unsigned development package as a CI artifact for inspection.
+- Exposes one Bridge-branded, EDID-less virtual monitor from the IddCx adapter.
+- Advertises an initial portrait mode profile: 1080x2340@60, 720x1560@60, and 540x1170@60.
+- Uploads the unsigned development package as a CI artifact for inspection.
 
-## What it does not do yet
+## Scope and limitations
 
-- It does not create or install a software device instance.
-- It does not yet implement Bridge's phone-specific EDID/mode list or connect/disconnect control.
-- It does not stream desktop frames to Android. The Microsoft sample's swap-chain loop is still a no-op.
-- It is not signed for production and must not be installed on a daily-use Windows machine.
+- The monitor is announced when the driver adapter initializes. Installing/starting the PnP device makes it appear; stopping/removing the device tears down the adapter and its child monitor.
+- Phone-session-driven hot-plug and explicit runtime monitor departure are not implemented yet. Those require the Bridge Display Service/control interface and will be added in a later milestone.
+- The modes are an initial driver-side capability list, not a guarantee that the current Android decoder/network path can sustain them. Runtime capability negotiation must gate production use.
+- The Microsoft sample swap-chain loop still releases frames without encoding or transmitting them.
+- This package is unsigned and is not ready for installation on a daily-use Windows machine.
 
-The source is intentionally kept close to Microsoft's sample so the first change is a reproducible build baseline. The next driver change will replace the sample monitor descriptors with a single Bridge monitor and implement an explicit, controlled software-device lifecycle before any user is asked to install it.
+Do not install this unsigned package outside a dedicated test environment. Next we will add controlled device lifecycle and validate monitor arrival/removal on a disposable Windows test installation before enabling normal installation.
 
 ## Upstream source and license
 
 - Repository: https://github.com/microsoft/Windows-driver-samples
 - Sample: `video/IndirectDisplay/IddSampleDriver`
-- Pinned upstream commit: `d49bb7d72f3651952b2b6e4ad28d14fe2247eb69`
-- License: Microsoft Public License (MS-PL), reproduced in [THIRD_PARTY_LICENSE.txt](THIRD_PARTY_LICENSE.txt)
+- Pinned commit: `d49bb7d72f3651952b2b6e4ad28d14fe2247eb69`
+- License: Microsoft Public License (MS-PL), reproduced in [THIRD_PARTY_LICENSE.txt](IddSampleDriver/THIRD_PARTY_LICENSE.txt)
 
-See Microsoft's [Indirect Display Driver sample notes](https://github.com/microsoft/Windows-driver-samples/tree/d49bb7d72f3651952b2b6e4ad28d14fe2247eb69/video/IndirectDisplay) for the sample's limitations and production TODOs.
+Bridge-specific monitor configuration, INF identity, and project metadata are maintained separately from the upstream sample. Upstream copyright and license notices are retained.
