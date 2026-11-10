@@ -453,7 +453,11 @@ mod tests {
         };
         assert!(encode_control(&malformed).is_err());
         let malformed_proof = TransferControl::DisplayChallengeResponse {
-            signature: "bad".into(), ..response
+            request_id,
+            session_id,
+            nonce: nonce.clone(),
+            device_fingerprint: "b6".repeat(32),
+            signature: "bad".into(),
         };
         assert!(encode_control(&malformed_proof).is_err());
         let malformed_json = format!(r#"{{"type":"display_challenge_response","request_id":"{request_id}","session_id":"{session_id}","nonce":"bad","device_fingerprint":"{}","signature":"{}"}}"#, "b6".repeat(32), "c7".repeat(64));
