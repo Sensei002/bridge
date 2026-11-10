@@ -84,6 +84,18 @@ impl Page {
 }
 
 #[cfg(windows)]
+fn validate_peer_attestation_descriptor(descriptor: &DeviceDescriptor) -> Result<(), String> {
+    if descriptor.platform == Platform::Android {
+        match descriptor.attestation_public_key.as_deref() {
+            Some(key) if key.len() == 64 && key.bytes().all(|byte| byte.is_ascii_hexdigit()) => Ok(()),
+            _ => Err("Android peer did not provide a valid attestation public key".into()),
+        }
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
 struct PendingApproval {
     connection: NoiseConnection,
     descriptor: DeviceDescriptor,
@@ -739,6 +751,7 @@ fn start_secure_listener(status: Sender<String>, pending: Sender<PendingApproval
             display_name: "Bridge Windows".into(),
             platform: Platform::Windows,
             protocol_version: PROTOCOL_VERSION,
+            attestation_public_key: None,
         };
         let listener = match TcpListener::bind(("0.0.0.0", NETWORK_PORT)) {
             Ok(listener) => listener,
@@ -772,6 +785,10 @@ fn start_secure_listener(status: Sender<String>, pending: Sender<PendingApproval
                             });
                         match result {
                             Ok((connection, descriptor)) => {
+                                if let Err(error) = validate_peer_attestation_descriptor(&descriptor) {
+                                    let _ = status.send(format!("Rejected Android pairing: {error}"));
+                                    return;
+                                }
                                 let store = match TrustStore::load(trust_store_path()) {
                                     Ok(store) => store,
                                     Err(error) => {
@@ -822,8 +839,10 @@ fn start_pairing(peer: DiscoveredPeer, expected: Option<String>, status: Sender<
                     display_name: "Bridge Windows".into(),
                     platform: Platform::Windows,
                     protocol_version: PROTOCOL_VERSION,
+                    attestation_public_key: None,
                 };
                 let descriptor = connection.exchange_descriptors(&local).map_err(|error| error.to_string())?;
+                validate_peer_attestation_descriptor(&descriptor)?;
                 let store = TrustStore::load(trust_store_path()).map_err(|error| error.to_string())?;
                 let already_trusted = if let Some(trusted) = store.get(&descriptor.id) {
                     if !trusted.public_key_fingerprint.eq_ignore_ascii_case(&connection.remote_fingerprint) {

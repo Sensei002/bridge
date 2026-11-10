@@ -147,7 +147,21 @@ class BridgeConnectionService : Service() {
                 val fingerprint = fingerprintResult.getString("fingerprint")
                 // Create and validate the independent signing identity before pairing starts.
                 // The seed is reloaded only by the future signing path, never retained here.
-                BridgeIdentityStore.loadOrCreateAttestationSeed(this).fill(0)
+                val attestationSeed = BridgeIdentityStore.loadOrCreateAttestationSeed(this)
+                val attestationKeyResult = try {
+                    org.json.JSONObject(BridgeNative.attestationPublicKey(
+                        attestationSeed.joinToString("") { "%02x".format(it.toInt() and 0xff) }
+                    ))
+                } finally {
+                    attestationSeed.fill(0)
+                }
+                check(attestationKeyResult.optBoolean("ok")) {
+                    attestationKeyResult.optString("error", "Could not derive Android attestation public key")
+                }
+                val attestationPublicKey = attestationKeyResult.getString("public_key")
+                check(attestationPublicKey.matches(Regex("[0-9a-fA-F]{64}"))) {
+                    "Native attestation key derivation returned an invalid public key"
+                }
                 val identityPreferences = getSharedPreferences("bridge_secure_identity", MODE_PRIVATE)
                 val deviceId = identityPreferences.getString("device_id", null)
                     ?: UUID.randomUUID().toString().also {
@@ -214,6 +228,7 @@ class BridgeConnectionService : Service() {
                     privateKey,
                     fingerprint,
                     deviceId,
+                    attestationPublicKey,
                     onPending = { pending ->
                         mainHandler.post {
                             if (!stopping && BridgeRuntimeState.pendingPairings.none { it.handle == pending.handle }) {

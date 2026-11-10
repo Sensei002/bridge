@@ -90,7 +90,7 @@ mod tests {
     use bridge_protocol::{Platform, PROTOCOL_VERSION};
 
     fn device() -> DeviceDescriptor {
-        DeviceDescriptor { id: DeviceId::new(), display_name: "Phone".into(), platform: Platform::Android, protocol_version: PROTOCOL_VERSION }
+        DeviceDescriptor { id: DeviceId::new(), display_name: "Phone".into(), platform: Platform::Android, protocol_version: PROTOCOL_VERSION, attestation_public_key: None }
     }
 
 
