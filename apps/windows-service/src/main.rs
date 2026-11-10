@@ -19,7 +19,7 @@ use windows_service::{
 };
 use windows_sys::Win32::{
     Foundation::{
-        CloseHandle, GetLastError, ERROR_BROKEN_PIPE, ERROR_NO_DATA, ERROR_PIPE_CONNECTED,
+        CloseHandle, GetLastError, ERROR_NO_DATA, ERROR_PIPE_CONNECTED,
         ERROR_PIPE_LISTENING, HANDLE, INVALID_HANDLE_VALUE,
     },
     Security::{
@@ -27,7 +27,7 @@ use windows_sys::Win32::{
         SDDL_REVISION_1,
     },
     System::{
-        IO::{DeviceIoControl, ReadFile, WriteFile},
+        IO::DeviceIoControl,
         Memory::LocalFree,
         Pipes::{
             ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_ACCESS_DUPLEX,
@@ -140,7 +140,6 @@ fn create_pipe() -> io::Result<HANDLE> {
 fn run_pipe_server(shutdown: &mpsc::Receiver<()>) -> io::Result<()> {
     while shutdown.try_recv().is_err() {
         let pipe = create_pipe()?;
-        let name = wide(PIPE_NAME);
         let connected = loop {
             if shutdown.try_recv().is_ok() {
                 unsafe { CloseHandle(pipe); }
