@@ -149,9 +149,7 @@ class BridgeConnectionService : Service() {
                 // The seed is reloaded only by the future signing path, never retained here.
                 val attestationSeed = BridgeIdentityStore.loadOrCreateAttestationSeed(this)
                 val attestationKeyResult = try {
-                    org.json.JSONObject(BridgeNative.attestationPublicKey(
-                        attestationSeed.joinToString("") { "%02x".format(it.toInt() and 0xff) }
-                    ))
+                    org.json.JSONObject(BridgeNative.attestationPublicKey(attestationSeed))
                 } finally {
                     attestationSeed.fill(0)
                 }
