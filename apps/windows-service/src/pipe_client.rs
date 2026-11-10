@@ -1,4 +1,4 @@
-use std::{ffi::OsString, io, os::windows::ffi::OsStringExt, path::PathBuf};
+use std::{ffi::OsString, io, os::windows::ffi::OsStringExt, path::PathBuf, sync::Arc};
 use windows_sys::Win32::{
     Foundation::{CloseHandle, HANDLE, WAIT_TIMEOUT},
     System::{
@@ -24,11 +24,11 @@ const PROCESS_SYNCHRONIZE: u32 = 0x0010_0000;
 /// This remains attribution, not publisher authentication: image paths are not
 /// proof of signer identity. Mutating display commands remain fail-closed until
 /// the service verifies the signed client and binds an authenticated Noise peer.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PipeClientIdentity {
     pub process_id: u32,
     pub image_path: PathBuf,
-    process: OwnedProcessHandle,
+    process: Arc<OwnedProcessHandle>,
 }
 
 impl PipeClientIdentity {
@@ -77,7 +77,7 @@ pub fn identify(pipe: HANDLE) -> io::Result<PipeClientIdentity> {
     if process.is_null() {
         return Err(io::Error::last_os_error());
     }
-    let process = OwnedProcessHandle(process);
+    let process = Arc::new(OwnedProcessHandle(process));
 
     let image_path = query_image_path(process.0)?;
     let identity = PipeClientIdentity { process_id, image_path, process };
