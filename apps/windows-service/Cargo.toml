@@ -1,0 +1,30 @@
+[package]
+name = "bridge-display-service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Privileged Windows service for Bridge virtual display lifecycle"
+
+[features]
+default = []
+service-bin = []
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "bridge-display-service"
+path = "src/main.rs"
+required-features = ["service-bin"]
+
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.7"
+windows-sys = { version = "0.59", features = [
+  "Win32_Devices_DeviceAndDriverInstallation",
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Storage_FileSystem",
+  "Win32_System_IO",
+  "Win32_System_Pipes",
+  "Win32_System_Threading"
+] }
