@@ -464,6 +464,7 @@ struct BridgeApp {
     selected: Page,
     show_pair_dialog: bool,
     clipboard_sync: bool,
+    #[cfg(windows)]
     clipboard_draft: String,
     clipboard_received: Option<String>,
     clipboard_status: String,
@@ -559,6 +560,7 @@ impl Default for BridgeApp {
             selected: Page::Overview,
             show_pair_dialog: false,
             clipboard_sync: false,
+            #[cfg(windows)]
             clipboard_draft: String::new(),
             clipboard_received: None,
             clipboard_status: "Clipboard sharing is off.".into(),
