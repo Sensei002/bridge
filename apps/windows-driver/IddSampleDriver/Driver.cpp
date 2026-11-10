@@ -217,10 +217,8 @@ NTSTATUS IddSampleDeviceAdd(WDFDRIVER Driver, PWDFDEVICE_INIT pDeviceInit)
         }
     };
 
-    UNICODE_STRING DeviceSddl;
-    RtlInitUnicodeString(&DeviceSddl, L"D:P(A;;GA;;;SY)(A;;GA;;;BA)");
-    Status = WdfDeviceInitAssignSDDLString(pDeviceInit, &DeviceSddl);
-    if (!NT_SUCCESS(Status)) return Status;
+    // UMDF device-stack access is secured through the INF Security directive.
+    // WdfDeviceInitAssignSDDLString is KMDF-only and must not be used here.
 
     WDFDEVICE Device = nullptr;
     Status = WdfDeviceCreate(&pDeviceInit, &Attr, &Device);
