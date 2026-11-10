@@ -11,7 +11,7 @@ internal object BridgeNative {
 
     external fun identityFingerprint(privateKeyHex: String): String
     external fun attestationPublicKey(seedHex: String): String
-    external fun attestationSign(seedHex: String, nonceHex: String, sessionId: String, deviceFingerprint: String): String
+    external fun attestationSign(seed: ByteArray, nonceHex: String, sessionId: String, deviceFingerprint: String): String
     external fun pairConnect(requestJson: String): String
     external fun pairAccept(requestJson: String): String
     external fun sessionSend(handle: Long, message: String): String
