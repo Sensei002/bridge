@@ -823,6 +823,7 @@ fn start_pairing(peer: DiscoveredPeer, expected: Option<String>, status: Sender<
                     display_name: "Bridge Windows".into(),
                     platform: Platform::Windows,
                     protocol_version: PROTOCOL_VERSION,
+                    attestation_public_key: None,
                 };
                 let descriptor = connection.exchange_descriptors(&local).map_err(|error| error.to_string())?;
                 let store = TrustStore::load(trust_store_path()).map_err(|error| error.to_string())?;
