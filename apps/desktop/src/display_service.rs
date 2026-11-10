@@ -69,9 +69,13 @@ pub fn submit_attestation_response(
         signature.to_ascii_lowercase(),
     );
     let response = request(&command)?;
+    parse_lease_response(&response)
+}
+
+fn parse_lease_response(response: &str) -> Result<(), String> {
     let value = response.trim()
         .strip_prefix("BRIDGE_DISPLAY/1 OK lease_issued id=")
-        .ok_or_else(|| service_response_error(&response))?;
+        .ok_or_else(|| service_response_error(response))?;
     let (lease_id, ttl) = value.split_once(" expires_in_ms=")
         .ok_or_else(|| "display service returned a malformed lease".to_string())?;
     uuid::Uuid::parse_str(lease_id)
@@ -172,5 +176,24 @@ mod tests {
         assert!(parse_challenge("BRIDGE_DISPLAY/1 ERROR signer pin missing").unwrap_err().contains("signer pin missing"));
         assert!(service_response_error("BRIDGE_DISPLAY/1 ERROR signer pin missing").contains("signer pin missing"));
         assert!(service_response_error("unexpected").contains("unexpected"));
+    }
+
+    #[test]
+    fn accepts_only_valid_short_lived_service_leases() {
+        let id = uuid::Uuid::new_v4();
+        let response = format!("BRIDGE_DISPLAY/1 OK lease_issued id={id} expires_in_ms=15000");
+        assert!(parse_lease_response(&response).is_ok());
+        assert!(parse_lease_response(&format!(
+            "BRIDGE_DISPLAY/1 OK lease_issued id={id} expires_in_ms=0"
+        )).is_err());
+        assert!(parse_lease_response(&format!(
+            "BRIDGE_DISPLAY/1 OK lease_issued id={id} expires_in_ms=15001"
+        )).is_err());
+        assert!(parse_lease_response(
+            "BRIDGE_DISPLAY/1 OK lease_issued id=not-a-uuid expires_in_ms=15000"
+        ).is_err());
+        assert!(parse_lease_response(
+            "BRIDGE_DISPLAY/1 OK attestation_verified"
+        ).is_err());
     }
 }
