@@ -31,6 +31,9 @@ internal object BridgeRuntimeState {
     val connectedSessionHandles = mutableStateMapOf<String, Long>()
     val incomingOffers = mutableStateListOf<BridgeIncomingOffer>()
     val receivedFiles = mutableStateListOf<File>()
+    val clipboardReceivedText = mutableStateOf<String?>(null)
+    val clipboardReceivedFrom = mutableStateOf("No text received yet.")
+    val clipboardStatus = mutableStateOf("Clipboard sharing is off.")
     val pairingStatus = mutableStateOf("Starting Bridge background connection…")
     val transferStatus = mutableStateOf("Waiting for a connected trusted device.")
 }
@@ -154,6 +157,21 @@ class BridgeConnectionService : Service() {
                         mainHandler.post {
                             if (!stopping && BridgeRuntimeState.incomingOffers.none { it.transferId == offer.transferId }) {
                                 BridgeRuntimeState.incomingOffers.add(offer)
+                            }
+                        }
+                    },
+                    onClipboardText = { peerId, text ->
+                        val enabled = getSharedPreferences("bridge_settings", MODE_PRIVATE)
+                            .getBoolean("clipboard_sync_enabled", false)
+                        if (enabled && !stopping) {
+                            mainHandler.post {
+                                if (!stopping) {
+                                    BridgeRuntimeState.clipboardReceivedText.value = text
+                                    val peerName = controllerTrustedDevices().firstOrNull { it.deviceId == peerId }?.name
+                                        ?: "Trusted device " + peerId.take(8)
+                                    BridgeRuntimeState.clipboardReceivedFrom.value = "Received from $peerName"
+                                    BridgeRuntimeState.clipboardStatus.value = "Text received securely."
+                                }
                             }
                         }
                     },
@@ -329,6 +347,30 @@ class BridgeConnectionService : Service() {
 
     internal fun sendFile(uri: Uri, sessionHandle: Long) {
         transferReceiver?.sendFile(uri, sessionHandle)
+    }
+
+    internal fun sendClipboard(text: String) {
+        val enabled = getSharedPreferences("bridge_settings", MODE_PRIVATE)
+            .getBoolean("clipboard_sync_enabled", false)
+        if (!enabled) {
+            BridgeRuntimeState.clipboardStatus.value = "Enable clipboard sharing first."
+            return
+        }
+        val bytes = text.toByteArray(Charsets.UTF_8)
+        if (bytes.isEmpty() || bytes.size > 16 * 1024) {
+            BridgeRuntimeState.clipboardStatus.value = "Text must be between 1 byte and 16 KiB."
+            return
+        }
+        val handles = BridgeRuntimeState.connectedSessionHandles.values.toSet()
+        var sent = 0
+        handles.forEach { handle ->
+            try {
+                transferReceiver?.sendClipboard(handle, text)
+                sent += 1
+            } catch (_: Exception) { }
+        }
+        BridgeRuntimeState.clipboardStatus.value =
+            if (sent > 0) "Sent text to $sent connected device(s)." else "No connected trusted devices are available."
     }
 
     internal fun cancelTransfers() {
