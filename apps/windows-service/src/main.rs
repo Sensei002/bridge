@@ -358,6 +358,24 @@ fn handle_request(
                     remaining_ms,
                 ).into_bytes())
             }),
+        Request::Renew { lease_id, device_fingerprint } =>
+            verify_publisher::verify_client_publisher(&caller.image_path).and_then(|_| {
+                // Renewal is allowed only for the same live, publisher-verified process
+                // and the same Android peer that originally received the lease.
+                validate_lease_owner(caller, &device_fingerprint, pinned_clients, lease_fingerprints)?;
+                let lease = leases.renew_after_authentication(
+                    lease_id,
+                    caller.process_id,
+                    &device_fingerprint,
+                    bridge_display_service::MAX_SESSION_LEASE,
+                ).map_err(|message| io::Error::new(io::ErrorKind::PermissionDenied, message))?;
+                let remaining_ms = lease.remaining(Instant::now()).as_millis();
+                Ok(format!(
+                    "BRIDGE_DISPLAY/1 OK lease_renewed id={} expires_in_ms={}\\n",
+                    lease.id,
+                    remaining_ms,
+                ).into_bytes())
+            }),
         // Every driver mutation requires a currently active, exact lease identity.
         Request::Connect { lease_id, device_fingerprint } =>
             verify_publisher::verify_client_publisher(&caller.image_path).and_then(|_| {

@@ -16,6 +16,7 @@ pub enum Request {
     ChallengeResponse(String),
     AttestationChallenge { session_id: uuid::Uuid, device_fingerprint: String, pinned_public_key: String },
     AttestationResponse { nonce: String, session_id: uuid::Uuid, device_fingerprint: String, signature: String },
+    Renew { lease_id: uuid::Uuid, device_fingerprint: String },
     Connect { lease_id: uuid::Uuid, device_fingerprint: String },
     Disconnect { lease_id: uuid::Uuid, device_fingerprint: String },
 }
@@ -86,6 +87,10 @@ impl Request {
                 }
                 Ok(Self::AttestationResponse { nonce, session_id, device_fingerprint, signature })
             }
+            value if value.starts_with("BRIDGE_DISPLAY/1 RENEW ") => {
+                parse_lease_command(value, "BRIDGE_DISPLAY/1 RENEW ")
+                    .map(|(lease_id, device_fingerprint)| Self::Renew { lease_id, device_fingerprint })
+            }
             value if value.starts_with("BRIDGE_DISPLAY/1 CONNECT ") => {
                 parse_lease_command(value, "BRIDGE_DISPLAY/1 CONNECT ")
                     .map(|(lease_id, device_fingerprint)| Self::Connect { lease_id, device_fingerprint })
@@ -153,6 +158,12 @@ mod tests {
         assert!(matches!(Request::parse(response.as_bytes()), Ok(Request::AttestationResponse { .. })));
         assert!(Request::parse(b"BRIDGE_DISPLAY/1 ATTESTATION_RESPONSE nonce=bad").is_err());
         let lease_id = uuid::Uuid::new_v4();
+        let renew_command = format!("BRIDGE_DISPLAY/1 RENEW lease={lease_id} fingerprint={fingerprint}");
+        assert_eq!(
+            Request::parse(renew_command.as_bytes()),
+            Ok(Request::Renew { lease_id, device_fingerprint: fingerprint.clone() })
+        );
+        assert!(Request::parse(b"BRIDGE_DISPLAY/1 RENEW").is_err());
         let lease_command = format!("BRIDGE_DISPLAY/1 CONNECT lease={lease_id} fingerprint={fingerprint}");
         assert_eq!(
             Request::parse(lease_command.as_bytes()),
