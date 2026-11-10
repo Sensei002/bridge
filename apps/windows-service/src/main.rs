@@ -270,6 +270,41 @@ fn handle_request(bytes: &[u8], caller: &pipe_client::PipeClientIdentity, challe
                 pinned_clients.remove(&caller.process_id);
                 Ok(b"BRIDGE_DISPLAY/1 OK challenge_verified\n".to_vec())
             }),
+        Request::AttestationChallenge { session_id, device_fingerprint, pinned_public_key } =>
+            verify_publisher::verify_client_publisher(&caller.image_path).and_then(|_| {
+                let public_key = decode_hex_array::<32>(&pinned_public_key)?;
+                let nonce = challenges.issue_attestation_after_client_verification(
+                    caller.process_id,
+                    session_id,
+                    &device_fingerprint,
+                    &public_key,
+                ).map_err(|message| io::Error::new(io::ErrorKind::PermissionDenied, message))?;
+                pinned_clients.insert(caller.process_id, caller.clone());
+                Ok(format!("BRIDGE_DISPLAY/1 CHALLENGE nonce={nonce}\\n").into_bytes())
+            }),
+        Request::AttestationResponse { nonce, session_id, device_fingerprint, signature } =>
+            verify_publisher::verify_client_publisher(&caller.image_path).and_then(|_| {
+                let pinned = pinned_clients.remove(&caller.process_id).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::PermissionDenied, "no attestation challenge is pending for this process")
+                })?;
+                pinned.ensure_alive()?;
+                caller.ensure_alive()?;
+                let same_image = pinned.image_path.to_string_lossy()
+                    .eq_ignore_ascii_case(&caller.image_path.to_string_lossy());
+                if !same_image {
+                    challenges.revoke_process(caller.process_id);
+                    return Err(io::Error::new(io::ErrorKind::PermissionDenied, "challenge process image changed"));
+                }
+                let signature = decode_hex_array::<64>(&signature)?;
+                challenges.consume_signed_attestation_for_process(
+                    caller.process_id,
+                    &nonce,
+                    session_id,
+                    &device_fingerprint,
+                    &signature,
+                ).map_err(|message| io::Error::new(io::ErrorKind::PermissionDenied, message))?;
+                Ok(b"BRIDGE_DISPLAY/1 OK attestation_verified\\n".to_vec())
+            }),
         // Fail closed until the service can verify the caller process and bind
         // this request to a live, authenticated Android Second Screen session.
         // Merely reaching the interactive-user named pipe is not authorization.
@@ -289,3 +324,16 @@ fn handle_request(bytes: &[u8], caller: &pipe_client::PipeClientIdentity, challe
     result.unwrap_or_else(|error| format!("BRIDGE_DISPLAY/1 ERROR {error}\n").into_bytes())
 }
 
+
+/// Decode fixed-size hexadecimal IPC fields without accepting alternate encodings.
+fn decode_hex_array<const N: usize>(value: &str) -> io::Result<[u8; N]> {
+    if value.len() != N * 2 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid hexadecimal attestation field"));
+    }
+    let mut output = [0_u8; N];
+    for (index, byte) in output.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid hexadecimal attestation field"))?;
+    }
+    Ok(output)
+}
