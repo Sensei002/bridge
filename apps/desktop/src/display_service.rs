@@ -67,7 +67,7 @@ fn service_response_error(response: &str) -> String {
 fn request(command: &str) -> Result<String, String> {
     if command.is_empty() || command.len() > 96
         || !command.is_ascii()
-        || command.contains(['\\r', '\\n'])
+        || command.contains(['\r', '\n'])
     {
         return Err("invalid display-service command".into());
     }
