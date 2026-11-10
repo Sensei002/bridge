@@ -295,7 +295,6 @@ fn handle_request(bytes: &[u8], caller: &pipe_client::PipeClientIdentity, challe
                     challenges.revoke_process(caller.process_id);
                     return Err(io::Error::new(io::ErrorKind::PermissionDenied, "challenge process image changed"));
                 }
-                let signature = decode_hex_array::<64>(&signature)?;
                 challenges.consume_signed_attestation_for_process(
                     caller.process_id,
                     &nonce,
