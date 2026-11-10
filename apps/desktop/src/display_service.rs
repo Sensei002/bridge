@@ -33,10 +33,13 @@ impl Drop for OwnedPipe {
 
 /// Ask the service for a fresh process-pinned challenge.
 pub fn issue_challenge() -> Result<String, String> {
-    let response = request("CHALLENGE")?;
+    parse_challenge(&request("CHALLENGE")?)
+}
+
+fn parse_challenge(response: &str) -> Result<String, String> {
     let prefix = "BRIDGE_DISPLAY/1 CHALLENGE nonce=";
     let nonce = response.strip_prefix(prefix)
-        .ok_or_else(|| service_response_error(&response))?
+        .ok_or_else(|| service_response_error(response))?
         .trim();
     if nonce.len() != 64 || !nonce.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err("display service returned a malformed challenge".into());
@@ -125,10 +128,9 @@ mod tests {
     fn parses_only_well_formed_challenge_responses() {
         let nonce = "aB".repeat(32);
         let response = format!("BRIDGE_DISPLAY/1 CHALLENGE nonce={nonce}");
-        assert_eq!(
-            response.strip_prefix("BRIDGE_DISPLAY/1 CHALLENGE nonce=").unwrap().trim().to_ascii_lowercase(),
-            nonce.to_ascii_lowercase()
-        );
+        assert_eq!(parse_challenge(&response).unwrap(), nonce.to_ascii_lowercase());
+        assert!(parse_challenge("BRIDGE_DISPLAY/1 CHALLENGE nonce=invalid").is_err());
+        assert!(parse_challenge("BRIDGE_DISPLAY/1 ERROR signer pin missing").unwrap_err().contains("signer pin missing"));
         assert!(service_response_error("BRIDGE_DISPLAY/1 ERROR signer pin missing").contains("signer pin missing"));
         assert!(service_response_error("unexpected").contains("unexpected"));
     }
