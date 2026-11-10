@@ -3,6 +3,8 @@
 //! The pipe is local-only. The service validates every command and keeps privileged
 //! driver access out of the normal desktop process.
 
+pub mod challenge;
+
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const MAX_REQUEST_BYTES: usize = 256;
 
