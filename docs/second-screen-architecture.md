@@ -30,6 +30,12 @@ Introduce separate components:
 
 Driver installation and device configuration require elevation. Normal use of the desktop UI should not require running the whole app as administrator. Package the driver and service with the Windows installer only after installation, upgrade, rollback, and uninstall behaviour are defined.
 
+### Display service control boundary (development slice)
+
+The first Rust service implementation lives in `apps/windows-service` as a separate Windows service executable. It exposes a versioned local named-pipe protocol (`\\.\pipe\BridgeDisplayService`) and uses the Bridge device-interface GUID to send the driver's QUERY, CONNECT, and DISCONNECT IOCTLs. The protocol parser is portable and unit-tested; a dedicated Windows GitHub Actions workflow builds the x64 service executable.
+
+The current pipe DACL grants LocalSystem and Administrators full access and interactive users read/write access. This is an integration scaffold, **not yet a production trust boundary**: it does not yet verify the connecting process identity or prove that a trusted Android Second Screen session is active. The desktop UI must not send CONNECT until authenticated-session binding and caller validation are implemented. The service installer must explicitly choose a driver-authorized identity (initially LocalSystem), while the desktop UI remains unprivileged.
+
 ## Media pipeline
 
 Target a low-latency hardware-assisted pipeline:
