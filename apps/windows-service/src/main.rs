@@ -286,7 +286,9 @@ fn handle_request(
         Request::Challenge => verify_publisher::verify_client_publisher(&caller.image_path)
             .and_then(|_| {
                 // The legacy unsigned challenge path must never retain an attested lease.
-                leases.revoke_process(caller.process_id);
+                if leases.revoke_process(caller.process_id) {
+                    disconnect_driver_if_connected("legacy challenge superseded display lease");
+                }
                 lease_fingerprints.remove(&caller.process_id);
                 let nonce = challenges.issue_after_client_verification(caller.process_id)
                     .map_err(|message| io::Error::new(io::ErrorKind::PermissionDenied, message))?;
