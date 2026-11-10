@@ -5,7 +5,7 @@
 //! environment variable. The value is the signer's SHA-256 certificate hash
 //! (64 hexadecimal characters). No driver certificate is implicitly trusted.
 
-use std::{ffi::OsStr, io, os::windows::ffi::OsStrExt, path::Path};
+use std::{io, os::windows::ffi::OsStrExt, path::Path};
 use windows_sys::Win32::{
     Foundation::{CloseHandle, HANDLE},
     Security::{
@@ -14,8 +14,7 @@ use windows_sys::Win32::{
         },
         WinTrust::{
             WinVerifyTrust, WTHelperGetProvCertFromChain, WTHelperGetProvSignerFromChain,
-            WTHelperProvDataFromStateData, CRYPT_PROVIDER_CERT, CRYPT_PROVIDER_DATA,
-            CRYPT_PROVIDER_SGNR, WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA,
+            WTHelperProvDataFromStateData, CRYPT_PROVIDER_CERT, CRYPT_PROVIDER_SGNR, WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA,
             WINTRUST_DATA_0, WINTRUST_FILE_INFO, WTD_CHOICE_FILE, WTD_REVOKE_WHOLECHAIN,
             WTD_REVOCATION_CHECK_CHAIN, WTD_STATEACTION_CLOSE, WTD_STATEACTION_VERIFY,
             WTD_UI_NONE,
@@ -50,7 +49,7 @@ pub fn verify_client_publisher(image_path: &Path) -> io::Result<()> {
     })?;
     let expected = normalize_sha256(&expected)?;
 
-    let path: Vec<u16> = OsStr::new(image_path)
+    let path: Vec<u16> = image_path.as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
@@ -111,7 +110,7 @@ pub fn verify_client_publisher(image_path: &Path) -> io::Result<()> {
     // Always release WinTrust provider state after a verification attempt.
     data.dwStateAction = WTD_STATEACTION_CLOSE;
     unsafe {
-        WinVerifyTrust(std::ptr::null_mut::<HWND>(), &mut action, &mut data as *mut _ as *mut _);
+        WinVerifyTrust(std::ptr::null_mut(), &mut action, &mut data as *mut _ as *mut _);
     }
 
     let actual = signer_hash?;
