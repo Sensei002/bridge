@@ -82,7 +82,7 @@ fn with_driver<T>(operation: impl FnOnce(HANDLE) -> io::Result<T>) -> io::Result
             null(),
             OPEN_EXISTING,
             FILE_ATTRIBUTE_NORMAL,
-            0,
+            null_mut(),
         )
     };
     if handle == INVALID_HANDLE_VALUE {
