@@ -1,11 +1,11 @@
 use std::{ffi::OsString, io, os::windows::ffi::OsStringExt, path::PathBuf};
 use windows_sys::Win32::{
-    Foundation::{CloseHandle, HANDLE, WAIT_TIMEOUT},
+    Foundation::{CloseHandle, HANDLE, SYNCHRONIZE, WAIT_TIMEOUT},
     System::{
         Pipes::GetNamedPipeClientProcessId,
         Threading::{
             OpenProcess, QueryFullProcessImageNameW, WaitForSingleObject,
-            PROCESS_QUERY_LIMITED_INFORMATION, SYNCHRONIZE,
+            PROCESS_QUERY_LIMITED_INFORMATION,
         },
     },
 };
