@@ -181,25 +181,25 @@ fn run_pipe_server(shutdown: &mpsc::Receiver<()>) -> io::Result<()> {
                     let response = match pipe_client::identify(pipe) {
                         Ok(caller) => {
                             if let Err(error) = caller.ensure_alive() {
-                                format!("BRIDGE_DISPLAY/1 ERROR client process is no longer valid: {error}\\n").into_bytes()
+                                format!("BRIDGE_DISPLAY/1 ERROR client process is no longer valid: {error}\n").into_bytes()
                             } else {
                                 eprintln!("Bridge Display Service request from PID {} ({})", caller.process_id, caller.image_path.display());
                                 let response = handle_request(&request[..read as usize], &caller, &mut challenges, &mut pinned_clients);
                                 if caller.ensure_alive().is_ok() {
                                     response
                                 } else {
-                                    b"BRIDGE_DISPLAY/1 ERROR client process exited during request\\n".to_vec()
+                                    b"BRIDGE_DISPLAY/1 ERROR client process exited during request\n".to_vec()
                                 }
                             }
                         }
-                        Err(error) => format!("BRIDGE_DISPLAY/1 ERROR caller identity unavailable: {error}\\n").into_bytes(),
+                        Err(error) => format!("BRIDGE_DISPLAY/1 ERROR caller identity unavailable: {error}\n").into_bytes(),
                     };
                     break (read, response);
                 }
                 match unsafe { GetLastError() } {
                     ERROR_NO_DATA if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
-                    ERROR_BROKEN_PIPE => break (0, b"BRIDGE_DISPLAY/1 ERROR client disconnected\\n".to_vec()),
-                    _ => break (0, b"BRIDGE_DISPLAY/1 ERROR read failed\\n".to_vec()),
+                    ERROR_BROKEN_PIPE => break (0, b"BRIDGE_DISPLAY/1 ERROR client disconnected\n".to_vec()),
+                    _ => break (0, b"BRIDGE_DISPLAY/1 ERROR read failed\n".to_vec()),
                 }
             };
             let mut written = 0_u32;
@@ -239,7 +239,7 @@ fn handle_request(bytes: &[u8], caller: &pipe_client::PipeClientIdentity, challe
                 let nonce = challenges.issue_after_client_verification(caller.process_id)
                     .map_err(|message| io::Error::new(io::ErrorKind::PermissionDenied, message))?;
                 pinned_clients.insert(caller.process_id, caller.clone());
-                Ok(format!("BRIDGE_DISPLAY/1 CHALLENGE nonce={nonce}\\n").into_bytes())
+                Ok(format!("BRIDGE_DISPLAY/1 CHALLENGE nonce={nonce}\n").into_bytes())
             }),
         Request::ChallengeResponse(nonce) => verify_publisher::verify_client_publisher(&caller.image_path)
             .and_then(|_| {
@@ -256,7 +256,7 @@ fn handle_request(bytes: &[u8], caller: &pipe_client::PipeClientIdentity, challe
                 challenges.consume_for_process(caller.process_id, &nonce)
                     .map_err(|message| io::Error::new(io::ErrorKind::PermissionDenied, message))?;
                 pinned_clients.remove(&caller.process_id);
-                Ok(b"BRIDGE_DISPLAY/1 OK challenge_verified\\n".to_vec())
+                Ok(b"BRIDGE_DISPLAY/1 OK challenge_verified\n".to_vec())
             }),
         // Fail closed until the service can verify the caller process and bind
         // this request to a live, authenticated Android Second Screen session.
