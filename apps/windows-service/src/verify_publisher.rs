@@ -188,7 +188,7 @@ mod tests {
     #[test]
     fn accepts_only_well_formed_sha256_pins() {
         assert_eq!(normalize_sha256(&"ab".repeat(32)).unwrap(), "AB".repeat(32));
-        assert_eq!(normalize_sha256(&"AB:".to_owned() + &"CD:".repeat(31) + "EF").unwrap(), "ABCD".repeat(15) + "CDEF");
+        assert_eq!(normalize_sha256(&("AB:".to_owned() + &"CD:".repeat(30) + "CD")).unwrap(), "AB".to_owned() + "CD".repeat(31));
         assert!(normalize_sha256("").is_err());
         assert!(normalize_sha256(&"a".repeat(40)).is_err());
         assert!(normalize_sha256(&"g".repeat(64)).is_err());
