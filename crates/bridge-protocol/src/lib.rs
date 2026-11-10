@@ -126,6 +126,15 @@ mod tests {
     }
 
     #[test]
+    fn descriptor_accepts_only_well_formed_attestation_public_keys() {
+        let mut descriptor = device();
+        descriptor.attestation_public_key = Some("ab".repeat(32));
+        assert!(descriptor.validate().is_ok());
+        descriptor.attestation_public_key = Some("not-a-key".into());
+        assert_eq!(descriptor.validate(), Err(ProtocolValidationError::InvalidAttestationPublicKey));
+    }
+
+    #[test]
     fn device_ids_are_unique() { assert_ne!(DeviceId::new(), DeviceId::new()); }
 
     #[test]
