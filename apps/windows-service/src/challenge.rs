@@ -208,7 +208,9 @@ mod tests {
         let issued = Instant::now();
         registry.issue_at(42, issued).unwrap();
         registry.issue_at(43, issued).unwrap();
-        assert_eq!(registry.revoke_expired_at(issued + CHALLENGE_TTL), vec![42, 43]);
+        let mut expired = registry.revoke_expired_at(issued + CHALLENGE_TTL);
+        expired.sort_unstable();
+        assert_eq!(expired, vec![42, 43]);
         assert!(registry.pending.is_empty());
     }
 
