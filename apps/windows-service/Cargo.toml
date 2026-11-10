@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "Privileged Windows service for Bridge virtual display lifecycle"
 
+[dependencies]
+uuid = { workspace = true }
+
 [features]
 default = []
 service-bin = []

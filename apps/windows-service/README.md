@@ -19,6 +19,8 @@ The client PID and image path are **attribution metadata, not authorization**. A
 
 The current interactive-user pipe ACL is intentionally a development boundary only. CONNECT and DISCONNECT remain fail-closed and are rejected; only PING and read-only QUERY are available. Do not enable monitor lifecycle operations until the service has a verified Bridge desktop-client identity and a live authenticated-session binding with expiry/revocation handling.
 
+The service library now contains a bounded single-device lease state machine: 15-second maximum TTL, peer-fingerprint binding, renewal, expiry, replacement, and explicit revocation. Unit tests cover these transitions. This state machine is not exposed over IPC and is not yet wired to a live Noise session; issuance must only happen after independent client and session authentication. CONNECT/DISCONNECT remain rejected.
+
 The SCM installer/account configuration, service recovery policy, production signing, and driver signing are not complete. The service must be installed under an identity authorized by the driver's INF security descriptor (currently LocalSystem or an administrator), while the desktop UI remains unprivileged. Do not install the unsigned driver/service on a daily-use machine.
 
 ## Local protocol
