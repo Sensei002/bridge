@@ -113,7 +113,7 @@ impl DesktopSession {
         let reader_alive = Arc::clone(&alive);
         let (sender, incoming) = mpsc::sync_channel(8);
         let (offer_sender, incoming_offers) = mpsc::channel();
-        let (clipboard_sender, clipboard_incoming) = mpsc::channel();
+        let (clipboard_sender, clipboard_incoming) = mpsc::sync_channel(4);
         let reader_connection_for_thread = Arc::clone(&reader_connection);
         thread::Builder::new()
             .name("bridge-desktop-session-reader".into())
@@ -152,7 +152,7 @@ impl DesktopSession {
                         let text = &plaintext[1..];
                         if text.len() <= MAX_CLIPBOARD_TEXT_BYTES {
                             if let Ok(text) = String::from_utf8(text.to_vec()) {
-                                let _ = clipboard_sender.send(text);
+                                let _ = clipboard_sender.try_send(text);
                             }
                         }
                         continue;
@@ -990,9 +990,9 @@ impl eframe::App for BridgeApp {
             // Remove sessions whose reader observed EOF or a transport failure.
             // Reconnected peers must never keep selecting an older dead session.
             self.active_sessions.retain(|session| session.is_alive());
-            if self.clipboard_sync {
-                for session in &self.active_sessions {
-                    while let Some(text) = session.try_receive_clipboard_text() {
+            for session in &self.active_sessions {
+                while let Some(text) = session.try_receive_clipboard_text() {
+                    if self.clipboard_sync {
                         self.clipboard_received = Some(text);
                         self.clipboard_status = "Received text from a trusted device.".into();
                     }
