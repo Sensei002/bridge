@@ -161,7 +161,19 @@ fn run_pipe_server(shutdown: &mpsc::Receiver<()>) -> io::Result<()> {
             }
             match unsafe { GetLastError() } {
                 ERROR_PIPE_CONNECTED => break true,
-                ERROR_PIPE_LISTENING => thread::sleep(Duration::from_millis(100)),
+                ERROR_PIPE_LISTENING => {
+                    thread::sleep(Duration::from_millis(100));
+                    for process_id in challenges.revoke_expired() {
+                        pinned_clients.remove(&process_id);
+                    }
+                    let exited = pinned_clients.iter()
+                        .filter_map(|(process_id, identity)| identity.ensure_alive().is_err().then_some(*process_id))
+                        .collect::<Vec<_>>();
+                    for process_id in exited {
+                        challenges.revoke_process(process_id);
+                        pinned_clients.remove(&process_id);
+                    }
+                },
                 error => {
                     unsafe { CloseHandle(pipe); }
                     return Err(io::Error::from_raw_os_error(error as i32));
