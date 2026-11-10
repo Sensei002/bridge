@@ -493,10 +493,12 @@ mod tests {
         let a_descriptor = DeviceDescriptor {
             id: DeviceId::new(), display_name: "Windows PC".into(),
             platform: Platform::Windows, protocol_version: PROTOCOL_VERSION,
+            attestation_public_key: None,
         };
         let b_descriptor = DeviceDescriptor {
             id: DeviceId::new(), display_name: "Android phone".into(),
             platform: Platform::Android, protocol_version: PROTOCOL_VERSION,
+            attestation_public_key: None,
         };
         let a_for_server = a_descriptor.clone();
         let b_for_server = b_descriptor.clone();

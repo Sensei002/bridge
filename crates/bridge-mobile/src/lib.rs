@@ -11,6 +11,7 @@ use std::{
 
 use bridge_network::{accept_noise_xx, connect_noise_xx, NoiseConnection};
 use bridge_protocol::{DeviceDescriptor, DeviceId};
+use uuid::Uuid;
 use serde::{Deserialize, Serialize};
 
 const MAX_ACTIVE_SESSIONS: usize = 32;
@@ -226,6 +227,87 @@ fn to_json(result: Result<PairResult, String>) -> CString {
         .unwrap_or_else(|_| CString::new("{\"ok\":false,\"error\":\"invalid response\"}").unwrap())
 }
 
+fn derive_attestation_public_key(seed: &mut [u8]) -> Result<String, String> {
+    let result = bridge_security::peer_attestation::attestation_public_key(seed)
+        .map(hex::encode)
+        .map_err(|error| error.to_string());
+    seed.fill(0);
+    result
+}
+
+/// Derive the raw Ed25519 public key from a 32-byte attestation seed encoded as hex.
+///
+/// # Safety
+/// `seed_hex` must point to a valid NUL-terminated UTF-8 C string.
+/// The returned allocation must be released with `bridge_string_free`.
+#[no_mangle]
+pub unsafe extern "C" fn bridge_attestation_public_key(seed_hex: *const c_char) -> *mut c_char {
+    if seed_hex.is_null() {
+        return CString::new(serde_json::json!({"ok": false, "error": "null seed"}).to_string()).unwrap().into_raw();
+    }
+    let result = (|| -> Result<String, String> {
+        let mut seed = decode_hex(CStr::from_ptr(seed_hex).to_str().map_err(|error| error.to_string())?)?;
+        derive_attestation_public_key(&mut seed)
+    })();
+    let json = match result {
+        Ok(public_key) => serde_json::json!({"ok": true, "public_key": public_key}),
+        Err(error) => serde_json::json!({"ok": false, "error": error}),
+    };
+    CString::new(json.to_string()).unwrap().into_raw()
+}
+
+fn sign_attestation_seed(
+    seed: &mut [u8],
+    nonce_hex: &str,
+    session_id: &str,
+    device_fingerprint: &str,
+) -> Result<serde_json::Value, String> {
+    let proof = (|| {
+        let nonce = decode_hex(nonce_hex)?;
+        let session = Uuid::parse_str(session_id)
+            .map_err(|e| format!("invalid attestation session ID: {e}"))?;
+        bridge_security::peer_attestation::sign_android_peer_attestation(
+            seed, &nonce, session, device_fingerprint,
+        ).map_err(|e| e.to_string())
+    })();
+    // Clear the native copy on both success and failure.
+    seed.fill(0);
+    let proof = proof?;
+    Ok(serde_json::json!({
+        "ok": true,
+        "nonce": hex::encode(proof.nonce),
+        "session_id": proof.session_id,
+        "device_fingerprint": proof.device_fingerprint,
+        "signature": hex::encode(proof.signature),
+    }))
+}
+
+/// Sign a Windows display-service challenge with the persisted Android attestation identity.
+///
+/// # Safety
+/// Each pointer must be null or point to a valid NUL-terminated UTF-8 C string.
+/// The returned allocation must be released with `bridge_string_free`.
+#[no_mangle]
+pub unsafe extern "C" fn bridge_attestation_sign(
+    seed_hex: *const c_char,
+    nonce_hex: *const c_char,
+    session_id: *const c_char,
+    device_fingerprint: *const c_char,
+) -> *mut c_char {
+    if seed_hex.is_null() || nonce_hex.is_null() || session_id.is_null() || device_fingerprint.is_null() {
+        return CString::new(serde_json::json!({"ok": false, "error": "null attestation argument"}).to_string()).unwrap().into_raw();
+    }
+    let result = (|| -> Result<serde_json::Value, String> {
+        let nonce = CStr::from_ptr(nonce_hex).to_str().map_err(|e| e.to_string())?;
+        let session = CStr::from_ptr(session_id).to_str().map_err(|e| e.to_string())?;
+        let fingerprint = CStr::from_ptr(device_fingerprint).to_str().map_err(|e| e.to_string())?;
+        let mut seed = decode_hex(CStr::from_ptr(seed_hex).to_str().map_err(|e| e.to_string())?)?;
+        sign_attestation_seed(&mut seed, nonce, session, fingerprint)
+    })();
+    let json = result.unwrap_or_else(|error| serde_json::json!({"ok": false, "error": error}));
+    CString::new(json.to_string()).unwrap().into_raw()
+}
+
 /// Establish an authenticated Noise XX session to the requested peer.
 ///
 /// # Safety
@@ -388,6 +470,47 @@ mod android_jni {
     }
 
     #[no_mangle]
+    pub extern "system" fn Java_app_bridge_android_BridgeNative_attestationPublicKey(
+        mut env: JNIEnv, _class: JClass, seed_bytes: jni::objects::JByteArray
+    ) -> jstring {
+        let mut seed = match env.convert_byte_array(&seed_bytes) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                let response = serde_json::json!({"ok": false, "error": error.to_string()}).to_string();
+                return env.new_string(response).map(|value| value.into_raw()).unwrap_or(std::ptr::null_mut());
+            }
+        };
+        let response = match derive_attestation_public_key(&mut seed) {
+            Ok(public_key) => serde_json::json!({"ok": true, "public_key": public_key}),
+            Err(error) => serde_json::json!({"ok": false, "error": error}),
+        }.to_string();
+        env.new_string(response).map(|value| value.into_raw()).unwrap_or(std::ptr::null_mut())
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_app_bridge_android_BridgeNative_attestationSign(
+        mut env: JNIEnv, _class: JClass, seed_bytes: jni::objects::JByteArray,
+        nonce_hex: JString, session_id: JString, device_fingerprint: JString
+    ) -> jstring {
+        let mut seed = match env.convert_byte_array(&seed_bytes) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                let response = serde_json::json!({"ok": false, "error": error.to_string()}).to_string();
+                return env.new_string(response).map(|value| value.into_raw()).unwrap_or(std::ptr::null_mut());
+            }
+        };
+        let nonce: String = env.get_string(&nonce_hex).map(|v| v.into()).unwrap_or_default();
+        let session: String = env.get_string(&session_id).map(|v| v.into()).unwrap_or_default();
+        let fingerprint: String = env.get_string(&device_fingerprint).map(|v| v.into()).unwrap_or_default();
+        let result = sign_attestation_seed(&mut seed, &nonce, &session, &fingerprint);
+        let response = match result {
+            Ok(value) => value.to_string(),
+            Err(error) => serde_json::json!({"ok": false, "error": error}).to_string(),
+        };
+        env.new_string(response).map(|value| value.into_raw()).unwrap_or(std::ptr::null_mut())
+    }
+
+    #[no_mangle]
     pub extern "system" fn Java_app_bridge_android_BridgeNative_pairConnect(
         env: JNIEnv, _class: JClass, request: JString
     ) -> jstring { invoke(env, request, false) }
@@ -497,11 +620,11 @@ mod tests {
         let responder_key = generate_static_keypair().unwrap();
         let initiator_device = DeviceDescriptor {
             id: DeviceId::new(), display_name: "Bridge iPhone".into(),
-            platform: Platform::Ios, protocol_version: PROTOCOL_VERSION,
+            platform: Platform::Ios, protocol_version: PROTOCOL_VERSION, attestation_public_key: None,
         };
         let responder_device = DeviceDescriptor {
             id: DeviceId::new(), display_name: "Bridge Android".into(),
-            platform: Platform::Android, protocol_version: PROTOCOL_VERSION,
+            platform: Platform::Android, protocol_version: PROTOCOL_VERSION, attestation_public_key: None,
         };
         let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
         let responder_device_id = responder_device.id;
@@ -561,6 +684,38 @@ mod tests {
 
         bridge_session_close(initiator_handle);
         bridge_session_close(responder_handle);
+    }
+
+    #[test]
+    fn native_attestation_signing_returns_a_verifiable_proof() {
+        let seed = [7_u8; 32];
+        let nonce = [9_u8; 32];
+        let session_id = Uuid::new_v4();
+        let fingerprint = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let seed_hex = CString::new(hex::encode(seed)).unwrap();
+        let nonce_hex = CString::new(hex::encode(nonce)).unwrap();
+        let session = CString::new(session_id.to_string()).unwrap();
+        let fingerprint = CString::new(fingerprint).unwrap();
+        let output = unsafe {
+            bridge_attestation_sign(seed_hex.as_ptr(), nonce_hex.as_ptr(), session.as_ptr(), fingerprint.as_ptr())
+        };
+        let value = unsafe { take_json(output) };
+        assert_eq!(value["ok"], true);
+        let signature: [u8; 64] = hex::decode(value["signature"].as_str().unwrap())
+            .unwrap().try_into().unwrap();
+        let proof = bridge_security::peer_attestation::AndroidPeerAttestation {
+            nonce,
+            session_id,
+            device_fingerprint: value["device_fingerprint"].as_str().unwrap().to_owned(),
+            signature,
+        };
+        let public = bridge_security::peer_attestation::attestation_public_key(&seed).unwrap();
+        assert_eq!(
+            bridge_security::peer_attestation::verify_android_peer_attestation(
+                &public, &proof, &nonce, session_id, &proof.device_fingerprint,
+            ),
+            Ok(())
+        );
     }
 
 

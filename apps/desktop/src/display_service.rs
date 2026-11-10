@@ -45,19 +45,6 @@ fn parse_challenge(response: &str) -> Result<String, String> {
     Ok(nonce.to_ascii_lowercase())
 }
 
-/// Submit the Android-echoed challenge to the service on a new pipe connection.
-pub fn submit_challenge_response(nonce: &str) -> Result<(), String> {
-    if nonce.len() != 64 || !nonce.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err("display challenge response must be 64 hexadecimal characters".into());
-    }
-    let response = request(&format!("CHALLENGE_RESPONSE {}", nonce))?;
-    if response.trim() == "BRIDGE_DISPLAY/1 OK challenge_verified" {
-        Ok(())
-    } else {
-        Err(service_response_error(&response))
-    }
-}
-
 fn service_response_error(response: &str) -> String {
     response.trim()
         .strip_prefix("BRIDGE_DISPLAY/1 ERROR ")
