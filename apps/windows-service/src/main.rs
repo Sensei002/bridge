@@ -3,7 +3,7 @@
 use std::{
     ffi::OsString,
     io,
-    ptr::{null, null_mut},
+    ptr::null_mut,
     sync::mpsc,
     thread,
     time::{Duration, Instant},
@@ -19,19 +19,18 @@ use windows_service::{
 };
 use windows_sys::Win32::{
     Foundation::{
-        CloseHandle, GetLastError, ERROR_BROKEN_PIPE, ERROR_NO_DATA, ERROR_PIPE_CONNECTED,
+        CloseHandle, GetLastError, LocalFree, ERROR_BROKEN_PIPE, ERROR_NO_DATA, ERROR_PIPE_CONNECTED,
         ERROR_PIPE_LISTENING, HANDLE, INVALID_HANDLE_VALUE,
     },
     Security::{SECURITY_ATTRIBUTES},
     Security::Authorization::{
         ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
     },
-    Storage::FileSystem::{ReadFile, WriteFile},
+    Storage::FileSystem::{ReadFile, WriteFile, PIPE_ACCESS_DUPLEX},
     System::{
-        Memory::LocalFree,
         Pipes::{
-            ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_ACCESS_DUPLEX,
-            PIPE_NOWAIT, PIPE_READMODE_MESSAGE, PIPE_TYPE_MESSAGE,
+            ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_NOWAIT,
+            PIPE_READMODE_MESSAGE, PIPE_TYPE_MESSAGE,
         },
     },
 };
@@ -87,7 +86,7 @@ fn run_service() -> Result<(), Box<dyn std::error::Error>> {
         wait_hint: Duration::default(),
         process_id: None,
     });
-    result
+    Ok(result?)
 }
 
 fn wide(value: &str) -> Vec<u16> {
@@ -116,6 +115,7 @@ fn create_pipe() -> io::Result<HANDLE> {
         lpSecurityDescriptor: descriptor,
         bInheritHandle: 0,
     };
+    let name = wide(PIPE_NAME);
     let pipe = unsafe {
         CreateNamedPipeW(
             name.as_ptr(),
@@ -128,7 +128,7 @@ fn create_pipe() -> io::Result<HANDLE> {
             &mut security,
         )
     };
-    unsafe { LocalFree(descriptor as isize); }
+    unsafe { LocalFree(descriptor); }
 
     if pipe == INVALID_HANDLE_VALUE {
         Err(io::Error::last_os_error())
