@@ -365,6 +365,7 @@ fn handle_request(
                 leases.authorize_operation(lease_id, caller.process_id, &device_fingerprint)
                     .map_err(|message| io::Error::new(io::ErrorKind::PermissionDenied, message))?;
                 driver::set_connected(true)
+                    .map(|_| b"BRIDGE_DISPLAY/1 OK connected\\n".to_vec())
             }),
         Request::Disconnect { lease_id, device_fingerprint } =>
             verify_publisher::verify_client_publisher(&caller.image_path).and_then(|_| {
@@ -377,7 +378,7 @@ fn handle_request(
                 leases.revoke(lease_id);
                 lease_fingerprints.remove(&caller.process_id);
                 pinned_clients.remove(&caller.process_id);
-                Ok(b"BRIDGE_DISPLAY/1 OK disconnected\\n".to_vec())
+                Ok(b"BRIDGE_DISPLAY/1 OK disconnected\n".to_vec())
             }),
     };
     result.unwrap_or_else(|error| format!("BRIDGE_DISPLAY/1 ERROR {error}\n").into_bytes())
