@@ -1045,7 +1045,7 @@ impl eframe::App for BridgeApp {
                 self.display_challenge_session = challenge_fingerprint;
                 if let Some(session) = challenge_session {
                     let status_tx = self.network_tx.clone();
-                    let _ = thread::Builder::new()
+                    let spawn_result = thread::Builder::new()
                         .name("bridge-display-challenge-relay".into())
                         .spawn(move || {
                             let result = (|| -> Result<(), String> {
@@ -1060,6 +1060,9 @@ impl eframe::App for BridgeApp {
                             };
                             let _ = status_tx.send(message);
                         });
+                    if let Err(error) = spawn_result {
+                        self.network_status = format!("Could not start display-service relay: {error}");
+                    }
                 }
             }
             for session in &self.active_sessions {
