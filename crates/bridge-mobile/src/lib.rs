@@ -653,5 +653,37 @@ mod tests {
         bridge_session_close(responder_handle);
     }
 
+    #[test]
+    fn native_attestation_signing_returns_a_verifiable_proof() {
+        let seed = [7_u8; 32];
+        let nonce = [9_u8; 32];
+        let session_id = Uuid::new_v4();
+        let fingerprint = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let seed_hex = CString::new(hex::encode(seed)).unwrap();
+        let nonce_hex = CString::new(hex::encode(nonce)).unwrap();
+        let session = CString::new(session_id.to_string()).unwrap();
+        let fingerprint = CString::new(fingerprint).unwrap();
+        let output = unsafe {
+            bridge_attestation_sign(seed_hex.as_ptr(), nonce_hex.as_ptr(), session.as_ptr(), fingerprint.as_ptr())
+        };
+        let value = unsafe { take_json(output) };
+        assert_eq!(value["ok"], true);
+        let signature: [u8; 64] = hex::decode(value["signature"].as_str().unwrap())
+            .unwrap().try_into().unwrap();
+        let proof = bridge_security::peer_attestation::AndroidPeerAttestation {
+            nonce,
+            session_id,
+            device_fingerprint: value["device_fingerprint"].as_str().unwrap().to_owned(),
+            signature,
+        };
+        let public = bridge_security::peer_attestation::attestation_public_key(&seed).unwrap();
+        assert_eq!(
+            bridge_security::peer_attestation::verify_android_peer_attestation(
+                &public, &proof, &nonce, session_id, &proof.device_fingerprint,
+            ),
+            Ok(())
+        );
+    }
+
 
 }
