@@ -11,7 +11,7 @@ This is not desktop mirroring, a remote-control window, Miracast casting, or a v
 Use Microsoft's **Indirect Display Driver (IDD) model through IddCx**.
 
 - Build a dedicated Windows Indirect Display Driver using the Windows Driver Kit (WDK), C++, UMDF, and IddCx.
-- The driver creates the indirect display adapter, reports a monitor arrival when a trusted Android display session is activated, advertises only modes the end-to-end pipeline can sustain, and removes the monitor cleanly when disconnected.
+- The driver creates the indirect display adapter without an attached monitor. A restricted IddCx IOCTL control plane accepts connect, disconnect, and status operations from the privileged Bridge Display Service; the service will issue arrival only for a trusted Android display session and departure on disconnect.
 - Consume the IddCx swap-chain frames using Direct3D. Keep frame processing bounded and non-blocking; do not perform network waits or expensive encoding work on the swap-chain callback thread.
 - The driver is a **user-mode UMDF driver**, not a custom kernel-mode graphics driver. Microsoft explicitly documents that IDD uses UMDF and does not support kernel-mode components. It receives the desktop image as a DirectX surface suitable for processing/encoding.
 - Do not inject into DWM, hook games, scrape the desktop with GDI, or implement a display miniport from scratch.
@@ -53,8 +53,9 @@ The first physical test target is the currently paired Redmi Note 7 Pro. Start w
 - Add a WDK/Visual Studio C++ UMDF IddCx driver project under a dedicated Windows driver directory.
 - Add a GitHub Actions Windows runner job that builds the driver package and validates the INF/package outputs. Keep the existing Windows MSI, Android APK, Rust, and iOS CI jobs intact.
 - Start from the official Microsoft IddSampleDriver structure; record the exact WDK/SDK and IddCx versions.
-- Implement a development-only virtual monitor lifecycle: arrive, advertise safe modes, and depart. Do not claim streaming yet.
-- Acceptance: on a dedicated Windows test machine, Device Manager and Windows Display Settings show the Bridge virtual monitor, and connect/disconnect adds/removes it without destabilizing the physical display.
+- [x] Implement driver-side connect/disconnect/status IOCTLs and defer monitor arrival until explicitly requested by the service.
+- [ ] Implement the Bridge Display Service control client, service identity/ACL, and authenticated-session-to-monitor lifecycle binding.
+- [ ] Acceptance: on a dedicated Windows test machine, Device Manager and Windows Display Settings show the Bridge virtual monitor, and connect/disconnect adds/removes it without destabilizing the physical display.
 
 ### Phase B — real frame acquisition and local preview
 - Implement swap-chain lifecycle and Direct3D surface handling.
