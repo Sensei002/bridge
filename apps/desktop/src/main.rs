@@ -739,6 +739,7 @@ fn start_secure_listener(status: Sender<String>, pending: Sender<PendingApproval
             display_name: "Bridge Windows".into(),
             platform: Platform::Windows,
             protocol_version: PROTOCOL_VERSION,
+            attestation_public_key: None,
         };
         let listener = match TcpListener::bind(("0.0.0.0", NETWORK_PORT)) {
             Ok(listener) => listener,
