@@ -488,8 +488,10 @@ mod android_jni {
         let session: String = env.get_string(&session_id).map(|v| v.into()).unwrap_or_default();
         let fingerprint: String = env.get_string(&device_fingerprint).map(|v| v.into()).unwrap_or_default();
         let result = sign_attestation_seed(&mut seed, &nonce, &session, &fingerprint);
-        let response = result.unwrap_or_else(|error| serde_json::json!({"ok": false, "error": error}).to_string());
-        let response = if response.starts_with('{') { response } else { response };
+        let response = match result {
+            Ok(value) => value.to_string(),
+            Err(error) => serde_json::json!({"ok": false, "error": error}).to_string(),
+        };
         env.new_string(response).map(|value| value.into_raw()).unwrap_or(std::ptr::null_mut())
     }
 
