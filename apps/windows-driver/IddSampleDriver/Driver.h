@@ -14,6 +14,9 @@
 
 #include <memory>
 #include <vector>
+#include <mutex>
+
+#include "BridgeDisplayControl.h"
 
 #include "Trace.h"
 
@@ -84,11 +87,15 @@ namespace Microsoft
             virtual ~IndirectDeviceContext();
 
             void InitAdapter();
-            void FinishInit(UINT ConnectorIndex);
+            NTSTATUS ConnectMonitor(UINT ConnectorIndex);
+            NTSTATUS DisconnectMonitor();
+            void GetDisplayStatus(BRIDGE_DISPLAY_STATUS& Status);
 
         protected:
             WDFDEVICE m_WdfDevice;
             IDDCX_ADAPTER m_Adapter;
+            IDDCX_MONITOR m_Monitor;
+            std::mutex m_MonitorLock;
         };
 
         class IndirectMonitorContext
