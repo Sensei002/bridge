@@ -526,10 +526,16 @@ private fun Panel(content: @Composable ColumnScope.() -> Unit) {
 }
 
 @Composable
-private fun PrimaryAction(label: String, onClick: () -> Unit, modifier: Modifier = Modifier) {
+private fun PrimaryAction(
+    label: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true
+) {
     Button(
         onClick = onClick,
         modifier = modifier.height(46.dp),
+        enabled = enabled,
         shape = RoundedCornerShape(10.dp),
         colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Ink)
     ) {
@@ -815,7 +821,7 @@ private fun ClipboardScreen(
                     onSend(draft)
                     draft = ""
                 }
-            }, Modifier.fillMaxWidth().then(if (enabled) Modifier else Modifier))
+            }, Modifier.fillMaxWidth(), enabled = enabled)
         }
         Panel {
             Eyebrow("RECEIVED TEXT")
