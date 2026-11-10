@@ -36,6 +36,7 @@ internal data class BridgeIncomingOffer(
  */
 internal class BridgeTransferReceiver(
     context: Context,
+    private val localNoiseFingerprint: String,
     private val onOffer: (BridgeIncomingOffer) -> Unit,
     private val onClipboardText: (String, String) -> Unit,
     private val onStatus: (String) -> Unit,
@@ -49,7 +50,7 @@ internal class BridgeTransferReceiver(
     private val transferLocks = ConcurrentHashMap<Long, ReentrantLock>()
     private val cancellations = ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicBoolean>()
 
-    fun attach(deviceId: String, handle: Long) {
+    fun attach(deviceId: String, handle: Long, allowDisplayAttestation: Boolean = false) {
         if (readers.containsKey(handle)) return
         val queue = LinkedBlockingQueue<ByteArray>(8)
         queues[handle] = queue
@@ -87,20 +88,52 @@ internal class BridgeTransferReceiver(
                                 main.post { onOffer(offer) }
                             }
                             "display_challenge_request" -> {
-                                // Echo only a well-formed one-time challenge received
-                                // inside this already-authenticated Noise session.
+                                require(allowDisplayAttestation) {
+                                    "Display attestation is only available to an explicitly trusted Windows peer."
+                                }
                                 val requestId = control.getString("request_id")
+                                val sessionId = control.getString("session_id")
                                 val nonce = control.getString("nonce")
                                 require(requestId.matches(Regex("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}"))) {
                                     "Invalid display challenge request ID."
                                 }
+                                require(sessionId.matches(Regex("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}"))) {
+                                    "Invalid display attestation session ID."
+                                }
                                 require(nonce.matches(Regex("[0-9a-fA-F]{64}"))) {
                                     "Invalid display challenge nonce."
+                                }
+                                require(localNoiseFingerprint.matches(Regex("[0-9a-fA-F]{64}"))) {
+                                    "Local Noise identity fingerprint is invalid."
+                                }
+                                val seed = BridgeIdentityStore.loadOrCreateAttestationSeed(appContext)
+                                val proof = try {
+                                    JSONObject(BridgeNative.attestationSign(
+                                        seed.joinToString("") { "%02x".format(it.toInt() and 0xff) },
+                                        nonce,
+                                        sessionId,
+                                        localNoiseFingerprint
+                                    ))
+                                } finally {
+                                    seed.fill(0)
+                                }
+                                check(proof.optBoolean("ok")) {
+                                    proof.optString("error", "Could not sign Android display attestation.")
+                                }
+                                val signature = proof.getString("signature")
+                                check(signature.matches(Regex("[0-9a-fA-F]{128}"))) {
+                                    "Native attestation signer returned an invalid signature."
+                                }
+                                check(proof.getString("device_fingerprint").equals(localNoiseFingerprint, ignoreCase = true)) {
+                                    "Native attestation signer returned a mismatched device fingerprint."
                                 }
                                 sendControl(handle, JSONObject()
                                     .put("type", "display_challenge_response")
                                     .put("request_id", requestId)
-                                    .put("nonce", nonce))
+                                    .put("session_id", sessionId)
+                                    .put("nonce", nonce)
+                                    .put("device_fingerprint", proof.getString("device_fingerprint"))
+                                    .put("signature", signature))
                             }
                             else -> queue.put(packet)
                         }
