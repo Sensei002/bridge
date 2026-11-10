@@ -270,6 +270,14 @@ impl DesktopSession {
         self.alive.load(Ordering::Acquire)
     }
 
+    fn shutdown(&self) {
+        self.alive.store(false, Ordering::Release);
+        self.stop.store(true, Ordering::Release);
+        if let Ok(connection) = self.connection.lock() {
+            let _ = connection.stream.shutdown(std::net::Shutdown::Both);
+        }
+    }
+
     fn send(&self, payload: &[u8]) -> Result<(), String> {
         if !self.is_alive() {
             return Err("The connected device session has ended. Reconnect before transferring.".into());
@@ -370,10 +378,7 @@ impl DesktopSession {
 #[cfg(windows)]
 impl Drop for DesktopSession {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        if let Ok(connection) = self.connection.lock() {
-            let _ = connection.stream.shutdown(std::net::Shutdown::Both);
-        }
+        self.shutdown();
     }
 }
 
@@ -389,6 +394,115 @@ enum TransferUiEvent {
     Progress { sent: u64, total: u64, speed_bytes_per_sec: f64 },
     Complete(String),
     Failed(String),
+}
+
+#[cfg(windows)]
+enum DisplayLeaseEvent {
+    Status { session_key: String, message: String },
+}
+
+#[cfg(windows)]
+fn start_display_lease_lifecycle(
+    session: Arc<DesktopSession>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    events: Sender<DisplayLeaseEvent>,
+) -> Result<(), String> {
+    thread::Builder::new()
+        .name("bridge-display-lease-lifecycle".into())
+        .spawn(move || {
+            let session_key = format!("{}:{}", session.remote_fingerprint, session.session_id);
+            let peer = session.remote_fingerprint
+                .get(..8)
+                .unwrap_or(&session.remote_fingerprint)
+                .to_owned();
+            let result = (|| -> Result<display_service::ServiceLease, String> {
+                if stop.load(Ordering::Acquire) || !session.is_alive() {
+                    return Err("authenticated Android session ended before attestation".into());
+                }
+                let pinned_key = session.attestation_public_key.as_deref()
+                    .ok_or_else(|| "trusted Android pairing record has no pinned attestation key".to_string())?;
+                let nonce = display_service::issue_attestation_challenge(
+                    session.session_id,
+                    &session.remote_fingerprint,
+                    pinned_key,
+                )?;
+                if stop.load(Ordering::Acquire) || !session.is_alive() {
+                    return Err("authenticated Android session ended during attestation".into());
+                }
+                let proof = session.relay_service_challenge(&nonce, Duration::from_secs(8))?;
+                if stop.load(Ordering::Acquire) || !session.is_alive() {
+                    return Err("authenticated Android session ended before lease issuance".into());
+                }
+                display_service::submit_attestation_response(
+                    &proof.nonce,
+                    proof.session_id,
+                    &proof.device_fingerprint,
+                    &proof.signature,
+                )
+            })();
+
+            let mut lease = match result {
+                Ok(lease) => lease,
+                Err(error) => {
+                    let message = if stop.load(Ordering::Acquire) || !session.is_alive() {
+                        format!("Second screen lease stopped for Android device {peer}.")
+                    } else {
+                        format!("Second screen attestation failed for Android device {peer}: {error}")
+                    };
+                    let _ = events.send(DisplayLeaseEvent::Status {
+                        session_key: session_key.clone(),
+                        message,
+                    });
+                    return;
+                }
+            };
+
+            let _ = events.send(DisplayLeaseEvent::Status {
+                session_key: session_key.clone(),
+                message: format!("Display lease active for Android device {peer}; renewing every 5 seconds."),
+            });
+
+            loop {
+                // Poll cancellation in short intervals so replacing or disconnecting
+                // a peer never leaves a detached renewal worker sleeping for long.
+                for _ in 0..50 {
+                    if stop.load(Ordering::Acquire) || !session.is_alive() {
+                        let _ = events.send(DisplayLeaseEvent::Status {
+                            session_key: session_key.clone(),
+                            message: format!("Display lease renewal stopped for Android device {peer}; the short-lived lease will expire automatically."),
+                        });
+                        return;
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                }
+
+                match display_service::renew_with_lease(&lease, &session.remote_fingerprint) {
+                    Ok(renewed) if renewed.id == lease.id => {
+                        lease = renewed;
+                        let _ = events.send(DisplayLeaseEvent::Status {
+                            session_key: session_key.clone(),
+                            message: format!("Display lease active and renewed for Android device {peer}."),
+                        });
+                    }
+                    Ok(_) => {
+                        let _ = events.send(DisplayLeaseEvent::Status {
+                            session_key: session_key.clone(),
+                            message: format!("Display lease identity changed for Android device {peer}; renewal stopped."),
+                        });
+                        return;
+                    }
+                    Err(error) => {
+                        let _ = events.send(DisplayLeaseEvent::Status {
+                            session_key: session_key.clone(),
+                            message: format!("Display lease renewal failed for Android device {peer}: {error}. A fresh attestation is required."),
+                        });
+                        return;
+                    }
+                }
+            }
+        })
+        .map(|_| ())
+        .map_err(|error| format!("could not start display lease lifecycle worker: {error}"))
 }
 
 #[cfg(windows)]
@@ -601,6 +715,14 @@ struct BridgeApp {
     #[cfg(windows)]
     display_challenge_session: Option<String>,
     #[cfg(windows)]
+    display_lease_stop: Option<Arc<std::sync::atomic::AtomicBool>>,
+    #[cfg(windows)]
+    display_lease_status: String,
+    #[cfg(windows)]
+    display_lease_tx: Sender<DisplayLeaseEvent>,
+    #[cfg(windows)]
+    display_lease_rx: Receiver<DisplayLeaseEvent>,
+    #[cfg(windows)]
     pending_incoming_transfers: Vec<PendingIncomingTransfer>,
     #[cfg(windows)]
     selected_transfer_fingerprint: Option<String>,
@@ -648,6 +770,8 @@ impl Default for BridgeApp {
         let (pairing_tx, pairing_rx) = mpsc::channel();
         #[cfg(windows)]
         let (transfer_tx, transfer_rx) = mpsc::channel();
+        #[cfg(windows)]
+        let (display_lease_tx, display_lease_rx) = mpsc::channel();
         #[cfg(windows)]
         let (update_tx, update_rx) = mpsc::channel();
         #[cfg(windows)]
@@ -698,6 +822,14 @@ impl Default for BridgeApp {
             active_sessions: Vec::new(),
             #[cfg(windows)]
             display_challenge_session: None,
+            #[cfg(windows)]
+            display_lease_stop: None,
+            #[cfg(windows)]
+            display_lease_status: "Waiting for a trusted Android device.".into(),
+            #[cfg(windows)]
+            display_lease_tx,
+            #[cfg(windows)]
+            display_lease_rx,
             #[cfg(windows)]
             pending_incoming_transfers: Vec::new(),
             #[cfg(windows)]
@@ -1117,40 +1249,43 @@ impl eframe::App for BridgeApp {
             // Remove sessions whose reader observed EOF or a transport failure.
             // Reconnected peers must never keep selecting an older dead session.
             self.active_sessions.retain(|session| session.is_alive());
-            let challenge_session = self.active_sessions.first().cloned();
-            let challenge_fingerprint = challenge_session.as_ref().map(|session| session.remote_fingerprint.clone());
+            // Only Android peers with a pairing-pinned attestation key can
+            // receive a Second Screen authorization lease.
+            let challenge_session = self.active_sessions.iter()
+                .find(|session| session.attestation_public_key.is_some())
+                .cloned();
+            let challenge_fingerprint = challenge_session.as_ref().map(|session| {
+                format!("{}:{}", session.remote_fingerprint, session.session_id)
+            });
             if self.display_challenge_session != challenge_fingerprint {
+                if let Some(stop) = self.display_lease_stop.take() {
+                    stop.store(true, Ordering::Release);
+                }
                 self.display_challenge_session = challenge_fingerprint;
                 if let Some(session) = challenge_session {
-                    let status_tx = self.network_tx.clone();
-                    let spawn_result = thread::Builder::new()
-                        .name("bridge-display-challenge-relay".into())
-                        .spawn(move || {
-                            let result = (|| -> Result<(), String> {
-                                let pinned_key = session.attestation_public_key.as_deref()
-                                    .ok_or_else(|| "trusted Android pairing record has no pinned attestation key".to_string())?;
-                                let nonce = display_service::issue_attestation_challenge(
-                                    session.session_id,
-                                    &session.remote_fingerprint,
-                                    pinned_key,
-                                )?;
-                                let proof = session.relay_service_challenge(&nonce, Duration::from_secs(8))?;
-                                display_service::submit_attestation_response(
-                                    &proof.nonce,
-                                    proof.session_id,
-                                    &proof.device_fingerprint,
-                                    &proof.signature,
-                                )?;
-                                Ok(())
-                            })();
-                            let message = match result {
-                                Ok(()) => "Android peer independently verified; Windows service issued a 15-second process- and device-bound display lease.".to_owned(),
-                                Err(error) => format!("Display-service session verification is not ready: {error}"),
-                            };
-                            let _ = status_tx.send(message);
-                        });
-                    if let Err(error) = spawn_result {
-                        self.network_status = format!("Could not start display-service relay: {error}");
+                    self.display_lease_status = format!(
+                        "Verifying Android device {} and requesting a display lease…",
+                        session.remote_fingerprint.get(..8).unwrap_or(&session.remote_fingerprint)
+                    );
+                    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    self.display_lease_stop = Some(Arc::clone(&stop));
+                    if let Err(error) = start_display_lease_lifecycle(
+                        session,
+                        stop,
+                        self.display_lease_tx.clone(),
+                    ) {
+                        self.display_lease_status = error;
+                    }
+                } else {
+                    self.display_lease_status = "No authenticated Android session; display lease is inactive.".into();
+                }
+            }
+            for event in self.display_lease_rx.try_iter() {
+                match event {
+                    DisplayLeaseEvent::Status { session_key, message } => {
+                        if self.display_challenge_session.as_deref() == Some(session_key.as_str()) {
+                            self.display_lease_status = message;
+                        }
                     }
                 }
             }
@@ -1245,6 +1380,11 @@ impl eframe::App for BridgeApp {
                     self.network_status = format!("Secure session established with {}.", pairing.descriptor.display_name);
                     match DesktopSession::start(pairing.connection, pairing.descriptor.attestation_public_key.clone()) {
                         Ok(session) => {
+                            for existing in &self.active_sessions {
+                                if existing.remote_fingerprint.eq_ignore_ascii_case(&session.remote_fingerprint) {
+                                    existing.shutdown();
+                                }
+                            }
                             self.active_sessions.retain(|existing| existing.remote_fingerprint != session.remote_fingerprint);
                             self.active_sessions.push(session);
                         }
@@ -1539,6 +1679,11 @@ impl eframe::App for BridgeApp {
                             if let Some(id) = revoke_device {
                                 match self.trust_store.revoke_and_save(&id, trust_store_path()) {
                                     Ok(device) => {
+                                        for session in &self.active_sessions {
+                                            if session.remote_fingerprint.eq_ignore_ascii_case(&device.public_key_fingerprint) {
+                                                session.shutdown();
+                                            }
+                                        }
                                         self.active_sessions.retain(|session| session.remote_fingerprint != device.public_key_fingerprint);
                                         self.network_status = format!("Trust revoked for {}. Its active session was closed.", device.descriptor.display_name);
                                     }
@@ -1760,8 +1905,18 @@ impl eframe::App for BridgeApp {
                             ("◖", "PC audio on phone", "Listen to your computer from another device.", "PLANNED"),
                             ("⌖", "Remote input", "Use a trusted phone or tablet as a controller.", "PLANNED"),
                             ("▤", "Phone notifications", "See selected mobile notifications on desktop.", "PLANNED"),
-                            ("▦", "Second screen", "Explore a tablet as an extended workspace.", "PLANNED"),
+                            ("▦", "Second screen", "Secure Android attestation and renewable display lease lifecycle.", "LEASE-GATED"),
                         ];
+                        #[cfg(windows)]
+                        {
+                            panel(ui, |ui| {
+                                eyebrow(ui, "SECOND SCREEN · AUTHORIZATION");
+                                ui.label(egui::RichText::new("Display-service lease").strong().size(16.0).color(TEXT));
+                                muted(ui, &self.display_lease_status);
+                                muted(ui, "The lease is bound to this Windows process and the authenticated Android device. Renewal stops when the session ends; an abandoned lease expires automatically.");
+                            });
+                            ui.add_space(12.0);
+                        }
                         for row in tools.chunks(2) {
                             ui.columns(2, |cols| {
                                 for (index, item) in row.iter().enumerate() {
@@ -1906,7 +2061,14 @@ impl eframe::App for BridgeApp {
                         } else {
                             match DesktopSession::start(pending.connection, pending.descriptor.attestation_public_key.clone()) {
                                 Ok(session) => {
-                                    self.active_sessions.retain(|existing| existing.remote_fingerprint != session.remote_fingerprint);
+                                    for existing in &self.active_sessions {
+                                        if existing.remote_fingerprint.eq_ignore_ascii_case(&session.remote_fingerprint) {
+                                            existing.shutdown();
+                                        }
+                                    }
+                                    self.active_sessions.retain(|existing| {
+                                        existing.remote_fingerprint != session.remote_fingerprint
+                                    });
                                     self.active_sessions.push(session);
                                 }
                                 Err(error) => self.network_status = format!("Could not start secure session dispatcher: {error}"),
