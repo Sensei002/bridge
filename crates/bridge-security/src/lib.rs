@@ -1,5 +1,7 @@
 //! Noise XX secure sessions. Remote static keys must be verified and pinned
 //! by the pairing layer before a session is trusted.
+
+pub mod peer_attestation;
 use snow::{HandshakeState, TransportState};
 use thiserror::Error;
 
