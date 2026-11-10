@@ -811,7 +811,7 @@ private fun ClipboardScreen(
                 label = { Text("Text to share") }
             )
             PrimaryAction("Send to connected devices", {
-                if (draft.isNotBlank()) {
+                if (enabled && draft.isNotBlank()) {
                     onSend(draft)
                     draft = ""
                 }
