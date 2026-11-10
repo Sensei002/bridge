@@ -34,6 +34,52 @@ pub fn issue_challenge() -> Result<String, String> {
     parse_challenge(&request("CHALLENGE")?)
 }
 
+/// Ask the service to pin the live Noise session and pairing-trusted Android key.
+pub fn issue_attestation_challenge(
+    session_id: uuid::Uuid,
+    device_fingerprint: &str,
+    pinned_public_key: &str,
+) -> Result<String, String> {
+    if !is_hex(device_fingerprint, 64) || !is_hex(pinned_public_key, 64) {
+        return Err("invalid pairing-pinned Android identity for service challenge".into());
+    }
+    let command = format!(
+        "CHALLENGE_ATTESTATION session={session_id} fingerprint={} public_key={}",
+        device_fingerprint.to_ascii_lowercase(),
+        pinned_public_key.to_ascii_lowercase(),
+    );
+    parse_challenge(&request(&command)?)
+}
+
+/// Submit the signed proof; the service verifies it independently against its
+/// process-pinned challenge context and the public key supplied at issuance.
+pub fn submit_attestation_response(
+    nonce: &str,
+    session_id: uuid::Uuid,
+    device_fingerprint: &str,
+    signature: &str,
+) -> Result<(), String> {
+    if !is_hex(nonce, 64) || !is_hex(device_fingerprint, 64) || !is_hex(signature, 128) {
+        return Err("invalid Android attestation response encoding".into());
+    }
+    let command = format!(
+        "ATTESTATION_RESPONSE nonce={} session={session_id} fingerprint={} signature={}",
+        nonce.to_ascii_lowercase(),
+        device_fingerprint.to_ascii_lowercase(),
+        signature.to_ascii_lowercase(),
+    );
+    let response = request(&command)?;
+    if response.trim() == "BRIDGE_DISPLAY/1 OK attestation_verified" {
+        Ok(())
+    } else {
+        Err(service_response_error(&response))
+    }
+}
+
+fn is_hex(value: &str, expected_len: usize) -> bool {
+    value.len() == expected_len && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 fn parse_challenge(response: &str) -> Result<String, String> {
     let prefix = "BRIDGE_DISPLAY/1 CHALLENGE nonce=";
     let nonce = response.strip_prefix(prefix)
@@ -53,7 +99,7 @@ fn service_response_error(response: &str) -> String {
 }
 
 fn request(command: &str) -> Result<String, String> {
-    if command.is_empty() || command.len() > 96
+    if command.is_empty() || command.len() > 384
         || !command.is_ascii()
         || command.contains('\r') || command.contains('\n')
     {
