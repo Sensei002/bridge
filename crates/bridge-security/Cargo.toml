@@ -7,3 +7,4 @@ license.workspace = true
 [dependencies]
 snow = "0.9.6"
 thiserror.workspace = true
+ed25519-dalek = { version = "2", features = ["rand_core"] }
