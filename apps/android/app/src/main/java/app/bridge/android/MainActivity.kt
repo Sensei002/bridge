@@ -34,6 +34,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -75,6 +76,9 @@ class MainActivity : ComponentActivity() {
     private val connectedSessionHandles get() = BridgeRuntimeState.connectedSessionHandles
     private val incomingOffers get() = BridgeRuntimeState.incomingOffers
     private val receivedFiles get() = BridgeRuntimeState.receivedFiles
+    private val clipboardReceivedText get() = BridgeRuntimeState.clipboardReceivedText.value
+    private val clipboardReceivedFrom get() = BridgeRuntimeState.clipboardReceivedFrom.value
+    private val clipboardStatus get() = BridgeRuntimeState.clipboardStatus.value
     private val pairingStatus get() = BridgeRuntimeState.pairingStatus.value
     private val transferStatus get() = BridgeRuntimeState.transferStatus.value
 
@@ -127,6 +131,9 @@ class MainActivity : ComponentActivity() {
                 incomingOffers = incomingOffers,
                 transferStatus = transferStatus,
                 receivedFiles = receivedFiles,
+                clipboardReceivedText = clipboardReceivedText,
+                clipboardReceivedFrom = clipboardReceivedFrom,
+                clipboardStatus = clipboardStatus,
                 updateStatus = updateStatus,
                 onCheckUpdates = { channel ->
                     BridgeUpdater.checkAndInstall(this, channel) { message -> updateStatus = message }
@@ -134,6 +141,7 @@ class MainActivity : ComponentActivity() {
                 onExportFile = { file -> pendingExportFile = file; exportFileLauncher.launch(file.name) },
                 onPickFile = { handle -> pendingSendHandle = handle; sendFileLauncher.launch(arrayOf("*/*")) },
                 onCancelTransfer = { BridgeConnectionService.instance?.cancelTransfers() },
+                onSendClipboard = { text -> BridgeConnectionService.instance?.sendClipboard(text) },
                 onAcceptTransfer = { offer ->
                     BridgeConnectionService.instance?.acceptTransfer(offer)
                     incomingOffers.remove(offer)
@@ -244,6 +252,10 @@ private fun BridgeApp(
     incomingOffers: List<BridgeIncomingOffer>,
     transferStatus: String,
     receivedFiles: List<File>,
+    clipboardReceivedText: String?,
+    clipboardReceivedFrom: String,
+    clipboardStatus: String,
+    onSendClipboard: (String) -> Unit,
     onExportFile: (File) -> Unit,
     onPickFile: (Long) -> Unit,
     onCancelTransfer: () -> Unit,
@@ -263,7 +275,7 @@ private fun BridgeApp(
     }
     var selected by remember { mutableStateOf(BridgeTab.Home) }
     var showPairDialog by remember { mutableStateOf(false) }
-    var clipboardSync by remember { mutableStateOf(true) }
+    var clipboardSync by remember { mutableStateOf(updatePreferences.getBoolean("clipboard_sync_enabled", false)) }
     var notifications by remember { mutableStateOf(true) }
     var autoAccept by remember { mutableStateOf(false) }
     var networkStatus by remember { mutableStateOf("Secure local pairing is ready.") }
@@ -308,7 +320,15 @@ private fun BridgeApp(
                         )
                         BridgeTab.Clipboard -> ClipboardScreen(
                             enabled = clipboardSync,
-                            onEnabledChange = { clipboardSync = it }
+                            onEnabledChange = {
+                                clipboardSync = it
+                                updatePreferences.edit().putBoolean("clipboard_sync_enabled", it).apply()
+                                BridgeRuntimeState.clipboardStatus.value = if (it) "Clipboard sharing enabled." else "Clipboard sharing paused."
+                            },
+                            receivedText = clipboardReceivedText,
+                            receivedFrom = clipboardReceivedFrom,
+                            status = clipboardStatus,
+                            onSend = onSendClipboard
                         )
                         BridgeTab.Tools -> ToolsScreen()
                         BridgeTab.Settings -> SettingsScreen(
@@ -757,30 +777,61 @@ private fun TransfersScreen(
 }
 
 @Composable
-private fun ClipboardScreen(enabled: Boolean, onEnabledChange: (Boolean) -> Unit) {
+private fun ClipboardScreen(
+    enabled: Boolean,
+    onEnabledChange: (Boolean) -> Unit,
+    receivedText: String?,
+    receivedFrom: String,
+    status: String,
+    onSend: (String) -> Unit
+) {
+    val context = LocalContext.current
+    var draft by remember { mutableStateOf("") }
     ScreenContent {
-        ScreenHeading("SHARE WHAT YOU COPY", "Universal clipboard", "Copy on one device. Paste on another.")
+        ScreenHeading("SHARE TEXT PRIVATELY", "Universal clipboard", "Send text between your connected, trusted devices.")
         Panel {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
                 Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                    Text("Clipboard sync", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                    Text("Allow trusted devices to share text.", color = Muted, fontSize = 11.sp, lineHeight = 16.sp)
+                    Text("Clipboard sharing", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                    Text("Sharing is manual and only works with trusted connected devices.", color = Muted, fontSize = 11.sp, lineHeight = 16.sp)
                 }
                 Switch(checked = enabled, onCheckedChange = onEnabledChange)
             }
-            StatusTag(if (enabled) "PREFERENCE ENABLED · SERVICE NOT CONNECTED" else "CLIPBOARD SYNC PAUSED", if (enabled) Accent else Muted)
+            StatusTag(if (enabled) "SHARING ENABLED" else "SHARING PAUSED", if (enabled) Accent else Muted)
         }
         Panel {
-            Eyebrow("RECENT CLIPBOARD")
-            Box(modifier = Modifier.fillMaxWidth().padding(vertical = 18.dp), contentAlignment = Alignment.Center) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("▤", color = Accent, fontSize = 36.sp)
-                    Text("Nothing copied yet", color = Color.White, fontWeight = FontWeight.SemiBold)
-                    Text("Shared text will appear here when sync is connected.", color = Muted, fontSize = 11.sp)
+            Eyebrow("SEND TEXT")
+            OutlinedTextField(
+                value = draft,
+                onValueChange = { if (it.toByteArray(Charsets.UTF_8).size <= 16 * 1024) draft = it },
+                enabled = enabled,
+                modifier = Modifier.fillMaxWidth(),
+                minLines = 3,
+                maxLines = 5,
+                label = { Text("Text to share") }
+            )
+            PrimaryAction("Send to connected devices", {
+                if (draft.isNotBlank()) {
+                    onSend(draft)
+                    draft = ""
                 }
-            }
+            }, Modifier.fillMaxWidth().then(if (enabled) Modifier else Modifier))
         }
-        Text("This switch saves a local UI preference only; clipboard monitoring is not active.", color = Muted, fontSize = 10.sp, lineHeight = 15.sp)
+        Panel {
+            Eyebrow("RECEIVED TEXT")
+            Text(receivedFrom, color = Muted, fontSize = 10.sp)
+            if (receivedText.isNullOrEmpty()) {
+                Text("No shared text received yet.", color = Muted, fontSize = 12.sp)
+            } else {
+                Text(receivedText, color = Color.White, fontSize = 13.sp, lineHeight = 19.sp)
+                PrimaryAction("Copy to phone clipboard", {
+                    context.getSystemService(android.content.ClipboardManager::class.java)
+                        ?.setPrimaryClip(android.content.ClipData.newPlainText("Bridge shared text", receivedText))
+                }, Modifier.fillMaxWidth())
+            }
+            Text(status, color = Accent, fontSize = 11.sp, lineHeight = 16.sp)
+        }
+        Text("Bridge does not monitor your system clipboard. You choose what to send; received text is copied only when you tap the button.", color = Muted, fontSize = 10.sp, lineHeight = 15.sp)
     }
 }
 
