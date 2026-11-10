@@ -30,7 +30,7 @@ use windows_sys::Win32::{
     System::{
         Pipes::{
             ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_NOWAIT,
-            PIPE_READMODE_MESSAGE, PIPE_TYPE_MESSAGE,
+            PIPE_READMODE_MESSAGE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_MESSAGE,
         },
     },
 };
@@ -120,7 +120,7 @@ fn create_pipe() -> io::Result<HANDLE> {
         CreateNamedPipeW(
             name.as_ptr(),
             PIPE_ACCESS_DUPLEX,
-            PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_NOWAIT,
+            PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_NOWAIT | PIPE_REJECT_REMOTE_CLIENTS,
             1,
             512,
             512,
