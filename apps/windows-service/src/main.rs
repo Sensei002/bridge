@@ -365,7 +365,7 @@ fn handle_request(
                 leases.authorize_operation(lease_id, caller.process_id, &device_fingerprint)
                     .map_err(|message| io::Error::new(io::ErrorKind::PermissionDenied, message))?;
                 driver::set_connected(true)
-                    .map(|_| b"BRIDGE_DISPLAY/1 OK connected\\n".to_vec())
+                    .map(|_| b"BRIDGE_DISPLAY/1 OK connected\n".to_vec())
             }),
         Request::Disconnect { lease_id, device_fingerprint } =>
             verify_publisher::verify_client_publisher(&caller.image_path).and_then(|_| {
