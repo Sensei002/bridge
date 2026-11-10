@@ -16,7 +16,7 @@ The certificate is intended to sign Bridge's Windows driver package and, where u
 - Use the same certificate for subsequent releases so installed PCs can continue to recognize the Bridge publisher. Plan certificate renewal and an overlap period before expiry.
 - Never generate a new signing identity on every CI run. That would break trust continuity and make updates require repeated certificate approval.
 
-The certificate must be generated once in a controlled environment, exported as a password-protected PFX, and then added to GitHub Secrets by the repository owner. GitHub Actions cannot configure repository secrets through the normal workflow token; this setup is a one-time owner action.
+The certificate must be generated once in a controlled environment, exported as a password-protected PFX, and then added to GitHub Secrets by the repository owner. The repository includes scripts/windows/New-BridgeDriverSigningCertificate.ps1 to create the key pair and export the PFX/CER outside the repository. GitHub Actions cannot configure repository secrets through the normal workflow token; this setup is a one-time owner action. The script removes the temporary certificate-store entry after export; keep the PFX and password backed up securely.
 
 ## GitHub Actions signing pipeline
 
