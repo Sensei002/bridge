@@ -529,7 +529,7 @@ NTSTATUS IndirectDeviceContext::ConnectMonitor(UINT ConnectorIndex)
     MonitorInfo.MonitorDescription.Type = IDDCX_MONITOR_DESCRIPTION_TYPE_EDID;
     MonitorInfo.MonitorDescription.DataSize = 0;
     MonitorInfo.MonitorDescription.pData = nullptr;
-    MonitorInfo.MonitorContainerId = GUID_NULL;
+    if (FAILED(CoCreateGuid(&MonitorInfo.MonitorContainerId))) return STATUS_UNSUCCESSFUL;
     IDARG_IN_MONITORCREATE MonitorCreate = {};
     MonitorCreate.ObjectAttributes = &Attr;
     MonitorCreate.pMonitorInfo = &MonitorInfo;
