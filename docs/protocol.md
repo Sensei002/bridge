@@ -39,3 +39,16 @@ The initial transfer flow is:
 6. Either side may cancel. Incomplete temporary files are deleted.
 
 The first implementation caps individual files at 2 GiB. Resume/restart support is deliberately deferred until the basic transfer path has passed physical-device testing. A sender must not infer success until it receives an authenticated completion response.
+
+
+## Secure clipboard text sharing (Milestone 3, initial implementation)
+
+Clipboard text is carried only inside an established authenticated Noise session. The clipboard packet uses a dedicated application discriminator and is separate from file-transfer control/chunk packets.
+
+- The initial implementation supports explicit, user-triggered text sharing between connected trusted Windows and Android devices.
+- Text payloads are UTF-8 and limited to 16 KiB.
+- Clipboard sharing is disabled by default and must be enabled on each receiving/sending client.
+- The sender chooses the exact text to send. Bridge does not read the system clipboard automatically or monitor clipboard changes in the background.
+- Android only copies received text into the system clipboard after the user taps the copy action.
+- Unknown, malformed, or oversized clipboard packets are discarded. Clipboard payloads never create files or invoke file-transfer handlers.
+- Automatic clipboard monitoring is deferred because Android restricts background clipboard access and because it needs explicit privacy/permission design on every platform.
