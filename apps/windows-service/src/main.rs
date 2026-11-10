@@ -26,8 +26,8 @@ use windows_sys::Win32::{
         ConvertStringSecurityDescriptorToSecurityDescriptorW, SECURITY_ATTRIBUTES,
         SDDL_REVISION_1,
     },
+    Storage::FileSystem::{ReadFile, WriteFile},
     System::{
-        IO::DeviceIoControl,
         Memory::LocalFree,
         Pipes::{
             ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_ACCESS_DUPLEX,
