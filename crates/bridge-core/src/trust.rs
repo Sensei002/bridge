@@ -252,6 +252,7 @@ mod tests {
             display_name: "Bridge phone".into(),
             platform: Platform::Android,
             protocol_version: PROTOCOL_VERSION,
+            attestation_public_key: None,
         }
     }
 
