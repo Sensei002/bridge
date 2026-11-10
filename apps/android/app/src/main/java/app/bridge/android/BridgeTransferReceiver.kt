@@ -109,10 +109,7 @@ internal class BridgeTransferReceiver(
                                 val seed = BridgeIdentityStore.loadOrCreateAttestationSeed(appContext)
                                 val proof = try {
                                     JSONObject(BridgeNative.attestationSign(
-                                        seed.joinToString("") { "%02x".format(it.toInt() and 0xff) },
-                                        nonce,
-                                        sessionId,
-                                        localNoiseFingerprint
+                                        seed, nonce, sessionId, localNoiseFingerprint
                                     ))
                                 } finally {
                                     seed.fill(0)
