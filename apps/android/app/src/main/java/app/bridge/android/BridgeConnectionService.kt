@@ -145,6 +145,9 @@ class BridgeConnectionService : Service() {
                 val fingerprintResult = org.json.JSONObject(BridgeNative.identityFingerprint(keyHex))
                 check(fingerprintResult.optBoolean("ok")) { fingerprintResult.optString("error") }
                 val fingerprint = fingerprintResult.getString("fingerprint")
+                // Create and validate the independent signing identity before pairing starts.
+                // The seed is reloaded only by the future signing path, never retained here.
+                BridgeIdentityStore.loadOrCreateAttestationSeed(this).fill(0)
                 val identityPreferences = getSharedPreferences("bridge_secure_identity", MODE_PRIVATE)
                 val deviceId = identityPreferences.getString("device_id", null)
                     ?: UUID.randomUUID().toString().also {
@@ -293,7 +296,7 @@ class BridgeConnectionService : Service() {
                         BridgeRuntimeState.trustedDevices.clear()
                         BridgeRuntimeState.trustedDevices.addAll(restoredDevices)
                         BridgeRuntimeState.pairingStatus.value =
-                            "Identity protected by Android Keystore · Noise XX ready."
+                            "Noise XX ready · Android attestation identity protected by Keystore."
                         refreshReceivedFiles()
                     }
                 }
