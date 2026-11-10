@@ -208,10 +208,17 @@ fn handle_request(bytes: &[u8]) -> Vec<u8> {
             .encode()
             .into_bytes()
         }),
-        Request::Connect => driver::set_connected(true)
-            .map(|_| b"BRIDGE_DISPLAY/1 OK connect\n".to_vec()),
-        Request::Disconnect => driver::set_connected(false)
-            .map(|_| b"BRIDGE_DISPLAY/1 OK disconnect\n".to_vec()),
+        // Fail closed until the service can verify the caller process and bind
+        // this request to a live, authenticated Android Second Screen session.
+        // Merely reaching the interactive-user named pipe is not authorization.
+        Request::Connect => Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "CONNECT is disabled until authenticated session binding is implemented",
+        )),
+        Request::Disconnect => Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "DISCONNECT is disabled until authenticated session binding is implemented",
+        )),
     };
     result.unwrap_or_else(|error| format!("BRIDGE_DISPLAY/1 ERROR {error}\n").into_bytes())
 }
