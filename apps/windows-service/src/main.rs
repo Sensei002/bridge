@@ -353,7 +353,7 @@ fn handle_request(
                 lease_fingerprints.insert(caller.process_id, device_fingerprint);
                 let remaining_ms = lease.remaining(Instant::now()).as_millis();
                 Ok(format!(
-                    "BRIDGE_DISPLAY/1 OK lease_issued id={} expires_in_ms={}\\n",
+                    "BRIDGE_DISPLAY/1 OK lease_issued id={} expires_in_ms={}\n",
                     lease.id,
                     remaining_ms,
                 ).into_bytes())
@@ -364,13 +364,13 @@ fn handle_request(
         Request::Connect => verify_publisher::verify_client_publisher(&caller.image_path).and_then(|_| {
             Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
-                "CONNECT is disabled until authenticated session binding is implemented",
+                "CONNECT is disabled until driver lease enforcement is implemented",
             ))
         }),
         Request::Disconnect => verify_publisher::verify_client_publisher(&caller.image_path).and_then(|_| {
             Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
-                "DISCONNECT is disabled until authenticated session binding is implemented",
+                "DISCONNECT is disabled until driver lease enforcement is implemented",
             ))
         }),
     };
