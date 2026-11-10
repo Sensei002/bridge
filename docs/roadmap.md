@@ -58,6 +58,38 @@
 - [ ] Disconnect handling and interrupted-transfer cleanup tests
 - [ ] Resume support (deferred until reliable non-resumable transfer is validated)
 
+## Milestone 3: Android as a native extended Windows display
+
+Architecture and acceptance gates: [docs/second-screen-architecture.md](second-screen-architecture.md).
+
+### Windows virtual display foundation
+- [x] Select Microsoft IddCx / Indirect Display Driver (UMDF) as the Windows virtual-monitor architecture.
+- [x] Define separation between the existing Rust/egui UI, a Bridge Display Windows service, and the C++ UMDF display driver.
+- [ ] Add a WDK/Visual Studio C++ IddCx driver project based on Microsoft's official sample.
+- [ ] Build and validate the driver package in GitHub Actions.
+- [ ] Implement virtual monitor arrival/removal and safe display-mode negotiation.
+- [ ] Package driver + service installation, upgrade, rollback, and removal with explicit elevation.
+- [ ] Establish a supported driver signing/distribution process.
+
+### Real-time desktop media pipeline
+- [ ] Receive IddCx Direct3D swap-chain frames without blocking display composition.
+- [ ] Add GPU-assisted H.264 hardware encoding and bounded frame queues.
+- [ ] Add a dedicated low-latency media transport authenticated to the trusted Bridge device identity.
+- [ ] Add adaptive bitrate, frame pacing, timestamps, and packet-loss recovery.
+- [ ] Keep media traffic independent from file transfers and control messages.
+
+### Android second-screen renderer
+- [ ] Add a dedicated full-screen Android Second Screen mode using MediaCodec hardware decoding and SurfaceView.
+- [ ] Negotiate resolution, orientation, and refresh rate with the Windows virtual monitor.
+- [ ] Support connect/disconnect, Wi-Fi recovery, screen sleep/wake, and decoder recreation.
+- [ ] Validate Windows Extend mode with real application windows on the Android display.
+
+### Reliability and performance validation
+- [ ] Measure end-to-end latency, frame pacing, bitrate, CPU/GPU use, and thermal impact.
+- [ ] Test display hotplug, Windows sleep/resume, lock/unlock, GPU reset, and service/driver recovery.
+- [ ] Test network loss/roaming and Android rotation/process lifecycle.
+- [ ] Verify safe uninstall and that the physical display remains usable after driver/service failure.
+
 ## Device capabilities
 - [ ] Capability permission model
 - [x] Explicit text sharing between connected trusted Windows and Android devices (16 KiB cap; opt-in; no background clipboard monitoring)
