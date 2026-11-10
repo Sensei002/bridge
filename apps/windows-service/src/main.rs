@@ -116,7 +116,6 @@ fn create_pipe() -> io::Result<HANDLE> {
         lpSecurityDescriptor: descriptor,
         bInheritHandle: 0,
     };
-    let name = wide(PIPE_NAME);
     let pipe = unsafe {
         CreateNamedPipeW(
             name.as_ptr(),
@@ -186,7 +185,6 @@ fn run_pipe_server(shutdown: &mpsc::Receiver<()>) -> io::Result<()> {
                 CloseHandle(pipe);
             }
         }
-        let _ = name;
     }
     Ok(())
 }
@@ -216,10 +214,3 @@ fn handle_request(bytes: &[u8]) -> Vec<u8> {
     result.unwrap_or_else(|error| format!("BRIDGE_DISPLAY/1 ERROR {error}\n").into_bytes())
 }
 
-impl Drop for PipeHandle {
-    fn drop(&mut self) {
-        unsafe { CloseHandle(self.0); }
-    }
-}
-
-struct PipeHandle(HANDLE);
