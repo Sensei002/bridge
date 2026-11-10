@@ -68,10 +68,16 @@ pub enum TransferControl {
     FileReject { transfer_id: Uuid, reason: String },
     FileComplete { transfer_id: Uuid },
     FileCancel { transfer_id: Uuid },
-    /// Relay a one-time challenge issued by the local Windows display service.
-    DisplayChallengeRequest { request_id: Uuid, nonce: String },
-    /// Echoed only over the authenticated Noise session that received the request.
-    DisplayChallengeResponse { request_id: Uuid, nonce: String },
+    /// Relay a one-time challenge and the live desktop/Android Noise session ID.
+    DisplayChallengeRequest { request_id: Uuid, session_id: Uuid, nonce: String },
+    /// Ed25519 proof returned only over the authenticated Noise session that received the request.
+    DisplayChallengeResponse {
+        request_id: Uuid,
+        session_id: Uuid,
+        nonce: String,
+        device_fingerprint: String,
+        signature: String,
+    },
 }
 
 pub fn encode_control(message: &TransferControl) -> Result<Vec<u8>, TransferError> {
@@ -79,8 +85,12 @@ pub fn encode_control(message: &TransferControl) -> Result<Vec<u8>, TransferErro
         TransferControl::FileOffer { offer } => offer.validate()?,
         TransferControl::FileReject { reason, .. } if reason.len() > 256 =>
             return Err(TransferError::InvalidOffer("rejection reason is too long".into())),
-        TransferControl::DisplayChallengeRequest { nonce, .. }
-        | TransferControl::DisplayChallengeResponse { nonce, .. } => validate_challenge_nonce(nonce)?,
+        TransferControl::DisplayChallengeRequest { nonce, .. } => validate_challenge_nonce(nonce)?,
+        TransferControl::DisplayChallengeResponse { nonce, device_fingerprint, signature, .. } => {
+            validate_challenge_nonce(nonce)?;
+            validate_hex_field(device_fingerprint, 64, "device fingerprint")?;
+            validate_hex_field(signature, 128, "attestation signature")?;
+        },
         _ => {}
     }
     serde_json::to_vec(message).map_err(|error| TransferError::InvalidOffer(error.to_string()))
@@ -100,11 +110,23 @@ pub fn decode_control(bytes: &[u8]) -> Result<TransferControl, TransferError> {
             return Err(TransferError::InvalidOffer("rejection reason is too long".into()));
         }
     }
-    if let TransferControl::DisplayChallengeRequest { nonce, .. }
-    | TransferControl::DisplayChallengeResponse { nonce, .. } = &message {
-        validate_challenge_nonce(nonce)?;
+    match &message {
+        TransferControl::DisplayChallengeRequest { nonce, .. } => validate_challenge_nonce(nonce)?,
+        TransferControl::DisplayChallengeResponse { nonce, device_fingerprint, signature, .. } => {
+            validate_challenge_nonce(nonce)?;
+            validate_hex_field(device_fingerprint, 64, "device fingerprint")?;
+            validate_hex_field(signature, 128, "attestation signature")?;
+        }
+        _ => {}
     }
     Ok(message)
+}
+
+fn validate_hex_field(value: &str, expected_len: usize, label: &str) -> Result<(), TransferError> {
+    if value.len() != expected_len || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(TransferError::InvalidOffer(format!("{label} must be {expected_len} hexadecimal characters")));
+    }
+    Ok(())
 }
 
 fn validate_challenge_nonce(nonce: &str) -> Result<(), TransferError> {
@@ -406,12 +428,20 @@ mod tests {
     }
 
     #[test]
-    fn display_challenge_messages_round_trip_and_reject_malformed_nonces() {
+    fn display_challenge_messages_round_trip_and_reject_malformed_proofs() {
         let request_id = Uuid::new_v4();
+        let session_id = Uuid::new_v4();
         let nonce = "a5".repeat(32);
+        let response = TransferControl::DisplayChallengeResponse {
+            request_id,
+            session_id,
+            nonce: nonce.clone(),
+            device_fingerprint: "b6".repeat(32),
+            signature: "c7".repeat(64),
+        };
         for message in [
-            TransferControl::DisplayChallengeRequest { request_id, nonce: nonce.clone() },
-            TransferControl::DisplayChallengeResponse { request_id, nonce: nonce.clone() },
+            TransferControl::DisplayChallengeRequest { request_id, session_id, nonce: nonce.clone() },
+            response.clone(),
         ] {
             let encoded = encode_control(&message).unwrap();
             assert_eq!(decode_control(&encoded).unwrap(), message);
@@ -419,11 +449,14 @@ mod tests {
             assert_eq!(decode_packet(&encode_packet(&packet).unwrap()).unwrap(), packet);
         }
         let malformed = TransferControl::DisplayChallengeRequest {
-            request_id,
-            nonce: "not-a-nonce".into(),
+            request_id, session_id, nonce: "not-a-nonce".into(),
         };
         assert!(encode_control(&malformed).is_err());
-        let malformed_json = format!(r#"{{"type":"display_challenge_response","request_id":"{request_id}","nonce":"bad"}}"#);
+        let malformed_proof = TransferControl::DisplayChallengeResponse {
+            signature: "bad".into(), ..response
+        };
+        assert!(encode_control(&malformed_proof).is_err());
+        let malformed_json = format!(r#"{{"type":"display_challenge_response","request_id":"{request_id}","session_id":"{session_id}","nonce":"bad","device_fingerprint":"{}","signature":"{}"}}"#, "b6".repeat(32), "c7".repeat(64));
         assert!(decode_control(malformed_json.as_bytes()).is_err());
     }
 
