@@ -235,7 +235,7 @@ fn to_json(result: Result<PairResult, String>) -> CString {
 #[no_mangle]
 pub unsafe extern "C" fn bridge_attestation_public_key(seed_hex: *const c_char) -> *mut c_char {
     if seed_hex.is_null() {
-        return CString::new("{\\"ok\\":false,\\"error\\":\\"null seed\\"}").unwrap().into_raw();
+        return CString::new(serde_json::json!({"ok": false, "error": "null seed"}).to_string()).unwrap().into_raw();
     }
     let result: Result<String, String> = CStr::from_ptr(seed_hex).to_str()
         .map_err(|error: std::str::Utf8Error| error.to_string())
