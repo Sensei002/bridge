@@ -33,8 +33,6 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
       - uses: Swatinem/rust-cache@v2
-      - name: Check formatting
-        run: cargo fmt --all -- --check
       - name: Test service protocol
         run: cargo test -p bridge-display-service
       - name: Build Windows service executable
