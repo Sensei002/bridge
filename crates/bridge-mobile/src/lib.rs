@@ -227,23 +227,28 @@ fn to_json(result: Result<PairResult, String>) -> CString {
         .unwrap_or_else(|_| CString::new("{\"ok\":false,\"error\":\"invalid response\"}").unwrap())
 }
 
+fn derive_attestation_public_key(seed: &mut [u8]) -> Result<String, String> {
+    let result = bridge_security::peer_attestation::attestation_public_key(seed)
+        .map(|key| hex::encode(key))
+        .map_err(|error| error.to_string());
+    seed.fill(0);
+    result
+}
+
 /// Derive the raw Ed25519 public key from a 32-byte attestation seed encoded as hex.
-/// The private seed is never returned or persisted by this function.
 ///
 /// # Safety
-/// `seed_hex` must be null or point to a valid NUL-terminated UTF-8 C string.
+/// `seed_hex` must point to a valid NUL-terminated UTF-8 C string.
 /// The returned allocation must be released with `bridge_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn bridge_attestation_public_key(seed_hex: *const c_char) -> *mut c_char {
     if seed_hex.is_null() {
         return CString::new(serde_json::json!({"ok": false, "error": "null seed"}).to_string()).unwrap().into_raw();
     }
-    let result: Result<String, String> = CStr::from_ptr(seed_hex).to_str()
-        .map_err(|error: std::str::Utf8Error| error.to_string())
-        .and_then(decode_hex)
-        .and_then(|seed| bridge_security::peer_attestation::attestation_public_key(&seed)
-            .map_err(|error| error.to_string()))
-        .map(|key| key.iter().map(|byte| format!("{byte:02x}")).collect());
+    let result = (|| -> Result<String, String> {
+        let mut seed = decode_hex(CStr::from_ptr(seed_hex).to_str().map_err(|error| error.to_string())?)?;
+        derive_attestation_public_key(&mut seed)
+    })();
     let json = match result {
         Ok(public_key) => serde_json::json!({"ok": true, "public_key": public_key}),
         Err(error) => serde_json::json!({"ok": false, "error": error}),
@@ -466,13 +471,19 @@ mod android_jni {
 
     #[no_mangle]
     pub extern "system" fn Java_app_bridge_android_BridgeNative_attestationPublicKey(
-        mut env: JNIEnv, _class: JClass, seed_hex: JString
+        mut env: JNIEnv, _class: JClass, seed_bytes: jni::objects::JByteArray
     ) -> jstring {
-        let text: String = env.get_string(&seed_hex).map(|v| v.into()).unwrap_or_default();
-        let input = CString::new(text).unwrap_or_default();
-        let output = unsafe { bridge_attestation_public_key(input.as_ptr()) };
-        let response = unsafe { CStr::from_ptr(output).to_string_lossy().into_owned() };
-        unsafe { bridge_string_free(output); }
+        let mut seed = match env.convert_byte_array(&seed_bytes) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                let response = serde_json::json!({"ok": false, "error": error.to_string()}).to_string();
+                return env.new_string(response).map(|value| value.into_raw()).unwrap_or(std::ptr::null_mut());
+            }
+        };
+        let response = match derive_attestation_public_key(&mut seed) {
+            Ok(public_key) => serde_json::json!({"ok": true, "public_key": public_key}),
+            Err(error) => serde_json::json!({"ok": false, "error": error}),
+        }.to_string();
         env.new_string(response).map(|value| value.into_raw()).unwrap_or(std::ptr::null_mut())
     }
 
