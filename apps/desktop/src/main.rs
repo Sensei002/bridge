@@ -20,6 +20,8 @@ use bridge_transfer::{decode_packet, encode_packet, offer_for_file, FileOffer, I
 use std::net::TcpListener;
 #[cfg(windows)]
 use std::path::PathBuf;
+#[cfg(windows)]
+use uuid::Uuid;
 use std::sync::Arc;
 #[cfg(windows)]
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -94,6 +96,7 @@ struct DesktopSession {
     incoming: std::sync::Mutex<Receiver<Vec<u8>>>,
     incoming_offers: std::sync::Mutex<Receiver<FileOffer>>,
     clipboard_incoming: std::sync::Mutex<Receiver<String>>,
+    challenge_responses: std::sync::Mutex<Receiver<(Uuid, String)>>,
     stop: Arc<std::sync::atomic::AtomicBool>,
     alive: Arc<std::sync::atomic::AtomicBool>,
     pub remote_fingerprint: String,
@@ -114,6 +117,7 @@ impl DesktopSession {
         let (sender, incoming) = mpsc::sync_channel(8);
         let (offer_sender, incoming_offers) = mpsc::channel();
         let (clipboard_sender, clipboard_incoming) = mpsc::sync_channel(4);
+        let (challenge_sender, challenge_responses) = mpsc::channel();
         let reader_connection_for_thread = Arc::clone(&reader_connection);
         thread::Builder::new()
             .name("bridge-desktop-session-reader".into())
@@ -161,6 +165,9 @@ impl DesktopSession {
                         Ok(TransferPacket::Control(TransferControl::FileOffer { offer })) => {
                             if offer_sender.send(offer).is_err() { break; }
                         }
+                        Ok(TransferPacket::Control(TransferControl::DisplayChallengeResponse { request_id, nonce })) => {
+                            if challenge_sender.send((request_id, nonce)).is_err() { break; }
+                        }
                         _ => {
                             if sender.send(plaintext).is_err() { break; }
                         }
@@ -206,7 +213,7 @@ impl DesktopSession {
                 }
             })
             .map_err(|error| error.to_string())?;
-        Ok(Arc::new(Self { connection, incoming: std::sync::Mutex::new(incoming), incoming_offers: std::sync::Mutex::new(incoming_offers), clipboard_incoming: std::sync::Mutex::new(clipboard_incoming), stop, alive, remote_fingerprint }))
+        Ok(Arc::new(Self { connection, incoming: std::sync::Mutex::new(incoming), incoming_offers: std::sync::Mutex::new(incoming_offers), clipboard_incoming: std::sync::Mutex::new(clipboard_incoming), challenge_responses: std::sync::Mutex::new(challenge_responses), stop, alive, remote_fingerprint }))
     }
 
     fn is_alive(&self) -> bool {
@@ -229,6 +236,31 @@ impl DesktopSession {
             self.alive.store(false, Ordering::Release);
         }
         result
+    }
+
+    /// Forward a Windows-service challenge through this live authenticated Noise session.
+    /// The Android peer echoes it inside the encrypted channel; this method does not
+    /// itself authorize a display lease or enable any driver operation.
+    fn relay_service_challenge(&self, nonce: &str, timeout: Duration) -> Result<(), String> {
+        if nonce.len() != 64 || !nonce.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err("display-service challenge must be 64 hexadecimal characters".into());
+        }
+        if timeout.is_zero() || timeout > Duration::from_secs(10) {
+            return Err("display challenge timeout must be between 1ms and 10s".into());
+        }
+        let request_id = Uuid::new_v4();
+        let packet = encode_packet(&TransferPacket::Control(
+            TransferControl::DisplayChallengeRequest { request_id, nonce: nonce.to_ascii_lowercase() },
+        )).map_err(|error| error.to_string())?;
+        self.send(&packet)?;
+        let response = self.challenge_responses.lock()
+            .map_err(|_| "display challenge response lock poisoned")?
+            .recv_timeout(timeout)
+            .map_err(|error| format!("Android challenge response unavailable: {error}"))?;
+        if response.0 != request_id || !response.1.eq_ignore_ascii_case(nonce) {
+            return Err("Android challenge response did not match the active request".into());
+        }
+        Ok(())
     }
 
     fn receive_timeout(&self, timeout: Duration) -> Result<Vec<u8>, String> {
