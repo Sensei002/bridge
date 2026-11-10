@@ -8,7 +8,7 @@ This is the privileged Windows service boundary for Bridge Second Screen. It is 
 - Local named pipe: `\\.\pipe\BridgeDisplayService`.
 - Versioned, bounded text protocol: `BRIDGE_DISPLAY/1 PING|QUERY|CHALLENGE|CHALLENGE_RESPONSE|CONNECT|DISCONNECT`.
 - `CHALLENGE` and `CHALLENGE_RESPONSE <64-hex-nonce>` require the configured Authenticode publisher pin. The service retains the original client process handle between requests, expires challenges after 10 seconds, and consumes each challenge once.
-- The Windows desktop client now requests a challenge when its first authenticated Android Noise session becomes active, relays the nonce over that encrypted session, and submits the echoed response over a second named-pipe connection. The relay is bounded by the service's 10-second challenge lifetime and an 8-second desktop wait.
+- The Windows desktop client now requests a challenge when its first live authenticated Android Noise session becomes active, relays the nonce over that encrypted session, and submits the echoed response over a second named-pipe connection. The relay is bounded by the service's 10-second challenge lifetime and an 8-second desktop wait.
 - Pipe DACL grants full access to LocalSystem and Administrators, and read/write access to interactive users. Remote network clients are not granted access.
 - Captures the connected pipe client's process ID using the Windows named-pipe API and resolves its executable image path from the process handle.
 - Driver client enumerates the Bridge device-interface GUID and sends the driver's versioned QUERY/CONNECT/DISCONNECT IOCTLs.
