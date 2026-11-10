@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::{
+    collections::HashMap,
     ffi::OsString,
     io,
     ptr::null_mut,
@@ -140,7 +141,14 @@ fn create_pipe() -> io::Result<HANDLE> {
 }
 
 fn run_pipe_server(shutdown: &mpsc::Receiver<()>) -> io::Result<()> {
+    let mut challenges = bridge_display_service::challenge::ServiceChallengeRegistry::default();
+    // Keep the original kernel process object alive from challenge issuance through
+    // response consumption; a PID by itself is never used as a durable identity.
+    let mut pinned_clients: HashMap<u32, pipe_client::PipeClientIdentity> = HashMap::new();
     while shutdown.try_recv().is_err() {
+        for process_id in challenges.revoke_expired() {
+            pinned_clients.remove(&process_id);
+        }
         let pipe = create_pipe()?;
         let connected = loop {
             if shutdown.try_recv().is_ok() {
@@ -153,7 +161,19 @@ fn run_pipe_server(shutdown: &mpsc::Receiver<()>) -> io::Result<()> {
             }
             match unsafe { GetLastError() } {
                 ERROR_PIPE_CONNECTED => break true,
-                ERROR_PIPE_LISTENING => thread::sleep(Duration::from_millis(100)),
+                ERROR_PIPE_LISTENING => {
+                    thread::sleep(Duration::from_millis(100));
+                    for process_id in challenges.revoke_expired() {
+                        pinned_clients.remove(&process_id);
+                    }
+                    let exited = pinned_clients.iter()
+                        .filter_map(|(process_id, identity)| identity.ensure_alive().is_err().then_some(*process_id))
+                        .collect::<Vec<_>>();
+                    for process_id in exited {
+                        challenges.revoke_process(process_id);
+                        pinned_clients.remove(&process_id);
+                    }
+                },
                 error => {
                     unsafe { CloseHandle(pipe); }
                     return Err(io::Error::from_raw_os_error(error as i32));
@@ -173,25 +193,25 @@ fn run_pipe_server(shutdown: &mpsc::Receiver<()>) -> io::Result<()> {
                     let response = match pipe_client::identify(pipe) {
                         Ok(caller) => {
                             if let Err(error) = caller.ensure_alive() {
-                                format!("BRIDGE_DISPLAY/1 ERROR client process is no longer valid: {error}\\n").into_bytes()
+                                format!("BRIDGE_DISPLAY/1 ERROR client process is no longer valid: {error}\n").into_bytes()
                             } else {
                                 eprintln!("Bridge Display Service request from PID {} ({})", caller.process_id, caller.image_path.display());
-                                let response = handle_request(&request[..read as usize], &caller);
+                                let response = handle_request(&request[..read as usize], &caller, &mut challenges, &mut pinned_clients);
                                 if caller.ensure_alive().is_ok() {
                                     response
                                 } else {
-                                    b"BRIDGE_DISPLAY/1 ERROR client process exited during request\\n".to_vec()
+                                    b"BRIDGE_DISPLAY/1 ERROR client process exited during request\n".to_vec()
                                 }
                             }
                         }
-                        Err(error) => format!("BRIDGE_DISPLAY/1 ERROR caller identity unavailable: {error}\\n").into_bytes(),
+                        Err(error) => format!("BRIDGE_DISPLAY/1 ERROR caller identity unavailable: {error}\n").into_bytes(),
                     };
                     break (read, response);
                 }
                 match unsafe { GetLastError() } {
                     ERROR_NO_DATA if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
-                    ERROR_BROKEN_PIPE => break (0, b"BRIDGE_DISPLAY/1 ERROR client disconnected\\n".to_vec()),
-                    _ => break (0, b"BRIDGE_DISPLAY/1 ERROR read failed\\n".to_vec()),
+                    ERROR_BROKEN_PIPE => break (0, b"BRIDGE_DISPLAY/1 ERROR client disconnected\n".to_vec()),
+                    _ => break (0, b"BRIDGE_DISPLAY/1 ERROR read failed\n".to_vec()),
                 }
             };
             let mut written = 0_u32;
@@ -209,7 +229,7 @@ fn run_pipe_server(shutdown: &mpsc::Receiver<()>) -> io::Result<()> {
     Ok(())
 }
 
-fn handle_request(bytes: &[u8], caller: &pipe_client::PipeClientIdentity) -> Vec<u8> {
+fn handle_request(bytes: &[u8], caller: &pipe_client::PipeClientIdentity, challenges: &mut bridge_display_service::challenge::ServiceChallengeRegistry, pinned_clients: &mut HashMap<u32, pipe_client::PipeClientIdentity>) -> Vec<u8> {
     use bridge_display_service::{DisplayStatus, Request};
     let request = match Request::parse(bytes) {
         Ok(request) => request,
@@ -226,6 +246,30 @@ fn handle_request(bytes: &[u8], caller: &pipe_client::PipeClientIdentity) -> Vec
             .encode()
             .into_bytes()
         }),
+        Request::Challenge => verify_publisher::verify_client_publisher(&caller.image_path)
+            .and_then(|_| {
+                let nonce = challenges.issue_after_client_verification(caller.process_id)
+                    .map_err(|message| io::Error::new(io::ErrorKind::PermissionDenied, message))?;
+                pinned_clients.insert(caller.process_id, caller.clone());
+                Ok(format!("BRIDGE_DISPLAY/1 CHALLENGE nonce={nonce}\n").into_bytes())
+            }),
+        Request::ChallengeResponse(nonce) => verify_publisher::verify_client_publisher(&caller.image_path)
+            .and_then(|_| {
+                let pinned = pinned_clients.get(&caller.process_id).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::PermissionDenied, "no challenge is pending for this process")
+                })?;
+                pinned.ensure_alive()?;
+                caller.ensure_alive()?;
+                let same_image = pinned.image_path.to_string_lossy()
+                    .eq_ignore_ascii_case(&caller.image_path.to_string_lossy());
+                if !same_image {
+                    return Err(io::Error::new(io::ErrorKind::PermissionDenied, "challenge process image changed"));
+                }
+                challenges.consume_for_process(caller.process_id, &nonce)
+                    .map_err(|message| io::Error::new(io::ErrorKind::PermissionDenied, message))?;
+                pinned_clients.remove(&caller.process_id);
+                Ok(b"BRIDGE_DISPLAY/1 OK challenge_verified\n".to_vec())
+            }),
         // Fail closed until the service can verify the caller process and bind
         // this request to a live, authenticated Android Second Screen session.
         // Merely reaching the interactive-user named pipe is not authorization.

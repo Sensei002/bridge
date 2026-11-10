@@ -1,7 +1,7 @@
 //! One-time, process-bound challenges for the Windows display-service handshake.
 //!
-//! This registry is deliberately not wired to the named pipe. Callers must first
-//! verify the desktop executable's publisher and retain a live process handle.
+//! The named-pipe server exposes this registry only after verifying the desktop
+//! executable's publisher and retaining the exact live process handle.
 //! A PID alone is not a durable process identity and must never authorize a lease.
 
 use std::{
@@ -47,6 +47,22 @@ impl ServiceChallengeRegistry {
         response: &str,
     ) -> Result<(), &'static str> {
         self.consume_at(process_id, response, Instant::now())
+    }
+
+    /// Remove expired challenges and return their process IDs so the caller can
+    /// release the corresponding retained process handles.
+    pub fn revoke_expired(&mut self) -> Vec<u32> {
+        self.revoke_expired_at(Instant::now())
+    }
+
+    fn revoke_expired_at(&mut self, now: Instant) -> Vec<u32> {
+        let expired = self.pending.iter()
+            .filter_map(|(process_id, pending)| (now >= pending.expires_at).then_some(*process_id))
+            .collect::<Vec<_>>();
+        for process_id in &expired {
+            self.pending.remove(process_id);
+        }
+        expired
     }
 
     /// Revoke any outstanding challenge for a process when its pipe closes or
@@ -184,6 +200,18 @@ mod tests {
             registry.consume_for_process(42, &nonce),
             Err("no pending challenge for client process")
         );
+    }
+
+    #[test]
+    fn expiry_cleanup_returns_process_ids_for_handle_release() {
+        let mut registry = ServiceChallengeRegistry::default();
+        let issued = Instant::now();
+        registry.issue_at(42, issued).unwrap();
+        registry.issue_at(43, issued).unwrap();
+        let mut expired = registry.revoke_expired_at(issued + CHALLENGE_TTL);
+        expired.sort_unstable();
+        assert_eq!(expired, vec![42, 43]);
+        assert!(registry.pending.is_empty());
     }
 
     #[test]
