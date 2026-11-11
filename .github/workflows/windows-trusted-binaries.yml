@@ -82,6 +82,7 @@ jobs:
             }
           }
 
+          Write-Host "SIGNING CHECKPOINT: validating signing inputs"
           $pfxPath = Join-Path $env:RUNNER_TEMP "bridge-code-signing.pfx"
           $cerPath = Join-Path $PWD "signed-binaries\Bridge-Desktop-CodeSigning.cer"
           $password = ConvertTo-SecureString $env:BRIDGE_DRIVER_SIGNING_PFX_PASSWORD -AsPlainText -Force
@@ -90,7 +91,9 @@ jobs:
           $imported = $null
           $rootThumbprint = $null
           try {
+            Write-Host "SIGNING CHECKPOINT: importing PFX into CurrentUser\\My"
             $imported = Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation "Cert:\CurrentUser\My" -Password $password
+            Write-Host "SIGNING CHECKPOINT: PFX import returned"
             $certificate = @($imported) | Where-Object { $_.HasPrivateKey } | Select-Object -First 1
             if (-not $certificate) { throw "Signing PFX contains no accessible private key." }
             if ($certificate.Thumbprint.ToUpperInvariant() -ne ($env:BRIDGE_DRIVER_CERT_THUMBPRINT -replace "\s", "").ToUpperInvariant()) {
@@ -101,10 +104,14 @@ jobs:
             if (-not $eku -or -not ($eku.EnhancedKeyUsages | Where-Object { $_.Value -eq $codeSigningOid })) {
               throw "The signing certificate does not contain the Code Signing EKU."
             }
+            Write-Host "SIGNING CHECKPOINT: certificate identity and EKU validated"
             Export-Certificate -Cert $certificate -FilePath $cerPath -Type CERT | Out-Null
+            Write-Host "SIGNING CHECKPOINT: public certificate exported; importing temporary root trust"
             Import-Certificate -FilePath $cerPath -CertStoreLocation "Cert:\CurrentUser\Root" | Out-Null
+            Write-Host "SIGNING CHECKPOINT: temporary root trust import returned"
             $rootThumbprint = $certificate.Thumbprint
 
+            Write-Host "SIGNING CHECKPOINT: locating Windows SDK SignTool"
             $kitRoots = @("${env:ProgramFiles(x86)}\Windows Kits\10\bin", "${env:ProgramFiles}\Windows Kits\10\bin") | Where-Object { $_ -and (Test-Path $_) }
             $signtoolCandidates = foreach ($kitRoot in $kitRoots) {
               Get-ChildItem -LiteralPath $kitRoot -Directory -ErrorAction SilentlyContinue |
@@ -119,10 +126,12 @@ jobs:
             $signtool = Get-Item -LiteralPath $signtoolPath
             Write-Host "Using Windows SDK SignTool: $($signtool.FullName)"
 
+            Write-Host "SIGNING CHECKPOINT: SignTool located; beginning binary signing"
             foreach ($name in @("bridge-desktop.exe", "bridge-display-service.exe")) {
               $path = Join-Path "signed-binaries" $name
               & $signtool.FullName sign /v /fd SHA256 /f $pfxPath /p $env:BRIDGE_DRIVER_SIGNING_PFX_PASSWORD /d "Bridge Project $name" $path
               if ($LASTEXITCODE -ne 0) { throw "Signing failed for $name (exit $LASTEXITCODE)." }
+              Write-Host "SIGNING CHECKPOINT: signing returned for $name; verifying signature"
               & $signtool.FullName verify /pa /v $path
               if ($LASTEXITCODE -ne 0) { throw "Authenticode verification failed for $name." }
               $signature = Get-AuthenticodeSignature -LiteralPath $path
