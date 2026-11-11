@@ -531,7 +531,7 @@ pub fn bgra_to_nv12(frame: &DisplayFrame) -> Result<Nv12Frame, TransferError> {
     validate_display_frame_metadata(
         frame.sequence, frame.width, frame.height, frame.stride, total_bytes,
     )?;
-    if frame.width % 2 != 0 || frame.height % 2 != 0 {
+    if !frame.width.is_multiple_of(2) || !frame.height.is_multiple_of(2) {
         return Err(TransferError::InvalidChunk("NV12 conversion requires even frame dimensions".into()));
     }
     let width = frame.width as usize;
