@@ -164,6 +164,7 @@ pub fn encode_chunk(chunk: &FileChunk) -> Result<Vec<u8>, TransferError> {
 pub enum TransferPacket {
     Control(TransferControl),
     Chunk(FileChunk),
+    DisplayFrame(DisplayFrameFragment),
 }
 
 pub const CONTROL_PACKET_TAG: u8 = 0x01;
@@ -182,6 +183,7 @@ pub fn encode_packet(packet: &TransferPacket) -> Result<Vec<u8>, TransferError> 
             bytes.extend_from_slice(&encode_chunk(chunk)?);
             bytes
         }
+        TransferPacket::DisplayFrame(fragment) => encode_display_frame_fragment(fragment)?,
     };
     if encoded.len() > MAX_PACKET_BYTES {
         return Err(TransferError::InvalidChunk("packet exceeds the encrypted transport limit".into()));
@@ -196,6 +198,7 @@ pub fn decode_packet(bytes: &[u8]) -> Result<TransferPacket, TransferError> {
     match bytes[0] {
         CONTROL_PACKET_TAG => Ok(TransferPacket::Control(decode_control(&bytes[1..])?)),
         CHUNK_PACKET_TAG => Ok(TransferPacket::Chunk(decode_chunk(&bytes[1..])?)),
+        DISPLAY_FRAME_PACKET_TAG => Ok(TransferPacket::DisplayFrame(decode_display_frame_fragment(bytes)?)),
         _ => Err(TransferError::InvalidChunk("unknown transfer packet type".into())),
     }
 }
@@ -731,6 +734,18 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
+
+
+    #[test]
+    fn display_frame_fragments_use_the_shared_transfer_packet_decoder() {
+        let fragment = DisplayFrameFragment {
+            sequence: 2, width: 2, height: 2, stride: 8, timestamp_ns: 7,
+            total_bytes: 16, offset: 0, data: vec![0x44; 16],
+        };
+        let packet = TransferPacket::DisplayFrame(fragment.clone());
+        let encoded = encode_packet(&packet).unwrap();
+        assert_eq!(decode_packet(&encoded).unwrap(), packet);
+    }
 
     #[test]
     fn display_frames_fragment_and_reassemble_in_order() {
