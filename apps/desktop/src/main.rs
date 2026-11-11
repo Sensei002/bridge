@@ -561,15 +561,14 @@ fn start_display_frame_stream(
                 Ok(encoders) if !encoders.is_empty() => {
                     let activated = encoders.iter()
                         .filter(|encoder| encoder.activation_succeeded).count();
+                    let profile_matches = encoders.iter()
+                        .filter(|encoder| encoder.supports_nv12_h264_1080x2340_60).count();
                     let names = encoders.iter().take(3)
                         .map(|encoder| {
-                            if encoder.activation_succeeded {
-                                format!(
-                                    "{} ({} in/{} out)",
-                                    encoder.friendly_name,
-                                    encoder.input_streams.unwrap_or(0),
-                                    encoder.output_streams.unwrap_or(0)
-                                )
+                            if encoder.supports_nv12_h264_1080x2340_60 {
+                                format!("{} (NV12 -> H.264 1080x2340@60 supported)", encoder.friendly_name)
+                            } else if encoder.activation_succeeded {
+                                format!("{} (activated; target profile unsupported)", encoder.friendly_name)
                             } else {
                                 encoder.friendly_name.clone()
                             }
@@ -579,8 +578,8 @@ fn start_display_frame_stream(
                     let _ = events.send(DisplayLeaseEvent::Status {
                         session_key: session_key.clone(),
                         message: format!(
-                            "Media Foundation found {} H.264 encoder candidate(s); {} activated: {}. Encoding is not enabled yet; using BGRA fallback.",
-                            encoders.len(), activated, names
+                            "Media Foundation: {} H.264 candidate(s), {} activated, {} accept NV12 -> H.264 at 1080x2340@60: {}. BGRA fallback remains active.",
+                            encoders.len(), activated, profile_matches, names
                         ),
                     });
                 }
