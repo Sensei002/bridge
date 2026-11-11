@@ -7,7 +7,7 @@
 use std::ptr::{null, null_mut, read};
 
 use windows::Win32::Media::MediaFoundation::{
-    IMFActivate, MFTEnumEx, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG,
+    IMFActivate, IMFTransform, MFTEnumEx, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG,
     MFT_ENUM_FLAG_ASYNCMFT, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_LOCALMFT,
     MFT_ENUM_FLAG_SORTANDFILTER, MFT_ENUM_FLAG_SYNCMFT, MFT_FRIENDLY_NAME_Attribute,
     MFT_REGISTER_TYPE_INFO, MFMediaType_Video, MFVideoFormat_H264,
@@ -41,6 +41,10 @@ impl Drop for MediaFoundationRuntime {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct H264EncoderCandidate {
     pub friendly_name: String,
+    pub activation_succeeded: bool,
+    pub input_streams: Option<u32>,
+    pub output_streams: Option<u32>,
+    pub activation_error: Option<String>,
 }
 
 /// Enumerate registered video encoder MFTs that advertise H.264 output.
@@ -84,7 +88,38 @@ pub fn discover_h264_encoders() -> Result<Vec<H264EncoderCandidate>, String> {
                         .map_err(|error| format!("could not read encoder name: {error}"))?;
                     String::from_utf16_lossy(&buffer[..length as usize])
                 };
-                candidates.push(H264EncoderCandidate { friendly_name });
+                let activation_result = unsafe { activation.ActivateObject::<IMFTransform>() };
+                let (activation_succeeded, input_streams, output_streams, activation_error) =
+                    match activation_result {
+                        Ok(transform) => {
+                            let mut inputs = 0_u32;
+                            let mut outputs = 0_u32;
+                            let stream_result = unsafe {
+                                transform.GetStreamCount(&mut inputs, &mut outputs)
+                            };
+                            drop(transform);
+                            let _ = unsafe { activation.ShutdownObject() };
+                            match stream_result {
+                                Ok(()) => (true, Some(inputs), Some(outputs), None),
+                                Err(error) => (true, None, None, Some(format!(
+                                    "activated but stream enumeration failed: {error}"
+                                ))),
+                            }
+                        }
+                        Err(error) => (
+                            false,
+                            None,
+                            None,
+                            Some(format!("encoder activation failed: {error}")),
+                        ),
+                    };
+                candidates.push(H264EncoderCandidate {
+                    friendly_name,
+                    activation_succeeded,
+                    input_streams,
+                    output_streams,
+                    activation_error,
+                });
                 drop(activation);
             }
         }
