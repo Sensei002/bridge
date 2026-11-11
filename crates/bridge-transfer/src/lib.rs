@@ -160,16 +160,82 @@ pub fn encode_chunk(chunk: &FileChunk) -> Result<Vec<u8>, TransferError> {
 /// A transfer packet carried as one encrypted Noise application message.
 /// The leading discriminator prevents JSON control messages from being confused
 /// with binary file chunks while preserving the existing chunk wire format.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum DisplayInputAction {
+    Down = 1,
+    Move = 2,
+    Up = 3,
+    Cancel = 4,
+}
+
+/// One normalized pointer sample from the Android display surface.
+/// Coordinates use the inclusive 0..=65535 range so the Windows side can
+/// map them to the active virtual-monitor dimensions without trusting pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DisplayInputEvent {
+    pub sequence: u64,
+    pub timestamp_ns: u64,
+    pub pointer_id: u8,
+    pub action: DisplayInputAction,
+    pub x: u16,
+    pub y: u16,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TransferPacket {
     Control(TransferControl),
     Chunk(FileChunk),
     DisplayFrame(DisplayFrameFragment),
+    DisplayInput(DisplayInputEvent),
 }
 
 pub const CONTROL_PACKET_TAG: u8 = 0x01;
 pub const CHUNK_PACKET_TAG: u8 = 0x02;
+pub const DISPLAY_INPUT_PACKET_TAG: u8 = 0x05;
+pub const MAX_DISPLAY_INPUT_POINTERS: u8 = 10;
+const DISPLAY_INPUT_PACKET_BYTES: usize = 1 + 8 + 8 + 1 + 1 + 2 + 2;
 pub const MAX_PACKET_BYTES: usize = 65_519;
+
+fn encode_display_input(event: DisplayInputEvent) -> Result<Vec<u8>, TransferError> {
+    if event.sequence == 0 || event.timestamp_ns == 0 || event.pointer_id >= MAX_DISPLAY_INPUT_POINTERS {
+        return Err(TransferError::InvalidChunk("display input sequence, timestamp, or pointer ID is invalid".into()));
+    }
+    let mut bytes = Vec::with_capacity(DISPLAY_INPUT_PACKET_BYTES);
+    bytes.push(DISPLAY_INPUT_PACKET_TAG);
+    bytes.extend_from_slice(&event.sequence.to_be_bytes());
+    bytes.extend_from_slice(&event.timestamp_ns.to_be_bytes());
+    bytes.push(event.pointer_id);
+    bytes.push(event.action as u8);
+    bytes.extend_from_slice(&event.x.to_be_bytes());
+    bytes.extend_from_slice(&event.y.to_be_bytes());
+    Ok(bytes)
+}
+
+fn decode_display_input(bytes: &[u8]) -> Result<DisplayInputEvent, TransferError> {
+    if bytes.len() != DISPLAY_INPUT_PACKET_BYTES || bytes[0] != DISPLAY_INPUT_PACKET_TAG {
+        return Err(TransferError::InvalidChunk("display input packet size or tag is invalid".into()));
+    }
+    let sequence = u64::from_be_bytes(bytes[1..9].try_into().expect("fixed display input header"));
+    let timestamp_ns = u64::from_be_bytes(bytes[9..17].try_into().expect("fixed display input header"));
+    let pointer_id = bytes[17];
+    let action = match bytes[18] {
+        1 => DisplayInputAction::Down,
+        2 => DisplayInputAction::Move,
+        3 => DisplayInputAction::Up,
+        4 => DisplayInputAction::Cancel,
+        _ => return Err(TransferError::InvalidChunk("unknown display input action".into())),
+    };
+    let event = DisplayInputEvent {
+        sequence, timestamp_ns, pointer_id, action,
+        x: u16::from_be_bytes(bytes[19..21].try_into().expect("fixed display input header")),
+        y: u16::from_be_bytes(bytes[21..23].try_into().expect("fixed display input header")),
+    };
+    if event.sequence == 0 || event.timestamp_ns == 0 || event.pointer_id >= MAX_DISPLAY_INPUT_POINTERS {
+        return Err(TransferError::InvalidChunk("display input sequence, timestamp, or pointer ID is invalid".into()));
+    }
+    Ok(event)
+}
 
 pub fn encode_packet(packet: &TransferPacket) -> Result<Vec<u8>, TransferError> {
     let encoded = match packet {
@@ -184,6 +250,7 @@ pub fn encode_packet(packet: &TransferPacket) -> Result<Vec<u8>, TransferError> 
             bytes
         }
         TransferPacket::DisplayFrame(fragment) => encode_display_frame_fragment(fragment)?,
+        TransferPacket::DisplayInput(event) => encode_display_input(*event)?,
     };
     if encoded.len() > MAX_PACKET_BYTES {
         return Err(TransferError::InvalidChunk("packet exceeds the encrypted transport limit".into()));
@@ -199,6 +266,7 @@ pub fn decode_packet(bytes: &[u8]) -> Result<TransferPacket, TransferError> {
         CONTROL_PACKET_TAG => Ok(TransferPacket::Control(decode_control(&bytes[1..])?)),
         CHUNK_PACKET_TAG => Ok(TransferPacket::Chunk(decode_chunk(&bytes[1..])?)),
         DISPLAY_FRAME_PACKET_TAG => Ok(TransferPacket::DisplayFrame(decode_display_frame_fragment(bytes)?)),
+        DISPLAY_INPUT_PACKET_TAG => Ok(TransferPacket::DisplayInput(decode_display_input(bytes)?)),
         _ => Err(TransferError::InvalidChunk("unknown transfer packet type".into())),
     }
 }
@@ -735,6 +803,35 @@ mod tests {
     }
 
 
+
+    #[test]
+    fn display_input_packets_round_trip_and_reject_invalid_samples() {
+        let event = DisplayInputEvent {
+            sequence: 42,
+            timestamp_ns: 123_456,
+            pointer_id: 2,
+            action: DisplayInputAction::Move,
+            x: 0,
+            y: u16::MAX,
+        };
+        let packet = TransferPacket::DisplayInput(event);
+        let encoded = encode_packet(&packet).unwrap();
+        assert_eq!(encoded.len(), DISPLAY_INPUT_PACKET_BYTES);
+        assert_eq!(decode_packet(&encoded).unwrap(), packet);
+
+        for invalid in [
+            DisplayInputEvent { sequence: 0, ..event },
+            DisplayInputEvent { timestamp_ns: 0, ..event },
+            DisplayInputEvent { pointer_id: MAX_DISPLAY_INPUT_POINTERS, ..event },
+        ] {
+            assert!(encode_packet(&TransferPacket::DisplayInput(invalid)).is_err());
+        }
+
+        let mut malformed_action = encoded.clone();
+        malformed_action[18] = 0xff;
+        assert!(decode_packet(&malformed_action).is_err());
+        assert!(decode_packet(&encoded[..encoded.len() - 1]).is_err());
+    }
 
     #[test]
     fn display_frame_fragments_use_the_shared_transfer_packet_decoder() {

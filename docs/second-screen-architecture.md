@@ -49,6 +49,12 @@ Target a low-latency hardware-assisted pipeline:
 
 Start with H.264 hardware encode/decode for broad Android compatibility. Evaluate HEVC/AV1 only after a stable baseline. Adapt resolution, frame rate, and bitrate to measured network and device capability. Prefer dropping stale frames over building latency queues.
 
+## Display input transport foundation
+
+The shared transfer protocol now defines a fixed-size, bounded pointer sample for the reverse path from Android to Windows. Each event carries a monotonically increasing sequence, monotonic timestamp, pointer ID (0–9), action (down/move/up/cancel), and normalized 16-bit coordinates. The packet is transported only inside the already-authenticated Noise session; it does not introduce a new socket or trust boundary.
+
+This is a wire-format foundation only. It does not yet inject input into Windows, authenticate a display lease for input operations, or expose touch/stylus controls in the Android UI. The next implementation must bind input to the active display lease and virtual-monitor dimensions, enforce event ordering/rate limits, and use a narrowly scoped Windows input API. Disconnect, lease expiry, malformed packets, and stale sequences must fail closed and release any active pointer state.
+
 ## Initial device profile and modes
 
 The first physical test target is the currently paired Redmi Note 7 Pro. Start with a portrait-native 1080 x 2340 mode at 60 Hz, plus a lower-bandwidth fallback mode. Confirm actual supported modes and decoder capability at runtime rather than assuming every Android device supports the same profile. Rotation and landscape modes must be negotiated explicitly.
