@@ -78,7 +78,10 @@ internal class EncodedVideoFrameAssembler {
         received = 0
     }
 
-    fun push(packet: ByteArray): BridgeEncodedVideoFrame? {
+    fun push(
+        packet: ByteArray,
+        receivedAtElapsedRealtimeNs: Long = android.os.SystemClock.elapsedRealtimeNanos()
+    ): BridgeEncodedVideoFrame? {
         try {
             require(packet.size > ENCODED_VIDEO_HEADER_BYTES &&
                 packet.size <= ENCODED_VIDEO_HEADER_BYTES + DISPLAY_FRAME_FRAGMENT_BYTES &&
@@ -134,7 +137,8 @@ internal class EncodedVideoFrameAssembler {
                     timestampNs = header.timestampNs,
                     keyframe = header.keyframe,
                     bitstream = completed,
-                    sequenceGap = sequenceGap
+                    sequenceGap = sequenceGap,
+                    receivedAtElapsedRealtimeNs = receivedAtElapsedRealtimeNs
                 )
             }
             return null
