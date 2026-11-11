@@ -29,9 +29,126 @@ impl Drop for OwnedPipe {
     }
 }
 
+/// A short-lived lease minted by the Windows service after Android proof verification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceLease {
+    pub id: uuid::Uuid,
+    pub expires_in_ms: u64,
+}
+
 /// Ask the service for a fresh process-pinned challenge.
 pub fn issue_challenge() -> Result<String, String> {
     parse_challenge(&request("CHALLENGE")?)
+}
+
+/// Ask the service to pin the live Noise session and pairing-trusted Android key.
+pub fn issue_attestation_challenge(
+    session_id: uuid::Uuid,
+    device_fingerprint: &str,
+    pinned_public_key: &str,
+) -> Result<String, String> {
+    if !is_hex(device_fingerprint, 64) || !is_hex(pinned_public_key, 64) {
+        return Err("invalid pairing-pinned Android identity for service challenge".into());
+    }
+    let command = format!(
+        "CHALLENGE_ATTESTATION session={session_id} fingerprint={} public_key={}",
+        device_fingerprint.to_ascii_lowercase(),
+        pinned_public_key.to_ascii_lowercase(),
+    );
+    parse_challenge(&request(&command)?)
+}
+
+/// Submit the signed proof; the service verifies it independently and returns
+/// the process- and peer-bound lease minted after successful verification.
+pub fn submit_attestation_response(
+    nonce: &str,
+    session_id: uuid::Uuid,
+    device_fingerprint: &str,
+    signature: &str,
+) -> Result<ServiceLease, String> {
+    if !is_hex(nonce, 64) || !is_hex(device_fingerprint, 64) || !is_hex(signature, 128) {
+        return Err("invalid Android attestation response encoding".into());
+    }
+    let command = format!(
+        "ATTESTATION_RESPONSE nonce={} session={session_id} fingerprint={} signature={}",
+        nonce.to_ascii_lowercase(),
+        device_fingerprint.to_ascii_lowercase(),
+        signature.to_ascii_lowercase(),
+    );
+    let response = request(&command)?;
+    parse_lease_response(&response)
+}
+
+fn parse_lease_response(response: &str) -> Result<ServiceLease, String> {
+    let value = response.trim()
+        .strip_prefix("BRIDGE_DISPLAY/1 OK lease_issued id=")
+        .or_else(|| response.trim().strip_prefix("BRIDGE_DISPLAY/1 OK lease_renewed id="))
+        .ok_or_else(|| service_response_error(response))?;
+    let (lease_id, ttl) = value.split_once(" expires_in_ms=")
+        .ok_or_else(|| "display service returned a malformed lease".to_string())?;
+    let id = uuid::Uuid::parse_str(lease_id)
+        .map_err(|_| "display service returned an invalid lease ID".to_string())?;
+    let expires_in_ms: u64 = ttl.parse()
+        .map_err(|_| "display service returned an invalid lease lifetime".to_string())?;
+    if expires_in_ms == 0 || expires_in_ms > 15_000 {
+        return Err("display service returned an out-of-policy lease lifetime".into());
+    }
+    Ok(ServiceLease { id, expires_in_ms })
+}
+
+/// Renew the same lease while its original process and Android peer remain authenticated.
+pub fn renew_with_lease(lease: &ServiceLease, device_fingerprint: &str) -> Result<ServiceLease, String> {
+    if lease.expires_in_ms == 0 || lease.expires_in_ms > 15_000 || !is_hex(device_fingerprint, 64) {
+        return Err("invalid or expired display lease identity".into());
+    }
+    let command = format!(
+        "RENEW lease={} fingerprint={}",
+        lease.id,
+        device_fingerprint.to_ascii_lowercase(),
+    );
+    let response = request(&command)?;
+    let renewed = parse_lease_response(&response)?;
+    if renewed.id != lease.id {
+        return Err("display service changed the active lease ID during renewal".into());
+    }
+    Ok(renewed)
+}
+
+/// Request a driver connection using the exact service-issued lease identity.
+pub fn connect_with_lease(lease: &ServiceLease, device_fingerprint: &str) -> Result<(), String> {
+    mutate_with_lease("CONNECT", "connected", lease, device_fingerprint)
+}
+
+/// Request a driver disconnection using the exact service-issued lease identity.
+pub fn disconnect_with_lease(lease: &ServiceLease, device_fingerprint: &str) -> Result<(), String> {
+    mutate_with_lease("DISCONNECT", "disconnected", lease, device_fingerprint)
+}
+
+fn mutate_with_lease(
+    operation: &str,
+    expected_status: &str,
+    lease: &ServiceLease,
+    device_fingerprint: &str,
+) -> Result<(), String> {
+    if lease.expires_in_ms == 0 || lease.expires_in_ms > 15_000 || !is_hex(device_fingerprint, 64) {
+        return Err("invalid or expired display lease identity".into());
+    }
+    let command = format!(
+        "{operation} lease={} fingerprint={}",
+        lease.id,
+        device_fingerprint.to_ascii_lowercase(),
+    );
+    let response = request(&command)?;
+    let expected = format!("BRIDGE_DISPLAY/1 OK {expected_status}");
+    if response.trim() == expected {
+        Ok(())
+    } else {
+        Err(service_response_error(&response))
+    }
+}
+
+fn is_hex(value: &str, expected_len: usize) -> bool {
+    value.len() == expected_len && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn parse_challenge(response: &str) -> Result<String, String> {
@@ -53,7 +170,7 @@ fn service_response_error(response: &str) -> String {
 }
 
 fn request(command: &str) -> Result<String, String> {
-    if command.is_empty() || command.len() > 96
+    if command.is_empty() || command.len() > 384
         || !command.is_ascii()
         || command.contains('\r') || command.contains('\n')
     {
@@ -118,5 +235,26 @@ mod tests {
         assert!(parse_challenge("BRIDGE_DISPLAY/1 ERROR signer pin missing").unwrap_err().contains("signer pin missing"));
         assert!(service_response_error("BRIDGE_DISPLAY/1 ERROR signer pin missing").contains("signer pin missing"));
         assert!(service_response_error("unexpected").contains("unexpected"));
+    }
+
+    #[test]
+    fn accepts_only_valid_short_lived_service_leases() {
+        let id = uuid::Uuid::new_v4();
+        let response = format!("BRIDGE_DISPLAY/1 OK lease_issued id={id} expires_in_ms=15000");
+        assert_eq!(parse_lease_response(&response).unwrap(), ServiceLease { id, expires_in_ms: 15_000 });
+        let renewed = format!("BRIDGE_DISPLAY/1 OK lease_renewed id={id} expires_in_ms=14999");
+        assert_eq!(parse_lease_response(&renewed).unwrap(), ServiceLease { id, expires_in_ms: 14_999 });
+        assert!(parse_lease_response(&format!(
+            "BRIDGE_DISPLAY/1 OK lease_issued id={id} expires_in_ms=0"
+        )).is_err());
+        assert!(parse_lease_response(&format!(
+            "BRIDGE_DISPLAY/1 OK lease_issued id={id} expires_in_ms=15001"
+        )).is_err());
+        assert!(parse_lease_response(
+            "BRIDGE_DISPLAY/1 OK lease_issued id=not-a-uuid expires_in_ms=15000"
+        ).is_err());
+        assert!(parse_lease_response(
+            "BRIDGE_DISPLAY/1 OK attestation_verified"
+        ).is_err());
     }
 }

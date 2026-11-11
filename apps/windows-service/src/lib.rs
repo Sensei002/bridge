@@ -6,7 +6,7 @@
 pub mod challenge;
 
 pub const PROTOCOL_VERSION: u32 = 1;
-pub const MAX_REQUEST_BYTES: usize = 256;
+pub const MAX_REQUEST_BYTES: usize = 512;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request {
@@ -14,8 +14,11 @@ pub enum Request {
     Query,
     Challenge,
     ChallengeResponse(String),
-    Connect,
-    Disconnect,
+    AttestationChallenge { session_id: uuid::Uuid, device_fingerprint: String, pinned_public_key: String },
+    AttestationResponse { nonce: String, session_id: uuid::Uuid, device_fingerprint: String, signature: String },
+    Renew { lease_id: uuid::Uuid, device_fingerprint: String },
+    Connect { lease_id: uuid::Uuid, device_fingerprint: String },
+    Disconnect { lease_id: uuid::Uuid, device_fingerprint: String },
 }
 
 impl Request {
@@ -35,11 +38,86 @@ impl Request {
                 }
                 Ok(Self::ChallengeResponse(nonce.to_ascii_lowercase()))
             }
-            "BRIDGE_DISPLAY/1 CONNECT" => Ok(Self::Connect),
-            "BRIDGE_DISPLAY/1 DISCONNECT" => Ok(Self::Disconnect),
+            value if value.starts_with("BRIDGE_DISPLAY/1 CHALLENGE_ATTESTATION ") => {
+                let fields = value["BRIDGE_DISPLAY/1 CHALLENGE_ATTESTATION ".len()..]
+                    .split_whitespace().collect::<Vec<_>>();
+                if fields.len() != 3
+                    || !fields[1].starts_with("fingerprint=")
+                    || !fields[2].starts_with("public_key=")
+                    || !fields[0].starts_with("session=")
+                {
+                    return Err("attestation challenge fields are malformed");
+                }
+                let session_id = fields[0]["session=".len()..].parse()
+                    .map_err(|_| "attestation session ID is invalid")?;
+                let device_fingerprint = fields[1]["fingerprint=".len()..].to_ascii_lowercase();
+                let pinned_public_key = fields[2]["public_key=".len()..].to_ascii_lowercase();
+                if device_fingerprint.len() != 64 || !device_fingerprint.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    return Err("attestation fingerprint must be 64 hexadecimal characters");
+                }
+                if pinned_public_key.len() != 64 || !pinned_public_key.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    return Err("pinned attestation public key must be 64 hexadecimal characters");
+                }
+                Ok(Self::AttestationChallenge { session_id, device_fingerprint, pinned_public_key })
+            }
+            value if value.starts_with("BRIDGE_DISPLAY/1 ATTESTATION_RESPONSE ") => {
+                let fields = value["BRIDGE_DISPLAY/1 ATTESTATION_RESPONSE ".len()..]
+                    .split_whitespace().collect::<Vec<_>>();
+                if fields.len() != 4
+                    || !fields[0].starts_with("nonce=")
+                    || !fields[1].starts_with("session=")
+                    || !fields[2].starts_with("fingerprint=")
+                    || !fields[3].starts_with("signature=")
+                {
+                    return Err("attestation response fields are malformed");
+                }
+                let nonce = fields[0]["nonce=".len()..].to_ascii_lowercase();
+                let session_id = fields[1]["session=".len()..].parse()
+                    .map_err(|_| "attestation session ID is invalid")?;
+                let device_fingerprint = fields[2]["fingerprint=".len()..].to_ascii_lowercase();
+                let signature = fields[3]["signature=".len()..].to_ascii_lowercase();
+                if nonce.len() != 64 || !nonce.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    return Err("attestation nonce must be 64 hexadecimal characters");
+                }
+                if device_fingerprint.len() != 64 || !device_fingerprint.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    return Err("attestation fingerprint must be 64 hexadecimal characters");
+                }
+                if signature.len() != 128 || !signature.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    return Err("attestation signature must be 128 hexadecimal characters");
+                }
+                Ok(Self::AttestationResponse { nonce, session_id, device_fingerprint, signature })
+            }
+            value if value.starts_with("BRIDGE_DISPLAY/1 RENEW ") => {
+                parse_lease_command(value, "BRIDGE_DISPLAY/1 RENEW ")
+                    .map(|(lease_id, device_fingerprint)| Self::Renew { lease_id, device_fingerprint })
+            }
+            value if value.starts_with("BRIDGE_DISPLAY/1 CONNECT ") => {
+                parse_lease_command(value, "BRIDGE_DISPLAY/1 CONNECT ")
+                    .map(|(lease_id, device_fingerprint)| Self::Connect { lease_id, device_fingerprint })
+            }
+            value if value.starts_with("BRIDGE_DISPLAY/1 DISCONNECT ") => {
+                parse_lease_command(value, "BRIDGE_DISPLAY/1 DISCONNECT ")
+                    .map(|(lease_id, device_fingerprint)| Self::Disconnect { lease_id, device_fingerprint })
+            }
             _ => Err("unsupported display-service request"),
         }
     }
+}
+
+
+/// Parse the exact lease identity required for every driver mutation.
+fn parse_lease_command(value: &str, prefix: &str) -> Result<(uuid::Uuid, String), &'static str> {
+    let fields = value[prefix.len()..].split_whitespace().collect::<Vec<_>>();
+    if fields.len() != 2 || !fields[0].starts_with("lease=") || !fields[1].starts_with("fingerprint=") {
+        return Err("display mutation requires lease ID and device fingerprint");
+    }
+    let lease_id = fields[0]["lease=".len()..].parse()
+        .map_err(|_| "display lease ID is invalid")?;
+    let fingerprint = fields[1]["fingerprint=".len()..].to_ascii_lowercase();
+    if fingerprint.len() != 64 || !fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("display lease fingerprint must be 64 hexadecimal characters");
+    }
+    Ok((lease_id, fingerprint))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,8 +148,34 @@ mod tests {
         let nonce = "ab".repeat(32);
         assert_eq!(Request::parse(format!("BRIDGE_DISPLAY/1 CHALLENGE_RESPONSE {nonce}").as_bytes()), Ok(Request::ChallengeResponse(nonce)));
         assert!(Request::parse(b"BRIDGE_DISPLAY/1 CHALLENGE_RESPONSE invalid").is_err());
-        assert_eq!(Request::parse(b"BRIDGE_DISPLAY/1 CONNECT"), Ok(Request::Connect));
-        assert_eq!(Request::parse(b"BRIDGE_DISPLAY/1 DISCONNECT"), Ok(Request::Disconnect));
+        let fingerprint = "ab".repeat(32);
+        let public_key = "cd".repeat(32);
+        let session = uuid::Uuid::new_v4();
+        let challenge = format!("BRIDGE_DISPLAY/1 CHALLENGE_ATTESTATION session={session} fingerprint={fingerprint} public_key={public_key}");
+        assert!(matches!(Request::parse(challenge.as_bytes()), Ok(Request::AttestationChallenge { .. })));
+        let signature = "ef".repeat(64);
+        let response = format!("BRIDGE_DISPLAY/1 ATTESTATION_RESPONSE nonce={} session={session} fingerprint={fingerprint} signature={signature}", "01".repeat(32));
+        assert!(matches!(Request::parse(response.as_bytes()), Ok(Request::AttestationResponse { .. })));
+        assert!(Request::parse(b"BRIDGE_DISPLAY/1 ATTESTATION_RESPONSE nonce=bad").is_err());
+        let lease_id = uuid::Uuid::new_v4();
+        let renew_command = format!("BRIDGE_DISPLAY/1 RENEW lease={lease_id} fingerprint={fingerprint}");
+        assert_eq!(
+            Request::parse(renew_command.as_bytes()),
+            Ok(Request::Renew { lease_id, device_fingerprint: fingerprint.clone() })
+        );
+        assert!(Request::parse(b"BRIDGE_DISPLAY/1 RENEW").is_err());
+        let lease_command = format!("BRIDGE_DISPLAY/1 CONNECT lease={lease_id} fingerprint={fingerprint}");
+        assert_eq!(
+            Request::parse(lease_command.as_bytes()),
+            Ok(Request::Connect { lease_id, device_fingerprint: fingerprint.clone() })
+        );
+        let disconnect_command = format!("BRIDGE_DISPLAY/1 DISCONNECT lease={lease_id} fingerprint={fingerprint}");
+        assert_eq!(
+            Request::parse(disconnect_command.as_bytes()),
+            Ok(Request::Disconnect { lease_id, device_fingerprint: fingerprint.clone() })
+        );
+        assert!(Request::parse(b"BRIDGE_DISPLAY/1 CONNECT").is_err());
+        assert!(Request::parse(format!("BRIDGE_DISPLAY/1 DISCONNECT lease={lease_id} fingerprint=bad").as_bytes()).is_err());
         assert!(Request::parse(b"CONNECT").is_err());
         assert!(Request::parse(b"BRIDGE_DISPLAY/2 QUERY").is_err());
     }
@@ -175,6 +279,21 @@ impl SessionLeaseRegistry {
         Ok(renewed)
     }
 
+    /// Validate the complete lease identity immediately before a privileged driver operation.
+    pub fn authorize_operation(
+        &mut self,
+        lease_id: uuid::Uuid,
+        process_id: u32,
+        remote_fingerprint: &str,
+    ) -> Result<(), &'static str> {
+        let lease = self.active_for(process_id, remote_fingerprint)
+            .ok_or("no active display lease for this process and device")?;
+        if lease.id != lease_id {
+            return Err("display lease ID does not match the active lease");
+        }
+        Ok(())
+    }
+
     /// Revoke only when the exact process that owns the lease is being removed.
     pub fn revoke_process(&mut self, process_id: u32) -> bool {
         if self.active.as_ref().is_some_and(|lease| lease.process_id == process_id) {
@@ -258,6 +377,18 @@ mod lease_tests {
         assert!(registry.renew_after_authentication(uuid::Uuid::new_v4(), 42, FINGERPRINT, MAX_SESSION_LEASE).is_err());
         assert!(registry.renew_after_authentication(lease.id, 43, FINGERPRINT, MAX_SESSION_LEASE).is_err());
         assert!(registry.renew_after_authentication(lease.id, 42, FINGERPRINT, MAX_SESSION_LEASE).is_ok());
+    }
+
+    #[test]
+    fn operation_authorization_requires_exact_lease_process_and_peer() {
+        let mut registry = SessionLeaseRegistry::default();
+        let lease = registry.issue_after_authentication(42, FINGERPRINT, MAX_SESSION_LEASE).unwrap();
+        assert!(registry.authorize_operation(lease.id, 42, FINGERPRINT).is_ok());
+        assert!(registry.authorize_operation(uuid::Uuid::new_v4(), 42, FINGERPRINT).is_err());
+        assert!(registry.authorize_operation(lease.id, 43, FINGERPRINT).is_err());
+        assert!(registry.authorize_operation(lease.id, 42, &"f".repeat(64)).is_err());
+        registry.revoke(lease.id);
+        assert!(registry.authorize_operation(lease.id, 42, FINGERPRINT).is_err());
     }
 
     #[test]
