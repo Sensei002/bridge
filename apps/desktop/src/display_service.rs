@@ -240,7 +240,7 @@ fn request(command: &str) -> Result<String, String> {
 
 fn request_bytes(command: &str, response_capacity: usize) -> Result<Vec<u8>, String> {
     if command.is_empty() || command.len() > 384 || !command.is_ascii()
-        || command.contains('\\r') || command.contains('\\n')
+        || command.contains('\r') || command.contains('\n')
     {
         return Err("invalid display-service command".into());
     }

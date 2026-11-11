@@ -445,7 +445,7 @@ fn handle_request(
                 leases.authorize_operation(lease_id, caller.process_id, &device_fingerprint)
                     .map_err(|message| io::Error::new(io::ErrorKind::PermissionDenied, message))?;
                 driver::read_latest_frame().map(|frame| frame.into_packet())
-            })
+            }),
     };
     result.unwrap_or_else(|error| format!("BRIDGE_DISPLAY/1 ERROR {error}\n").into_bytes())
 }
