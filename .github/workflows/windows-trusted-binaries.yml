@@ -1,0 +1,139 @@
+name: Windows Trusted Binaries
+
+on:
+  pull_request:
+    paths:
+      - "apps/desktop/**"
+      - "apps/windows-service/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/windows-trusted-binaries.yml"
+  push:
+    branches: [development, stable]
+    paths:
+      - "apps/desktop/**"
+      - "apps/windows-service/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/windows-trusted-binaries.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bridge-windows-trusted-binaries-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build desktop and display service
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+      - name: Build native desktop app
+        run: cargo build --release --manifest-path apps/desktop/Cargo.toml
+      - name: Test and build Windows display service
+        run: |
+          cargo test -p bridge-display-service
+          cargo build --release --manifest-path apps/windows-service/Cargo.toml --features service-bin --target x86_64-pc-windows-msvc
+      - name: Stage unsigned binaries
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path signed-binaries | Out-Null
+          Copy-Item target/release/bridge-desktop.exe signed-binaries/
+          Copy-Item target/x86_64-pc-windows-msvc/release/bridge-display-service.exe signed-binaries/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bridge-windows-unsigned-binaries
+          path: signed-binaries/*
+          if-no-files-found: error
+          retention-days: 3
+
+  sign:
+    name: Sign and verify Bridge Windows binaries
+    needs: build
+    if: (github.event_name == 'push' && (github.ref == 'refs/heads/development' || github.ref == 'refs/heads/stable')) || (github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/development' || github.ref == 'refs/heads/stable'))
+    runs-on: windows-latest
+    environment:
+      name: bridge-driver-signing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: bridge-windows-unsigned-binaries
+          path: signed-binaries
+      - name: Sign, verify, and export publisher identity
+        shell: pwsh
+        env:
+          BRIDGE_DRIVER_SIGNING_PFX_BASE64: ${{ secrets.BRIDGE_DRIVER_SIGNING_PFX_BASE64 }}
+          BRIDGE_DRIVER_SIGNING_PFX_PASSWORD: ${{ secrets.BRIDGE_DRIVER_SIGNING_PFX_PASSWORD }}
+          BRIDGE_DRIVER_CERT_THUMBPRINT: ${{ vars.BRIDGE_DRIVER_CERT_THUMBPRINT }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          foreach ($name in @("BRIDGE_DRIVER_SIGNING_PFX_BASE64", "BRIDGE_DRIVER_SIGNING_PFX_PASSWORD", "BRIDGE_DRIVER_CERT_THUMBPRINT")) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+              throw "Required signing configuration is missing: $name"
+            }
+          }
+
+          $pfxPath = Join-Path $env:RUNNER_TEMP "bridge-code-signing.pfx"
+          $cerPath = Join-Path $PWD "signed-binaries\Bridge-Desktop-CodeSigning.cer"
+          $password = ConvertTo-SecureString $env:BRIDGE_DRIVER_SIGNING_PFX_PASSWORD -AsPlainText -Force
+          $pfxBytes = [Convert]::FromBase64String($env:BRIDGE_DRIVER_SIGNING_PFX_BASE64)
+          [IO.File]::WriteAllBytes($pfxPath, $pfxBytes)
+          $imported = $null
+          $rootThumbprint = $null
+          try {
+            $imported = Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation "Cert:\CurrentUser\My" -Password $password
+            $certificate = @($imported) | Where-Object { $_.HasPrivateKey } | Select-Object -First 1
+            if (-not $certificate) { throw "Signing PFX contains no accessible private key." }
+            if ($certificate.Thumbprint.ToUpperInvariant() -ne ($env:BRIDGE_DRIVER_CERT_THUMBPRINT -replace "\s", "").ToUpperInvariant()) {
+              throw "Signing certificate thumbprint does not match the protected environment variable."
+            }
+            $codeSigningOid = "1.3.6.1.5.5.7.3.3"
+            $eku = $certificate.Extensions | Where-Object { $_ -is [Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension] } | Select-Object -First 1
+            if (-not $eku -or -not ($eku.EnhancedKeyUsages | Where-Object { $_.Value -eq $codeSigningOid })) {
+              throw "The signing certificate does not contain the Code Signing EKU."
+            }
+            Export-Certificate -Cert $certificate -FilePath $cerPath -Type CERT | Out-Null
+            Import-Certificate -FilePath $cerPath -CertStoreLocation "Cert:\CurrentUser\Root" | Out-Null
+            $rootThumbprint = $certificate.Thumbprint
+
+            $kitRoots = @("${env:ProgramFiles(x86)}\Windows Kits\10\bin", "${env:ProgramFiles}\Windows Kits\10\bin") | Where-Object { $_ -and (Test-Path $_) }
+            $signtool = Get-ChildItem -Path $kitRoots -Recurse -File -Filter "signtool.exe" -ErrorAction SilentlyContinue |
+              Where-Object { $_.FullName -match "\\x64\\signtool\.exe$" } | Sort-Object FullName -Descending | Select-Object -First 1
+            if (-not $signtool) { throw "Windows SDK SignTool was not found." }
+
+            foreach ($name in @("bridge-desktop.exe", "bridge-display-service.exe")) {
+              $path = Join-Path "signed-binaries" $name
+              & $signtool.FullName sign /v /fd SHA256 /f $pfxPath /p $env:BRIDGE_DRIVER_SIGNING_PFX_PASSWORD /d "Bridge Project $name" $path
+              if ($LASTEXITCODE -ne 0) { throw "Signing failed for $name (exit $LASTEXITCODE)." }
+              & $signtool.FullName verify /pa /v $path
+              if ($LASTEXITCODE -ne 0) { throw "Authenticode verification failed for $name." }
+              $signature = Get-AuthenticodeSignature -LiteralPath $path
+              if ($signature.Status -ne "Valid" -or -not $signature.SignerCertificate -or $signature.SignerCertificate.Thumbprint -ne $certificate.Thumbprint) {
+                throw "Signed binary did not verify against the configured Bridge publisher: $name"
+              }
+            }
+
+            $publisherSha256 = $certificate.GetCertHashString([Security.Cryptography.HashAlgorithmName]::SHA256).ToUpperInvariant()
+            Set-Content -LiteralPath (Join-Path "signed-binaries" "BRIDGE_DESKTOP_SIGNER_SHA256.txt") -Value $publisherSha256 -Encoding ascii
+            Write-Host "Verified Bridge publisher SHA-256: $publisherSha256"
+          }
+          finally {
+            if ($rootThumbprint) { Remove-Item -Path "Cert:\CurrentUser\Root\$rootThumbprint" -ErrorAction SilentlyContinue }
+            if ($imported) { foreach ($cert in @($imported)) { Remove-Item -Path "Cert:\CurrentUser\My\$($cert.Thumbprint)" -ErrorAction SilentlyContinue } }
+            if (Test-Path $pfxPath) { Remove-Item $pfxPath -Force }
+            Remove-Variable pfxBytes -ErrorAction SilentlyContinue
+            Remove-Variable password -ErrorAction SilentlyContinue
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bridge-windows-signed-test-binaries
+          path: signed-binaries/*
+          if-no-files-found: error
+          retention-days: 14

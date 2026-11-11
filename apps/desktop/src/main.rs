@@ -1,5 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod diagnostics;
+
+#[cfg(windows)]
+mod media_foundation;
 #[cfg(windows)]
 mod display_service;
 #[cfg(windows)]
@@ -17,7 +21,7 @@ use bridge_core::trust::{SasConfirmation, TrustStore};
 #[cfg(windows)]
 use bridge_protocol::{DeviceDescriptor, DeviceId, Platform, PROTOCOL_VERSION};
 #[cfg(windows)]
-use bridge_transfer::{decode_packet, encode_packet, offer_for_file, FileOffer, IncomingFile, OutgoingFile, TransferControl, TransferPacket};
+use bridge_transfer::{decode_packet, encode_packet, fragment_display_frame, fragment_encoded_video_frame, offer_for_file, DisplayFrame, EncodedVideoFrame, DisplayInputAction, DisplayInputEvent, FileOffer, IncomingFile, OutgoingFile, TransferControl, TransferPacket};
 #[cfg(windows)]
 use std::net::TcpListener;
 #[cfg(windows)]
@@ -26,7 +30,9 @@ use std::path::PathBuf;
 use uuid::Uuid;
 use std::sync::Arc;
 #[cfg(windows)]
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
+#[cfg(windows)]
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver};
 #[cfg(windows)]
 use std::sync::mpsc::Sender;
@@ -56,6 +62,8 @@ const HEARTBEAT_PONG: &[u8] = b"\0BRIDGE_HEARTBEAT_PONG_V1";
 const CLIPBOARD_PACKET_TAG: u8 = 0x03;
 #[cfg(windows)]
 const MAX_CLIPBOARD_TEXT_BYTES: usize = 16 * 1024;
+#[cfg(windows)]
+const VIDEO_KEYFRAME_REQUEST_TAG: u8 = 0x07;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Page { Overview, Devices, Transfers, Clipboard, Tools, Settings }
@@ -84,6 +92,29 @@ impl Page {
 }
 
 #[cfg(windows)]
+fn validate_peer_attestation_descriptor(descriptor: &DeviceDescriptor) -> Result<(), String> {
+    if descriptor.platform == Platform::Android {
+        match descriptor.attestation_public_key.as_deref() {
+            Some(key) if key.len() == 64 && key.bytes().all(|byte| byte.is_ascii_hexdigit()) => Ok(()),
+            _ => Err("Android peer did not provide a valid attestation public key".into()),
+        }
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn decode_attestation_hex(value: &str, expected_bytes: usize) -> Result<Vec<u8>, String> {
+    if value.len() != expected_bytes * 2 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(format!("attestation field must be {} hexadecimal characters", expected_bytes * 2));
+    }
+    (0..value.len()).step_by(2)
+        .map(|index| u8::from_str_radix(&value[index..index + 2], 16)
+            .map_err(|error| error.to_string()))
+        .collect()
+}
+
+#[cfg(windows)]
 struct PendingApproval {
     connection: NoiseConnection,
     descriptor: DeviceDescriptor,
@@ -93,12 +124,33 @@ struct PendingApproval {
 }
 
 #[cfg(windows)]
+struct AndroidAttestationResponse {
+    request_id: Uuid,
+    session_id: Uuid,
+    nonce: String,
+    device_fingerprint: String,
+    signature: String,
+}
+
+#[cfg(windows)]
+struct VerifiedAndroidAttestation {
+    nonce: String,
+    session_id: Uuid,
+    device_fingerprint: String,
+    signature: String,
+}
+
+#[cfg(windows)]
 struct DesktopSession {
     connection: Arc<std::sync::Mutex<NoiseConnection>>,
     incoming: std::sync::Mutex<Receiver<Vec<u8>>>,
     incoming_offers: std::sync::Mutex<Receiver<FileOffer>>,
     clipboard_incoming: std::sync::Mutex<Receiver<String>>,
-    challenge_responses: std::sync::Mutex<Receiver<(Uuid, String)>>,
+    challenge_responses: std::sync::Mutex<Receiver<AndroidAttestationResponse>>,
+    display_inputs: std::sync::Mutex<Receiver<DisplayInputEvent>>,
+    video_keyframe_requested: Arc<AtomicBool>,
+    session_id: Uuid,
+    attestation_public_key: Option<String>,
     stop: Arc<std::sync::atomic::AtomicBool>,
     alive: Arc<std::sync::atomic::AtomicBool>,
     pub remote_fingerprint: String,
@@ -106,10 +158,11 @@ struct DesktopSession {
 
 #[cfg(windows)]
 impl DesktopSession {
-    fn start(connection: NoiseConnection) -> Result<Arc<Self>, String> {
+    fn start(connection: NoiseConnection, attestation_public_key: Option<String>) -> Result<Arc<Self>, String> {
         let reader_stream = connection.stream.try_clone().map_err(|error| error.to_string())?;
         reader_stream.set_read_timeout(Some(Duration::from_secs(15))).map_err(|error| error.to_string())?;
         let remote_fingerprint = connection.remote_fingerprint.clone();
+        let session_id = Uuid::new_v4();
         let connection = Arc::new(std::sync::Mutex::new(connection));
         let reader_connection = Arc::clone(&connection);
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -120,6 +173,9 @@ impl DesktopSession {
         let (offer_sender, incoming_offers) = mpsc::channel();
         let (clipboard_sender, clipboard_incoming) = mpsc::sync_channel(4);
         let (challenge_sender, challenge_responses) = mpsc::sync_channel(8);
+        let (display_input_sender, display_inputs) = mpsc::sync_channel(256);
+        let video_keyframe_requested = Arc::new(AtomicBool::new(false));
+        let reader_video_keyframe_requested = Arc::clone(&video_keyframe_requested);
         let reader_connection_for_thread = Arc::clone(&reader_connection);
         thread::Builder::new()
             .name("bridge-desktop-session-reader".into())
@@ -154,6 +210,15 @@ impl DesktopSession {
                         continue;
                     }
                     if plaintext == HEARTBEAT_PONG { continue; }
+                    if plaintext.len() == 9 && plaintext[0] == VIDEO_KEYFRAME_REQUEST_TAG {
+                        // The request travels only inside the authenticated Noise session.
+                        // Its sequence is diagnostic; a new encoder instance starts a fresh GOP.
+                        let _last_sequence = u64::from_be_bytes(
+                            plaintext[1..9].try_into().expect("validated keyframe request length")
+                        );
+                        reader_video_keyframe_requested.store(true, Ordering::Release);
+                        continue;
+                    }
                     if plaintext.first() == Some(&CLIPBOARD_PACKET_TAG) {
                         let text = &plaintext[1..];
                         if text.len() <= MAX_CLIPBOARD_TEXT_BYTES {
@@ -167,8 +232,22 @@ impl DesktopSession {
                         Ok(TransferPacket::Control(TransferControl::FileOffer { offer })) => {
                             if offer_sender.send(offer).is_err() { break; }
                         }
-                        Ok(TransferPacket::Control(TransferControl::DisplayChallengeResponse { request_id, nonce })) => {
-                            if let Err(mpsc::TrySendError::Disconnected(_)) = challenge_sender.try_send((request_id, nonce)) { break; }
+                        Ok(TransferPacket::Control(TransferControl::DisplayChallengeResponse {
+                            request_id, session_id, nonce, device_fingerprint, signature,
+                        })) => {
+                            let response = AndroidAttestationResponse {
+                                request_id, session_id, nonce, device_fingerprint, signature,
+                            };
+                            if let Err(mpsc::TrySendError::Disconnected(_)) = challenge_sender.try_send(response) { break; }
+                        }
+                        Ok(TransferPacket::DisplayInput(event)) => {
+                            // Preserve terminal releases even when a burst fills the bounded queue.
+                            let terminal = matches!(event.action, DisplayInputAction::Up | DisplayInputAction::Cancel);
+                            if terminal {
+                                if display_input_sender.send(event).is_err() { break; }
+                            } else {
+                                let _ = display_input_sender.try_send(event);
+                            }
                         }
                         _ => {
                             if sender.send(plaintext).is_err() { break; }
@@ -215,11 +294,23 @@ impl DesktopSession {
                 }
             })
             .map_err(|error| error.to_string())?;
-        Ok(Arc::new(Self { connection, incoming: std::sync::Mutex::new(incoming), incoming_offers: std::sync::Mutex::new(incoming_offers), clipboard_incoming: std::sync::Mutex::new(clipboard_incoming), challenge_responses: std::sync::Mutex::new(challenge_responses), stop, alive, remote_fingerprint }))
+        Ok(Arc::new(Self { connection, incoming: std::sync::Mutex::new(incoming), incoming_offers: std::sync::Mutex::new(incoming_offers), clipboard_incoming: std::sync::Mutex::new(clipboard_incoming), challenge_responses: std::sync::Mutex::new(challenge_responses), display_inputs: std::sync::Mutex::new(display_inputs), video_keyframe_requested, session_id, attestation_public_key, stop, alive, remote_fingerprint }))
     }
 
     fn is_alive(&self) -> bool {
         self.alive.load(Ordering::Acquire)
+    }
+
+    fn take_video_keyframe_request(&self) -> bool {
+        self.video_keyframe_requested.swap(false, Ordering::AcqRel)
+    }
+
+    fn shutdown(&self) {
+        self.alive.store(false, Ordering::Release);
+        self.stop.store(true, Ordering::Release);
+        if let Ok(connection) = self.connection.lock() {
+            let _ = connection.stream.shutdown(std::net::Shutdown::Both);
+        }
     }
 
     fn send(&self, payload: &[u8]) -> Result<(), String> {
@@ -240,10 +331,10 @@ impl DesktopSession {
         result
     }
 
-    /// Forward a Windows-service challenge through this live authenticated Noise session.
-    /// The Android peer echoes it inside the encrypted channel; this method does not
-    /// itself authorize a display lease or enable any driver operation.
-    fn relay_service_challenge(&self, nonce: &str, timeout: Duration) -> Result<(), String> {
+    /// Request a signed Android proof over this live authenticated Noise session.
+    /// This validates the response context and shape only; the Windows service must
+    /// independently verify the Ed25519 signature against its pinned pairing key.
+    fn relay_service_challenge(&self, nonce: &str, timeout: Duration) -> Result<VerifiedAndroidAttestation, String> {
         if nonce.len() != 64 || !nonce.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err("display-service challenge must be 64 hexadecimal characters".into());
         }
@@ -252,7 +343,11 @@ impl DesktopSession {
         }
         let request_id = Uuid::new_v4();
         let packet = encode_packet(&TransferPacket::Control(
-            TransferControl::DisplayChallengeRequest { request_id, nonce: nonce.to_ascii_lowercase() },
+            TransferControl::DisplayChallengeRequest {
+                request_id,
+                session_id: self.session_id,
+                nonce: nonce.to_ascii_lowercase(),
+            },
         )).map_err(|error| error.to_string())?;
         self.send(&packet)?;
         let deadline = Instant::now() + timeout;
@@ -261,16 +356,35 @@ impl DesktopSession {
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                return Err("Android challenge response timed out".into());
+                return Err("Android signed attestation response timed out".into());
             }
             let response = responses.recv_timeout(remaining)
-                .map_err(|error| format!("Android challenge response unavailable: {error}"))?;
-            // Ignore delayed responses from an earlier timed-out request.
-            if response.0 != request_id { continue; }
-            if !response.1.eq_ignore_ascii_case(nonce) {
-                return Err("Android challenge response did not match the active request".into());
-            }
-            return Ok(());
+                .map_err(|error| format!("Android signed attestation unavailable: {error}"))?;
+            if response.request_id != request_id { continue; }
+            let pinned_key = self.attestation_public_key.as_deref()
+                .ok_or_else(|| "trusted Android pairing record has no pinned attestation key".to_string())?;
+            let public_key = decode_attestation_hex(pinned_key, 32)?;
+            let proof_nonce = decode_attestation_hex(&response.nonce, 32)?;
+            let signature = decode_attestation_hex(&response.signature, 64)?;
+            let proof = bridge_security::peer_attestation::AndroidPeerAttestation {
+                nonce: proof_nonce.as_slice().try_into().map_err(|_| "invalid attestation nonce length")?,
+                session_id: response.session_id,
+                device_fingerprint: response.device_fingerprint.clone(),
+                signature: signature.as_slice().try_into().map_err(|_| "invalid attestation signature length")?,
+            };
+            bridge_security::peer_attestation::verify_android_peer_attestation(
+                &public_key,
+                &proof,
+                &decode_attestation_hex(nonce, 32)?,
+                self.session_id,
+                &self.remote_fingerprint,
+            ).map_err(|error| format!("Android attestation signature verification failed: {error}"))?;
+            return Ok(VerifiedAndroidAttestation {
+                nonce: response.nonce,
+                session_id: response.session_id,
+                device_fingerprint: response.device_fingerprint,
+                signature: response.signature,
+            });
         }
     }
 
@@ -294,15 +408,16 @@ impl DesktopSession {
     fn try_receive_clipboard_text(&self) -> Option<String> {
         self.clipboard_incoming.lock().ok()?.try_recv().ok()
     }
+
+    fn try_receive_display_input(&self) -> Option<DisplayInputEvent> {
+        self.display_inputs.lock().ok()?.try_recv().ok()
+    }
 }
 
 #[cfg(windows)]
 impl Drop for DesktopSession {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        if let Ok(connection) = self.connection.lock() {
-            let _ = connection.stream.shutdown(std::net::Shutdown::Both);
-        }
+        self.shutdown();
     }
 }
 
@@ -318,6 +433,560 @@ enum TransferUiEvent {
     Progress { sent: u64, total: u64, speed_bytes_per_sec: f64 },
     Complete(String),
     Failed(String),
+}
+
+#[cfg(windows)]
+enum DisplayLeaseEvent {
+    Status { session_key: String, message: String },
+    OperationStatus { session_key: String, message: String },
+    DriverStatus { session_key: String, message: String },
+}
+
+#[cfg(windows)]
+fn start_display_lease_lifecycle(
+    session: Arc<DesktopSession>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    lease_state: Arc<Mutex<Option<(String, display_service::ServiceLease)>>>,
+    events: Sender<DisplayLeaseEvent>,
+) -> Result<(), String> {
+    thread::Builder::new()
+        .name("bridge-display-lease-lifecycle".into())
+        .spawn(move || {
+            let session_key = format!("{}:{}", session.remote_fingerprint, session.session_id);
+            let peer = session.remote_fingerprint
+                .get(..8)
+                .unwrap_or(&session.remote_fingerprint)
+                .to_owned();
+            let result = (|| -> Result<display_service::ServiceLease, String> {
+                if stop.load(Ordering::Acquire) || !session.is_alive() {
+                    return Err("authenticated Android session ended before attestation".into());
+                }
+                let pinned_key = session.attestation_public_key.as_deref()
+                    .ok_or_else(|| "trusted Android pairing record has no pinned attestation key".to_string())?;
+                let nonce = display_service::issue_attestation_challenge(
+                    session.session_id,
+                    &session.remote_fingerprint,
+                    pinned_key,
+                )?;
+                if stop.load(Ordering::Acquire) || !session.is_alive() {
+                    return Err("authenticated Android session ended during attestation".into());
+                }
+                let proof = session.relay_service_challenge(&nonce, Duration::from_secs(8))?;
+                if stop.load(Ordering::Acquire) || !session.is_alive() {
+                    return Err("authenticated Android session ended before lease issuance".into());
+                }
+                display_service::submit_attestation_response(
+                    &proof.nonce,
+                    proof.session_id,
+                    &proof.device_fingerprint,
+                    &proof.signature,
+                )
+            })();
+
+            let mut lease = match result {
+                Ok(lease) => lease,
+                Err(error) => {
+                    let message = if stop.load(Ordering::Acquire) || !session.is_alive() {
+                        format!("Second screen lease stopped for Android device {peer}.")
+                    } else {
+                        format!("Second screen attestation failed for Android device {peer}: {error}")
+                    };
+                    let _ = events.send(DisplayLeaseEvent::Status {
+                        session_key: session_key.clone(),
+                        message,
+                    });
+                    return;
+                }
+            };
+
+            if let Ok(mut active) = lease_state.lock() {
+                *active = Some((session_key.clone(), lease.clone()));
+            }
+            let _ = events.send(DisplayLeaseEvent::Status {
+                session_key: session_key.clone(),
+                message: format!("Display lease active for Android device {peer}; renewing every 5 seconds."),
+            });
+
+            loop {
+                // Poll cancellation in short intervals so replacing or disconnecting
+                // a peer never leaves a detached renewal worker sleeping for long.
+                for _ in 0..50 {
+                    if stop.load(Ordering::Acquire) || !session.is_alive() {
+                        if let Ok(mut active) = lease_state.lock() {
+                            if active.as_ref().is_some_and(|(key, _)| key == &session_key) {
+                                *active = None;
+                            }
+                        }
+                        let _ = events.send(DisplayLeaseEvent::Status {
+                            session_key: session_key.clone(),
+                            message: format!("Display lease renewal stopped for Android device {peer}; the short-lived lease will expire automatically."),
+                        });
+                        return;
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                }
+
+                match display_service::renew_with_lease(&lease, &session.remote_fingerprint) {
+                    Ok(renewed) if renewed.id == lease.id => {
+                        lease = renewed;
+                        if let Ok(mut active) = lease_state.lock() {
+                            *active = Some((session_key.clone(), lease.clone()));
+                        }
+                        let _ = events.send(DisplayLeaseEvent::Status {
+                            session_key: session_key.clone(),
+                            message: format!("Display lease active and renewed for Android device {peer}."),
+                        });
+                    }
+                    Ok(_) => {
+                        if let Ok(mut active) = lease_state.lock() {
+                            if active.as_ref().is_some_and(|(key, _)| key == &session_key) { *active = None; }
+                        }
+                        let _ = events.send(DisplayLeaseEvent::Status {
+                            session_key: session_key.clone(),
+                            message: format!("Display lease identity changed for Android device {peer}; renewal stopped."),
+                        });
+                        return;
+                    }
+                    Err(error) => {
+                        if let Ok(mut active) = lease_state.lock() {
+                            if active.as_ref().is_some_and(|(key, _)| key == &session_key) { *active = None; }
+                        }
+                        let _ = events.send(DisplayLeaseEvent::Status {
+                            session_key: session_key.clone(),
+                            message: format!("Display lease renewal failed for Android device {peer}: {error}. A fresh attestation is required."),
+                        });
+                        return;
+                    }
+                }
+            }
+        })
+        .map(|_| ())
+        .map_err(|error| format!("could not start display lease lifecycle worker: {error}"))
+}
+
+#[cfg(windows)]
+/// Return whether an Annex-B H.264 access unit contains an IDR slice.
+/// None means the encoder output did not contain a recognizable Annex-B NAL unit.
+fn h264_annex_b_keyframe(bitstream: &[u8]) -> Option<bool> {
+    fn start_code_len(bytes: &[u8], index: usize) -> Option<usize> {
+        if bytes.get(index..index + 4) == Some(&[0, 0, 0, 1]) {
+            Some(4)
+        } else if bytes.get(index..index + 3) == Some(&[0, 0, 1]) {
+            Some(3)
+        } else {
+            None
+        }
+    }
+
+    let mut index = 0;
+    let mut found_nal = false;
+    let mut keyframe = false;
+    while index < bitstream.len() {
+        let Some(prefix_len) = start_code_len(bitstream, index) else {
+            index += 1;
+            continue;
+        };
+        let nal_start = index + prefix_len;
+        if nal_start >= bitstream.len() {
+            return None;
+        }
+        let nal_type = bitstream[nal_start] & 0x1f;
+        if nal_type == 0 || nal_type > 23 {
+            return None;
+        }
+        found_nal = true;
+        keyframe |= nal_type == 5;
+        index = nal_start + 1;
+    }
+    found_nal.then_some(keyframe)
+}
+
+#[cfg(all(test, windows))]
+mod h264_access_unit_tests {
+    use super::h264_annex_b_keyframe;
+
+    #[test]
+    fn recognizes_four_byte_start_code_and_idr_slice() {
+        assert_eq!(h264_annex_b_keyframe(&[0, 0, 0, 1, 0x65, 0xaa]), Some(true));
+    }
+
+    #[test]
+    fn recognizes_three_byte_start_code_and_non_idr_slice() {
+        assert_eq!(h264_annex_b_keyframe(&[0, 0, 1, 0x41, 0xbb]), Some(false));
+    }
+
+    #[test]
+    fn recognizes_sps_pps_and_idr_in_one_access_unit() {
+        let access_unit = [
+            0, 0, 0, 1, 0x67, 0x42, 0,
+            0, 0, 1, 0x68, 0xce,
+            0, 0, 0, 1, 0x65, 0x88,
+        ];
+        assert_eq!(h264_annex_b_keyframe(&access_unit), Some(true));
+    }
+
+    #[test]
+    fn rejects_unrecognized_or_truncated_annex_b_output() {
+        assert_eq!(h264_annex_b_keyframe(&[0x65, 0xaa, 0xbb]), None);
+        assert_eq!(h264_annex_b_keyframe(&[0, 0, 0, 1]), None);
+    }
+}
+
+#[cfg(windows)]
+fn start_display_frame_stream(
+    session: Arc<DesktopSession>,
+    session_key: String,
+    lease: display_service::ServiceLease,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    events: Sender<DisplayLeaseEvent>,
+) -> Result<(), String> {
+    // Keep Media Foundation alive for the full frame-worker lifetime.
+    // The persistent encoder itself is created inside the worker's COM MTA.
+    let media_foundation = match media_foundation::MediaFoundationRuntime::start() {
+        Ok(runtime) => Some(runtime),
+        Err(error) => {
+            let _ = events.send(DisplayLeaseEvent::Status {
+                session_key: session_key.clone(),
+                message: format!("{error}. Continuing with BGRA fallback."),
+            });
+            None
+        }
+    };
+    thread::Builder::new()
+        .name("bridge-display-frame-stream".into())
+        .spawn(move || {
+            let _media_foundation = media_foundation;
+            let com_apartment = media_foundation::ComApartment::start();
+            if let Err(error) = &com_apartment {
+                let _ = events.send(DisplayLeaseEvent::Status {
+                    session_key: session_key.clone(),
+                    message: format!("{error}. H.264 encoder unavailable; BGRA remains active."),
+                });
+            }
+            let _com_apartment = com_apartment;
+            // Create the encoder only after the first real frame reveals the active
+            // virtual-display dimensions. Recreate it on rotation or recovery requests.
+            let mut persistent_encoder: Option<media_foundation::PersistentH264Encoder> = None;
+            let mut encoder_dimensions: Option<(u32, u32)> = None;
+            let mut encoder_unavailable = false;
+            let mut encoder_frames_reported = 0_u64;
+            let mut h264_sequence = 0_u64;
+            let mut h264_samples_sent = 0_u64;
+            let mut last_sequence = 0_u64;
+            let mut announced = false;
+            let mut stats_window_started = Instant::now();
+            let mut frames_sent_window = 0_u64;
+            let mut bytes_sent_window = 0_u64;
+            let mut superseded_frames_window = 0_u64;
+            let mut send_duration_window = Duration::ZERO;
+            while !stop.load(Ordering::Acquire) && session.is_alive() {
+                let started = Instant::now();
+                match display_service::read_frame_with_lease(&lease, &session.remote_fingerprint) {
+                    Ok(frame) if frame.sequence > last_sequence => {
+                        let superseded_frames = frame.sequence.saturating_sub(last_sequence).saturating_sub(1);
+                        let display_frame = DisplayFrame {
+                            sequence: frame.sequence,
+                            width: frame.width,
+                            height: frame.height,
+                            stride: frame.stride,
+                            timestamp_ns: frame.timestamp_ns,
+                            pixels: frame.pixels,
+                        };
+                        let keyframe_requested = session.take_video_keyframe_request();
+                        let dimensions_changed = encoder_dimensions
+                            .is_some_and(|dimensions| dimensions != (display_frame.width, display_frame.height));
+                        if keyframe_requested || dimensions_changed {
+                            persistent_encoder = None;
+                            encoder_unavailable = false;
+                            let _ = events.send(DisplayLeaseEvent::Status {
+                                session_key: session_key.clone(),
+                                message: if keyframe_requested {
+                                    "Android requested H.264 recovery; restarting the encoder to begin a fresh GOP.".into()
+                                } else {
+                                    format!("Virtual display changed to {}×{}; reconfiguring H.264 encoder.", display_frame.width, display_frame.height)
+                                },
+                            });
+                        }
+                        if persistent_encoder.is_none() && !encoder_unavailable
+                            && _com_apartment.is_ok() && _media_foundation.is_some()
+                        {
+                            match media_foundation::PersistentH264Encoder::start(display_frame.width, display_frame.height) {
+                                Ok(encoder) => {
+                                    encoder_dimensions = Some((display_frame.width, display_frame.height));
+                                    let name = encoder.encoder_name().to_string();
+                                    let _ = events.send(DisplayLeaseEvent::Status {
+                                        session_key: session_key.clone(),
+                                        message: format!("Persistent H.264 encoder ready: {name} at {}×{}.", display_frame.width, display_frame.height),
+                                    });
+                                    persistent_encoder = Some(encoder);
+                                }
+                                Err(error) => {
+                                    encoder_dimensions = Some((display_frame.width, display_frame.height));
+                                    encoder_unavailable = true;
+                                    let _ = events.send(DisplayLeaseEvent::Status {
+                                        session_key: session_key.clone(),
+                                        message: format!("H.264 encoder unavailable for {}×{}: {error}. BGRA fallback remains active.", display_frame.width, display_frame.height),
+                                    });
+                                }
+                            }
+                        }
+                        let mut encoded_access_units = Vec::new();
+                        if let Some(encoder) = persistent_encoder.as_mut() {
+                            match bridge_transfer::bgra_to_nv12(&display_frame) {
+                                Ok(nv12) => match encoder.encode(&nv12) {
+                                    Ok(encoded) => {
+                                        encoder_frames_reported = encoder_frames_reported.saturating_add(1);
+                                        encoded_access_units = encoded.access_units;
+                                        if encoder_frames_reported == 1 || encoder_frames_reported % 120 == 0 {
+                                            let _ = events.send(DisplayLeaseEvent::Status {
+                                                session_key: session_key.clone(),
+                                                message: if encoded.buffered {
+                                                    format!("Persistent H.264 encoder accepted {} frame(s); output is currently buffered. BGRA remains the active stream.", encoder_frames_reported)
+                                                } else {
+                                                    format!("Persistent H.264 encoder processed {} frame(s) and emitted {} output sample(s). H.264 transport diagnostics are active; BGRA remains the display path.", encoder_frames_reported, encoded_access_units.len())
+                                                },
+                                            });
+                                        }
+                                    }
+                                    Err(error) => {
+                                        let _ = events.send(DisplayLeaseEvent::Status {
+                                            session_key: session_key.clone(),
+                                            message: format!("Persistent H.264 encoder stopped after {} frame(s): {error}. Falling back to BGRA.", encoder_frames_reported),
+                                        });
+                                        persistent_encoder = None;
+                                        encoder_unavailable = true;
+                                    }
+                                },
+                                Err(error) => {
+                                    let _ = events.send(DisplayLeaseEvent::Status {
+                                        session_key: session_key.clone(),
+                                        message: format!("Could not convert frame for persistent H.264 encoding: {error}. Falling back to BGRA."),
+                                    });
+                                    persistent_encoder = None;
+                                    encoder_unavailable = true;
+                                }
+                            }
+                        }
+                        // Send Annex-B access units over the existing authenticated Noise
+                        // session. Android MediaCodec renders H.264 while BGRA remains the
+                        // fallback if decoder configuration or playback is unavailable.
+                        for access_unit in encoded_access_units {
+                            let Some(keyframe) = h264_annex_b_keyframe(&access_unit.bytes) else {
+                                let _ = events.send(DisplayLeaseEvent::Status {
+                                    session_key: session_key.clone(),
+                                    message: "H.264 encoder output was not recognizable Annex-B; skipped encoded sample and kept BGRA active.".into(),
+                                });
+                                continue;
+                            };
+                            h264_sequence = h264_sequence.saturating_add(1);
+                            let encoded_frame = EncodedVideoFrame {
+                                sequence: h264_sequence,
+                                width: display_frame.width,
+                                height: display_frame.height,
+                                timestamp_ns: access_unit.timestamp_100ns.saturating_mul(100).max(1) as u64,
+                                keyframe,
+                                bitstream: access_unit.bytes,
+                            };
+                            match fragment_encoded_video_frame(&encoded_frame) {
+                                Ok(packets) => {
+                                    let mut sent_access_unit = true;
+                                    for packet in packets {
+                                        if stop.load(Ordering::Acquire) || !session.is_alive() {
+                                            sent_access_unit = false;
+                                            break;
+                                        }
+                                        if let Err(error) = session.send(&packet) {
+                                            let _ = events.send(DisplayLeaseEvent::Status {
+                                                session_key: session_key.clone(),
+                                                message: format!("Authenticated H.264 transport stopped: {error}."),
+                                            });
+                                            stop.store(true, Ordering::Release);
+                                            sent_access_unit = false;
+                                            break;
+                                        }
+                                    }
+                                    if sent_access_unit {
+                                        h264_samples_sent = h264_samples_sent.saturating_add(1);
+                                        if h264_samples_sent == 1 || h264_samples_sent % 120 == 0 {
+                                            let _ = events.send(DisplayLeaseEvent::Status {
+                                                session_key: session_key.clone(),
+                                                message: format!("Windows sent {h264_samples_sent} bounded H.264 access unit(s) to Android over the authenticated session. Android MediaCodec receives the encoded stream alongside the BGRA fallback."),
+                                            });
+                                        }
+                                    }
+                                }
+                                Err(error) => {
+                                    let _ = events.send(DisplayLeaseEvent::Status {
+                                        session_key: session_key.clone(),
+                                        message: format!("Skipped H.264 access unit that failed wire-protocol validation: {error}. BGRA remains active."),
+                                    });
+                                }
+                            }
+                        }
+
+                        let frame_bytes = display_frame.pixels.len() as u64;
+                        let send_started = Instant::now();
+                        match fragment_display_frame(&display_frame) {
+                            Ok(packets) => {
+                                let mut sent_all = true;
+                                for packet in packets {
+                                    if stop.load(Ordering::Acquire) || !session.is_alive() {
+                                        sent_all = false;
+                                        break;
+                                    }
+                                    if let Err(error) = session.send(&packet) {
+                                        let _ = events.send(DisplayLeaseEvent::Status {
+                                            session_key: session_key.clone(),
+                                            message: format!("Second screen stream stopped: {error}"),
+                                        });
+                                        stop.store(true, Ordering::Release);
+                                        sent_all = false;
+                                        break;
+                                    }
+                                }
+                                if sent_all {
+                                    last_sequence = display_frame.sequence;
+                                    frames_sent_window += 1;
+                                    bytes_sent_window = bytes_sent_window.saturating_add(frame_bytes);
+                                    superseded_frames_window = superseded_frames_window.saturating_add(superseded_frames);
+                                    send_duration_window += send_started.elapsed();
+                                    if !announced {
+                                        announced = true;
+                                        let _ = events.send(DisplayLeaseEvent::Status {
+                                            session_key: session_key.clone(),
+                                            message: format!(
+                                                "Second screen streaming frames to Android ({}×{}).",
+                                                display_frame.width, display_frame.height
+                                            ),
+                                        });
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                let _ = events.send(DisplayLeaseEvent::Status {
+                                    session_key: session_key.clone(),
+                                    message: format!("Could not encode second-screen frame: {error}"),
+                                });
+                                stop.store(true, Ordering::Release);
+                            }
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(_) => {
+                        // The capture callback can briefly have no complete frame while
+                        // the indirect display is starting or changing modes. Retry.
+                    }
+                }
+                let stats_elapsed = stats_window_started.elapsed();
+                if stats_elapsed >= Duration::from_secs(1) {
+                    if frames_sent_window > 0 {
+                        let seconds = stats_elapsed.as_secs_f64().max(0.001);
+                        let fps = frames_sent_window as f64 / seconds;
+                        let mbps = bytes_sent_window as f64 * 8.0 / seconds / 1_000_000.0;
+                        let average_send_ms = send_duration_window.as_secs_f64() * 1000.0
+                            / frames_sent_window as f64;
+                        let _ = events.send(DisplayLeaseEvent::Status {
+                            session_key: session_key.clone(),
+                            message: format!(
+                                "Windows sender: {fps:.1} FPS · {mbps:.1} Mbps raw · {superseded_frames_window} capture frames superseded · {average_send_ms:.1} ms/frame send time."
+                            ),
+                        });
+                    }
+                    stats_window_started = Instant::now();
+                    frames_sent_window = 0;
+                    bytes_sent_window = 0;
+                    superseded_frames_window = 0;
+                    send_duration_window = Duration::ZERO;
+                }
+                let elapsed = started.elapsed();
+                if elapsed < Duration::from_millis(33) {
+                    thread::sleep(Duration::from_millis(33) - elapsed);
+                }
+            }
+        })
+        .map(|_| ())
+        .map_err(|error| format!("could not start second-screen frame stream: {error}"))
+}
+
+
+#[cfg(windows)]
+fn start_display_status_query(
+    session_key: String,
+    events: Sender<DisplayLeaseEvent>,
+) -> Result<(), String> {
+    thread::Builder::new()
+        .name("bridge-display-status-query".into())
+        .spawn(move || {
+            let message = match display_service::query_status() {
+                Ok(status) => format!(
+                    "Driver: {} · {} supported display modes.",
+                    if status.connected { "virtual monitor connected" } else { "virtual monitor disconnected" },
+                    status.supported_mode_count,
+                ),
+                Err(error) => format!("Driver status unavailable: {error}"),
+            };
+            let _ = events.send(DisplayLeaseEvent::DriverStatus { session_key, message });
+        })
+        .map(|_| ())
+        .map_err(|error| format!("could not start display status query: {error}"))
+}
+
+#[cfg(windows)]
+fn start_display_driver_operation(
+    session: Arc<DesktopSession>,
+    session_key: String,
+    lease: display_service::ServiceLease,
+    connect: bool,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    lease_state: Arc<Mutex<Option<(String, display_service::ServiceLease)>>>,
+    events: Sender<DisplayLeaseEvent>,
+) -> Result<(), String> {
+    thread::Builder::new()
+        .name(if connect { "bridge-display-connect".into() } else { "bridge-display-disconnect".into() })
+        .spawn(move || {
+            let result = if !session.is_alive() || stop.load(Ordering::Acquire) {
+                Err("the authenticated Android session is no longer active".to_string())
+            } else if connect {
+                display_service::connect_with_lease(&lease, &session.remote_fingerprint)
+            } else {
+                display_service::disconnect_with_lease(&lease, &session.remote_fingerprint)
+            };
+
+            let message = match result {
+                Ok(()) if connect => {
+                    let message = "Windows display driver accepted the lease-authorized CONNECT request.".to_string();
+                    if let Err(error) = start_display_frame_stream(
+                        Arc::clone(&session),
+                        session_key.clone(),
+                        lease.clone(),
+                        Arc::clone(&stop),
+                        events.clone(),
+                    ) {
+                        let _ = events.send(DisplayLeaseEvent::OperationStatus {
+                            session_key: session_key.clone(),
+                            message: format!("Display connected, but frame streaming could not start: {error}"),
+                        });
+                    }
+                    message
+                },
+                Ok(()) => {
+                    stop.store(true, Ordering::Release);
+                    if let Ok(mut active) = lease_state.lock() {
+                        if active.as_ref().is_some_and(|(key, _)| key == &session_key) {
+                            *active = None;
+                        }
+                    }
+                    "Windows display driver accepted DISCONNECT; a fresh Android attestation is required before reconnecting.".to_string()
+                }
+                Err(error) => format!(
+                    "Windows display {} request failed: {error}",
+                    if connect { "connect" } else { "disconnect" }
+                ),
+            };
+            let _ = events.send(DisplayLeaseEvent::OperationStatus { session_key, message });
+        })
+        .map(|_| ())
+        .map_err(|error| format!("could not start display driver operation: {error}"))
 }
 
 #[cfg(windows)]
@@ -530,6 +1199,24 @@ struct BridgeApp {
     #[cfg(windows)]
     display_challenge_session: Option<String>,
     #[cfg(windows)]
+    display_lease_stop: Option<Arc<std::sync::atomic::AtomicBool>>,
+    #[cfg(windows)]
+    display_lease: Arc<Mutex<Option<(String, display_service::ServiceLease)>>>,
+    #[cfg(windows)]
+    display_lease_status: String,
+    #[cfg(windows)]
+    display_driver_status: String,
+    #[cfg(windows)]
+    display_input_session: Option<String>,
+    #[cfg(windows)]
+    last_display_input_sequence: u64,
+    #[cfg(windows)]
+    display_pointer_down: bool,
+    #[cfg(windows)]
+    display_lease_tx: Sender<DisplayLeaseEvent>,
+    #[cfg(windows)]
+    display_lease_rx: Receiver<DisplayLeaseEvent>,
+    #[cfg(windows)]
     pending_incoming_transfers: Vec<PendingIncomingTransfer>,
     #[cfg(windows)]
     selected_transfer_fingerprint: Option<String>,
@@ -577,6 +1264,8 @@ impl Default for BridgeApp {
         let (pairing_tx, pairing_rx) = mpsc::channel();
         #[cfg(windows)]
         let (transfer_tx, transfer_rx) = mpsc::channel();
+        #[cfg(windows)]
+        let (display_lease_tx, display_lease_rx) = mpsc::channel();
         #[cfg(windows)]
         let (update_tx, update_rx) = mpsc::channel();
         #[cfg(windows)]
@@ -627,6 +1316,24 @@ impl Default for BridgeApp {
             active_sessions: Vec::new(),
             #[cfg(windows)]
             display_challenge_session: None,
+            #[cfg(windows)]
+            display_lease_stop: None,
+            #[cfg(windows)]
+            display_lease: Arc::new(Mutex::new(None)),
+            #[cfg(windows)]
+            display_lease_status: "Waiting for a trusted Android device.".into(),
+            #[cfg(windows)]
+            display_driver_status: "Not checked.".into(),
+            #[cfg(windows)]
+            display_input_session: None,
+            #[cfg(windows)]
+            last_display_input_sequence: 0,
+            #[cfg(windows)]
+            display_pointer_down: false,
+            #[cfg(windows)]
+            display_lease_tx,
+            #[cfg(windows)]
+            display_lease_rx,
             #[cfg(windows)]
             pending_incoming_transfers: Vec::new(),
             #[cfg(windows)]
@@ -739,6 +1446,7 @@ fn start_secure_listener(status: Sender<String>, pending: Sender<PendingApproval
             display_name: "Bridge Windows".into(),
             platform: Platform::Windows,
             protocol_version: PROTOCOL_VERSION,
+            attestation_public_key: None,
         };
         let listener = match TcpListener::bind(("0.0.0.0", NETWORK_PORT)) {
             Ok(listener) => listener,
@@ -772,6 +1480,10 @@ fn start_secure_listener(status: Sender<String>, pending: Sender<PendingApproval
                             });
                         match result {
                             Ok((connection, descriptor)) => {
+                                if let Err(error) = validate_peer_attestation_descriptor(&descriptor) {
+                                    let _ = status.send(format!("Rejected Android pairing: {error}"));
+                                    return;
+                                }
                                 let store = match TrustStore::load(trust_store_path()) {
                                     Ok(store) => store,
                                     Err(error) => {
@@ -822,8 +1534,10 @@ fn start_pairing(peer: DiscoveredPeer, expected: Option<String>, status: Sender<
                     display_name: "Bridge Windows".into(),
                     platform: Platform::Windows,
                     protocol_version: PROTOCOL_VERSION,
+                    attestation_public_key: None,
                 };
                 let descriptor = connection.exchange_descriptors(&local).map_err(|error| error.to_string())?;
+                validate_peer_attestation_descriptor(&descriptor)?;
                 let store = TrustStore::load(trust_store_path()).map_err(|error| error.to_string())?;
                 let already_trusted = if let Some(trusted) = store.get(&descriptor.id) {
                     if !trusted.public_key_fingerprint.eq_ignore_ascii_case(&connection.remote_fingerprint) {
@@ -1022,6 +1736,7 @@ impl eframe::App for BridgeApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         ctx.request_repaint_after(Duration::from_millis(500));
         for message in self.network_rx.try_iter() {
+            diagnostics::record("network", &message);
             self.network_status = message;
         }
         #[cfg(windows)]
@@ -1039,29 +1754,89 @@ impl eframe::App for BridgeApp {
             // Remove sessions whose reader observed EOF or a transport failure.
             // Reconnected peers must never keep selecting an older dead session.
             self.active_sessions.retain(|session| session.is_alive());
-            let challenge_session = self.active_sessions.first().cloned();
-            let challenge_fingerprint = challenge_session.as_ref().map(|session| session.remote_fingerprint.clone());
+            // Only Android peers with a pairing-pinned attestation key can
+            // receive a Second Screen authorization lease.
+            let challenge_session = self.active_sessions.iter()
+                .find(|session| session.attestation_public_key.is_some())
+                .cloned();
+            let challenge_fingerprint = challenge_session.as_ref().map(|session| {
+                format!("{}:{}", session.remote_fingerprint, session.session_id)
+            });
             if self.display_challenge_session != challenge_fingerprint {
+                if let Some(stop) = self.display_lease_stop.take() {
+                    stop.store(true, Ordering::Release);
+                }
+                if let Ok(mut active) = self.display_lease.lock() {
+                    *active = None;
+                }
                 self.display_challenge_session = challenge_fingerprint;
                 if let Some(session) = challenge_session {
-                    let status_tx = self.network_tx.clone();
-                    let spawn_result = thread::Builder::new()
-                        .name("bridge-display-challenge-relay".into())
-                        .spawn(move || {
-                            let result = (|| -> Result<(), String> {
-                                let nonce = display_service::issue_challenge()?;
-                                session.relay_service_challenge(&nonce, Duration::from_secs(8))?;
-                                display_service::submit_challenge_response(&nonce)?;
-                                Ok(())
-                            })();
-                            let message = match result {
-                                Ok(()) => "Windows display service authenticated the active Android Noise session.".to_owned(),
-                                Err(error) => format!("Display-service session verification is not ready: {error}"),
-                            };
-                            let _ = status_tx.send(message);
-                        });
-                    if let Err(error) = spawn_result {
-                        self.network_status = format!("Could not start display-service relay: {error}");
+                    self.display_lease_status = format!(
+                        "Verifying Android device {} and requesting a display lease…",
+                        session.remote_fingerprint.get(..8).unwrap_or(&session.remote_fingerprint)
+                    );
+                    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    self.display_lease_stop = Some(Arc::clone(&stop));
+                    if let Err(error) = start_display_lease_lifecycle(
+                        session,
+                        stop,
+                        Arc::clone(&self.display_lease),
+                        self.display_lease_tx.clone(),
+                    ) {
+                        self.display_lease_status = error;
+                    }
+                } else {
+                    self.display_lease_status = "No authenticated Android session; display lease is inactive.".into();
+                }
+            }
+            for event in self.display_lease_rx.try_iter() {
+                match event {
+                    DisplayLeaseEvent::Status { session_key, message }
+                    | DisplayLeaseEvent::OperationStatus { session_key, message } => {
+                        if self.display_challenge_session.as_deref() == Some(session_key.as_str()) {
+                            self.display_lease_status = message;
+                        }
+                    }
+                    DisplayLeaseEvent::DriverStatus { session_key, message } => {
+                        if self.display_challenge_session.as_deref() == Some(session_key.as_str()) {
+                            self.display_driver_status = message;
+                        }
+                    }
+                }
+            }
+            let active_display_key = self.display_lease.lock().ok()
+                .and_then(|active| active.as_ref().map(|(key, _)| key.clone()));
+            if self.display_input_session != active_display_key {
+                let _ = inject_display_pointer_release();
+                self.display_pointer_down = false;
+                self.display_input_session = active_display_key.clone();
+                self.last_display_input_sequence = 0;
+            }
+            for session in &self.active_sessions {
+                let session_key = format!("{}:{}", session.remote_fingerprint, session.session_id);
+                while let Some(event) = session.try_receive_display_input() {
+                    if !session.is_alive()
+                        || active_display_key.as_deref() != Some(session_key.as_str())
+                        || self.display_challenge_session.as_deref() != Some(session_key.as_str())
+                        || event.sequence <= self.last_display_input_sequence
+                    {
+                        continue;
+                    }
+                    self.last_display_input_sequence = event.sequence;
+                    if event.pointer_id != 0
+                        || !should_process_display_pointer_event(event.action, self.display_pointer_down)
+                    {
+                        continue;
+                    }
+                    match inject_display_pointer_event(event) {
+                        Ok(()) => match event.action {
+                            DisplayInputAction::Down => self.display_pointer_down = true,
+                            DisplayInputAction::Up | DisplayInputAction::Cancel => self.display_pointer_down = false,
+                            DisplayInputAction::Move => {}
+                        },
+                        Err(error) => {
+                            self.display_lease_status = format!("Second-screen pointer input rejected: {error}");
+                        }
                     }
                 }
             }
@@ -1154,8 +1929,13 @@ impl eframe::App for BridgeApp {
                         }
                     }
                     self.network_status = format!("Secure session established with {}.", pairing.descriptor.display_name);
-                    match DesktopSession::start(pairing.connection) {
+                    match DesktopSession::start(pairing.connection, pairing.descriptor.attestation_public_key.clone()) {
                         Ok(session) => {
+                            for existing in &self.active_sessions {
+                                if existing.remote_fingerprint.eq_ignore_ascii_case(&session.remote_fingerprint) {
+                                    existing.shutdown();
+                                }
+                            }
                             self.active_sessions.retain(|existing| existing.remote_fingerprint != session.remote_fingerprint);
                             self.active_sessions.push(session);
                         }
@@ -1450,6 +2230,11 @@ impl eframe::App for BridgeApp {
                             if let Some(id) = revoke_device {
                                 match self.trust_store.revoke_and_save(&id, trust_store_path()) {
                                     Ok(device) => {
+                                        for session in &self.active_sessions {
+                                            if session.remote_fingerprint.eq_ignore_ascii_case(&device.public_key_fingerprint) {
+                                                session.shutdown();
+                                            }
+                                        }
                                         self.active_sessions.retain(|session| session.remote_fingerprint != device.public_key_fingerprint);
                                         self.network_status = format!("Trust revoked for {}. Its active session was closed.", device.descriptor.display_name);
                                     }
@@ -1671,8 +2456,83 @@ impl eframe::App for BridgeApp {
                             ("◖", "PC audio on phone", "Listen to your computer from another device.", "PLANNED"),
                             ("⌖", "Remote input", "Use a trusted phone or tablet as a controller.", "PLANNED"),
                             ("▤", "Phone notifications", "See selected mobile notifications on desktop.", "PLANNED"),
-                            ("▦", "Second screen", "Explore a tablet as an extended workspace.", "PLANNED"),
+                            ("▦", "Second screen", "Secure Android attestation and renewable display lease lifecycle.", "LEASE-GATED"),
                         ];
+                        #[cfg(windows)]
+                        {
+                            let active_lease = self.display_lease.lock().ok()
+                                .and_then(|active| active.as_ref().map(|(key, lease)| (key.clone(), lease.clone())));
+                            let lease_available = active_lease.is_some();
+                            let mut connect_clicked = false;
+                            let mut disconnect_clicked = false;
+                            let mut refresh_status_clicked = false;
+                            panel(ui, |ui| {
+                                eyebrow(ui, "SECOND SCREEN · AUTHORIZATION");
+                                ui.label(egui::RichText::new("Display-service lease").strong().size(16.0).color(TEXT));
+                                muted(ui, &self.display_lease_status);
+                                muted(ui, "The lease is bound to this Windows process and the authenticated Android device. Renewal stops when the session ends; an abandoned lease expires automatically.");
+                                ui.add_space(10.0);
+                                ui.horizontal(|ui| {
+                                    if ui.add_enabled(lease_available, egui::Button::new("Enable virtual display")).clicked() {
+                                        connect_clicked = true;
+                                    }
+                                    if ui.add_enabled(lease_available, egui::Button::new("Stop virtual display")).clicked() {
+                                        disconnect_clicked = true;
+                                    }
+                                    if ui.add_enabled(lease_available, egui::Button::new("Refresh monitor status")).clicked() {
+                                        refresh_status_clicked = true;
+                                    }
+                                });
+                                muted(ui, &self.display_driver_status);
+                                muted(ui, "Connect asks the IddCx driver to create the virtual monitor; captured frames are then streamed to the paired Android device. Verify the monitor in Windows Settings > System > Display.");
+                            });
+                            if refresh_status_clicked {
+                                if let Some((session_key, _)) = active_lease.as_ref() {
+                                    self.display_driver_status = "Querying the Windows display driver…".into();
+                                    if let Err(error) = start_display_status_query(
+                                        session_key.clone(),
+                                        self.display_lease_tx.clone(),
+                                    ) {
+                                        self.display_driver_status = error;
+                                    }
+                                }
+                            }
+                            if connect_clicked || disconnect_clicked {
+                                if let Some((session_key, lease)) = active_lease {
+                                    let session = self.active_sessions.iter()
+                                        .find(|session| {
+                                            format!("{}:{}", session.remote_fingerprint, session.session_id) == session_key
+                                        })
+                                        .cloned();
+                                    if let Some(session) = session {
+                                        if let Some(stop) = self.display_lease_stop.as_ref().cloned() {
+                                            if let Err(error) = start_display_driver_operation(
+                                                session,
+                                                session_key,
+                                                lease,
+                                                connect_clicked,
+                                                stop,
+                                                Arc::clone(&self.display_lease),
+                                                self.display_lease_tx.clone(),
+                                            ) {
+                                                self.display_lease_status = error;
+                                            } else {
+                                                self.display_lease_status = if connect_clicked {
+                                                    "Sending lease-authorized CONNECT request to the Windows display service…".into()
+                                                } else {
+                                                    "Sending lease-authorized DISCONNECT request to the Windows display service…".into()
+                                                };
+                                            }
+                                        } else {
+                                            self.display_lease_status = "Display lease lifecycle is not active.".into();
+                                        }
+                                    } else {
+                                        self.display_lease_status = "The Android session for this display lease is no longer active.".into();
+                                    }
+                                }
+                            }
+                            ui.add_space(12.0);
+                        }
                         for row in tools.chunks(2) {
                             ui.columns(2, |cols| {
                                 for (index, item) in row.iter().enumerate() {
@@ -1760,6 +2620,16 @@ impl eframe::App for BridgeApp {
                         }
 
                         panel(ui, |ui| {
+                            eyebrow(ui, "SHOW LOGS");
+                            ui.label(egui::RichText::new("Diagnostics").strong());
+                            muted(ui, "Recent Bridge events and errors from this Windows device. Logs stay on this PC.");
+                            if ui.button("Copy Logs").clicked() {
+                                ui.ctx().copy_text(diagnostics::snapshot());
+                            }
+                            muted(ui, "Copies the most recent 500 KB of diagnostic history.");
+                        });
+                        ui.add_space(14.0);
+                        panel(ui, |ui| {
                             eyebrow(ui, "About");
                             ui.label(egui::RichText::new("Bridge for Windows").strong());
                             muted(ui, &format!("Version {} · Native Rust interface", option_env!("BRIDGE_BUILD_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))));
@@ -1815,9 +2685,16 @@ impl eframe::App for BridgeApp {
                             let _ = self.trust_store.revoke_and_save(&pending.descriptor.id, trust_store_path());
                             self.network_status = format!("Could not confirm pairing: {error}");
                         } else {
-                            match DesktopSession::start(pending.connection) {
+                            match DesktopSession::start(pending.connection, pending.descriptor.attestation_public_key.clone()) {
                                 Ok(session) => {
-                                    self.active_sessions.retain(|existing| existing.remote_fingerprint != session.remote_fingerprint);
+                                    for existing in &self.active_sessions {
+                                        if existing.remote_fingerprint.eq_ignore_ascii_case(&session.remote_fingerprint) {
+                                            existing.shutdown();
+                                        }
+                                    }
+                                    self.active_sessions.retain(|existing| {
+                                        existing.remote_fingerprint != session.remote_fingerprint
+                                    });
                                     self.active_sessions.push(session);
                                 }
                                 Err(error) => self.network_status = format!("Could not start secure session dispatcher: {error}"),
@@ -1853,12 +2730,229 @@ impl eframe::App for BridgeApp {
 }
 
 #[cfg(windows)]
+fn should_process_display_pointer_event(action: DisplayInputAction, pointer_down: bool) -> bool {
+    match action {
+        DisplayInputAction::Down => !pointer_down,
+        DisplayInputAction::Move => pointer_down,
+        DisplayInputAction::Up | DisplayInputAction::Cancel => pointer_down,
+    }
+}
+
+#[cfg(windows)]
+fn inject_display_pointer_event(event: DisplayInputEvent) -> Result<(), String> {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_ABSOLUTE,
+        MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE,
+        MOUSEEVENTF_VIRTUALDESK, MOUSEINPUT,
+    };
+    let mut flags = MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+    match event.action {
+        DisplayInputAction::Down => flags |= MOUSEEVENTF_MOVE | MOUSEEVENTF_LEFTDOWN,
+        DisplayInputAction::Move => flags |= MOUSEEVENTF_MOVE,
+        DisplayInputAction::Up => flags |= MOUSEEVENTF_MOVE | MOUSEEVENTF_LEFTUP,
+        DisplayInputAction::Cancel => flags |= MOUSEEVENTF_LEFTUP,
+    }
+    let (absolute_x, absolute_y) = bridge_monitor_absolute_coordinates(event.x, event.y)?;
+    let input = INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 { mi: MOUSEINPUT {
+            dx: absolute_x, dy: absolute_y, mouseData: 0,
+            dwFlags: flags, time: 0, dwExtraInfo: 0,
+        }},
+    };
+    let inserted = unsafe { SendInput(1, &input, std::mem::size_of::<INPUT>() as i32) };
+    if inserted != 1 {
+        return Err(format!("Windows rejected pointer input (error {})", unsafe {
+            windows_sys::Win32::Foundation::GetLastError()
+        }));
+    }
+    Ok(())
+}
+
+
+#[cfg(windows)]
+fn bridge_monitor_absolute_coordinates(x: u16, y: u16) -> Result<(i32, i32), String> {
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::Graphics::Gdi::{
+        EnumDisplayDevicesW, EnumDisplayMonitors, GetMonitorInfoW, DISPLAY_DEVICEW,
+        HDC, HMONITOR, MONITORINFO, MONITORINFOEXW,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+        SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    };
+
+    struct MonitorSearch { rect: Option<(i32, i32, i32, i32)> }
+
+    unsafe extern "system" fn find_bridge_monitor(
+        monitor: HMONITOR,
+        _dc: HDC,
+        _clip: *mut RECT,
+        data: isize,
+    ) -> i32 {
+        let search = &mut *(data as *mut MonitorSearch);
+        let mut info: MONITORINFOEXW = std::mem::zeroed();
+        info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+        if GetMonitorInfoW(monitor, &mut info.monitorInfo as *mut MONITORINFO) == 0 {
+            return 1;
+        }
+        let mut device: DISPLAY_DEVICEW = std::mem::zeroed();
+        device.cb = std::mem::size_of::<DISPLAY_DEVICEW>() as u32;
+        if EnumDisplayDevicesW(info.szDevice.as_ptr(), 0, &mut device, 0) == 0 {
+            return 1;
+        }
+        let description = String::from_utf16_lossy(&device.DeviceString)
+            .trim_end_matches('\0').to_ascii_lowercase();
+        let device_id = String::from_utf16_lossy(&device.DeviceID)
+            .trim_end_matches('\0').to_ascii_lowercase();
+        if description.contains("bridge virtual display")
+            || description.contains("bridge second screen")
+            || device_id.contains("root\\bridgeindirectdisplay")
+        {
+            search.rect = Some((
+                info.monitorInfo.rcMonitor.left, info.monitorInfo.rcMonitor.top,
+                info.monitorInfo.rcMonitor.right, info.monitorInfo.rcMonitor.bottom,
+            ));
+            return 0;
+        }
+        1
+    }
+
+    let mut search = MonitorSearch { rect: None };
+    let enumerated = unsafe {
+        EnumDisplayMonitors(
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            Some(find_bridge_monitor),
+            &mut search as *mut MonitorSearch as isize,
+        )
+    };
+    if enumerated == 0 {
+        return Err("Windows could not enumerate active displays".into());
+    }
+    let monitor = search.rect.ok_or_else(|| {
+        "Bridge virtual monitor is not active; refusing to inject pointer input onto another display".to_string()
+    })?;
+
+    let virtual_left = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
+    let virtual_top = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
+    let virtual_width = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) };
+    let virtual_height = unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) };
+    map_monitor_point_to_virtual_desktop(
+        x, y, monitor,
+        (virtual_left, virtual_top, virtual_left + virtual_width, virtual_top + virtual_height),
+    )
+}
+
+#[cfg(windows)]
+fn map_monitor_point_to_virtual_desktop(
+    x: u16,
+    y: u16,
+    monitor: (i32, i32, i32, i32),
+    virtual_desktop: (i32, i32, i32, i32),
+) -> Result<(i32, i32), String> {
+    let (left, top, right, bottom) = monitor;
+    let (virtual_left, virtual_top, virtual_right, virtual_bottom) = virtual_desktop;
+    let monitor_width = i64::from(right) - i64::from(left);
+    let monitor_height = i64::from(bottom) - i64::from(top);
+    let virtual_width = i64::from(virtual_right) - i64::from(virtual_left);
+    let virtual_height = i64::from(virtual_bottom) - i64::from(virtual_top);
+    if monitor_width <= 0 || monitor_height <= 0 || virtual_width <= 1 || virtual_height <= 1
+        || left < virtual_left || top < virtual_top
+        || right > virtual_right || bottom > virtual_bottom
+    {
+        return Err("Windows returned invalid Bridge or virtual-desktop bounds".into());
+    }
+
+    let monitor_x = i64::from(left)
+        + (i64::from(x) * (monitor_width - 1) + 32_767) / 65_535;
+    let monitor_y = i64::from(top)
+        + (i64::from(y) * (monitor_height - 1) + 32_767) / 65_535;
+    let absolute_x = ((monitor_x - i64::from(virtual_left)) * 65_535
+        + (virtual_width - 1) / 2) / (virtual_width - 1);
+    let absolute_y = ((monitor_y - i64::from(virtual_top)) * 65_535
+        + (virtual_height - 1) / 2) / (virtual_height - 1);
+    Ok((
+        absolute_x.clamp(0, 65_535) as i32,
+        absolute_y.clamp(0, 65_535) as i32,
+    ))
+}
+
+#[cfg(all(test, windows))]
+mod display_pointer_mapping_tests {
+    use super::map_monitor_point_to_virtual_desktop;
+
+    #[test]
+    fn maps_bridge_monitor_to_its_position_on_the_virtual_desktop() {
+        let bounds = (1920, 0, 3000, 2340);
+        let desktop = (0, 0, 3000, 2340);
+        assert_eq!(map_monitor_point_to_virtual_desktop(0, 0, bounds, desktop).unwrap(), (41_956, 0));
+        assert_eq!(map_monitor_point_to_virtual_desktop(u16::MAX, u16::MAX, bounds, desktop).unwrap(), (65_535, 65_535));
+    }
+
+    #[test]
+    fn supports_monitors_left_of_the_primary_display() {
+        let bounds = (-1080, 0, 0, 2340);
+        let desktop = (-1080, 0, 1920, 2340);
+        assert_eq!(map_monitor_point_to_virtual_desktop(0, 0, bounds, desktop).unwrap(), (0, 0));
+        assert!(map_monitor_point_to_virtual_desktop(u16::MAX, 0, bounds, desktop).unwrap().0 < 65_535);
+    }
+
+    #[test]
+    fn rejects_invalid_or_outside_monitor_bounds() {
+        assert!(map_monitor_point_to_virtual_desktop(0, 0, (0, 0, 0, 100), (0, 0, 100, 100)).is_err());
+        assert!(map_monitor_point_to_virtual_desktop(0, 0, (100, 0, 200, 100), (0, 0, 100, 100)).is_err());
+    }
+}
+
+#[cfg(windows)]
+fn inject_display_pointer_release() -> Result<(), String> {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTUP, MOUSEINPUT,
+    };
+    let input = INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 { mi: MOUSEINPUT {
+            dx: 0, dy: 0, mouseData: 0, dwFlags: MOUSEEVENTF_LEFTUP,
+            time: 0, dwExtraInfo: 0,
+        }},
+    };
+    let inserted = unsafe { SendInput(1, &input, std::mem::size_of::<INPUT>() as i32) };
+    if inserted == 1 { Ok(()) } else {
+        Err(format!("Windows could not release the second-screen pointer (error {})", unsafe {
+            windows_sys::Win32::Foundation::GetLastError()
+        }))
+    }
+}
+
+#[cfg(all(test, windows))]
+mod display_pointer_state_tests {
+    use super::*;
+
+    #[test]
+    fn pointer_events_follow_a_single_contact_lifecycle() {
+        assert!(should_process_display_pointer_event(DisplayInputAction::Down, false));
+        assert!(!should_process_display_pointer_event(DisplayInputAction::Down, true));
+        assert!(!should_process_display_pointer_event(DisplayInputAction::Move, false));
+        assert!(should_process_display_pointer_event(DisplayInputAction::Move, true));
+        assert!(!should_process_display_pointer_event(DisplayInputAction::Up, false));
+        assert!(should_process_display_pointer_event(DisplayInputAction::Up, true));
+        assert!(!should_process_display_pointer_event(DisplayInputAction::Cancel, false));
+        assert!(should_process_display_pointer_event(DisplayInputAction::Cancel, true));
+    }
+}
+
+#[cfg(windows)]
 fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default().as_millis().min(u64::MAX as u128) as u64
 }
 
 fn main() -> eframe::Result<()> {
+    diagnostics::record("app", &format!("Bridge desktop starting · version {}", env!("CARGO_PKG_VERSION")));
+    std::panic::set_hook(Box::new(|info| {
+        diagnostics::record("panic", &info.to_string());
+    }));
     let icon = image::load_from_memory(include_bytes!("../../../assets/bridge-app-icon.png"))
         .expect("Bridge app icon must be a valid PNG").to_rgba8();
     let (icon_width, icon_height) = icon.dimensions();

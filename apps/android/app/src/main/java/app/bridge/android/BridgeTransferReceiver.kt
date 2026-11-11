@@ -15,11 +15,253 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
 private const val CLIPBOARD_TAG = 0x03
+private const val DISPLAY_FRAME_TAG = 0x04
+private const val ENCODED_VIDEO_TAG = 0x06
+private const val VIDEO_KEYFRAME_REQUEST_TAG = 0x07
+private const val ENCODED_VIDEO_HEADER_BYTES = 34
+private const val MAX_ENCODED_VIDEO_BYTES = 16 * 1024 * 1024
+private const val DISPLAY_FRAME_HEADER_BYTES = 37
+private const val DISPLAY_FRAME_FRAGMENT_BYTES = 48 * 1024
+private const val MAX_DISPLAY_FRAME_BYTES = 64 * 1024 * 1024
 private const val MAX_CLIPBOARD_TEXT_BYTES = 16 * 1024
+private const val DISPLAY_INPUT_TAG = 0x05
+
+internal data class BridgeDisplayFrame(
+    val deviceId: String,
+    val sequence: Long,
+    val width: Int,
+    val height: Int,
+    val stride: Int,
+    val timestampNs: Long,
+    val pixels: ByteArray,
+    val receivedAtElapsedRealtimeNs: Long = android.os.SystemClock.elapsedRealtimeNanos()
+)
+
+internal data class BridgeEncodedVideoFrame(
+    val deviceId: String,
+    val sessionHandle: Long = 0L,
+    val sequence: Long,
+    val width: Int,
+    val height: Int,
+    val timestampNs: Long,
+    val keyframe: Boolean,
+    val bitstream: ByteArray,
+    val sequenceGap: Boolean = false,
+    val receivedAtElapsedRealtimeNs: Long = android.os.SystemClock.elapsedRealtimeNanos()
+)
+
+/** Reassembles one bounded Annex-B H.264 access unit from authenticated packets. */
+internal class EncodedVideoFrameAssembler {
+    private data class Header(
+        val sequence: Long,
+        val width: Int,
+        val height: Int,
+        val timestampNs: Long,
+        val totalBytes: Int,
+        val keyframe: Boolean
+    )
+
+    private var active: Header? = null
+    private var bitstream: ByteArray? = null
+    private var received = 0
+    private var lastCompletedSequence = 0L
+
+    fun reset() {
+        active = null
+        bitstream = null
+        received = 0
+    }
+
+    fun push(
+        packet: ByteArray,
+        receivedAtElapsedRealtimeNs: Long = android.os.SystemClock.elapsedRealtimeNanos()
+    ): BridgeEncodedVideoFrame? {
+        try {
+            require(packet.size > ENCODED_VIDEO_HEADER_BYTES &&
+                packet.size <= ENCODED_VIDEO_HEADER_BYTES + DISPLAY_FRAME_FRAGMENT_BYTES &&
+                packet[0].toInt() and 0xff == ENCODED_VIDEO_TAG) {
+                "Invalid encoded-video packet size or tag."
+            }
+            val buffer = ByteBuffer.wrap(packet).order(java.nio.ByteOrder.BIG_ENDIAN)
+            buffer.get()
+            val sequence = buffer.long
+            val width = buffer.int
+            val height = buffer.int
+            val timestampNs = buffer.long
+            val totalBytes = buffer.int
+            val offset = buffer.int
+            val keyframe = when (buffer.get().toInt() and 0xff) {
+                0 -> false
+                1 -> true
+                else -> error("Invalid encoded-video keyframe flag.")
+            }
+            val header = Header(sequence, width, height, timestampNs, totalBytes, keyframe)
+            val count = packet.size - ENCODED_VIDEO_HEADER_BYTES
+            require(header.sequence > 0 && header.width in 1..4096 && header.height in 1..4096 &&
+                header.timestampNs > 0 && header.totalBytes in 1..MAX_ENCODED_VIDEO_BYTES) {
+                "Invalid encoded-video metadata."
+            }
+            require(count in 1..DISPLAY_FRAME_FRAGMENT_BYTES &&
+                offset >= 0 && offset.toLong() + count <= header.totalBytes.toLong()) {
+                "Invalid encoded-video fragment range."
+            }
+            if (offset == 0) {
+                require(active == null && header.sequence > lastCompletedSequence) {
+                    "Encoded-video access unit overlaps or has a stale sequence."
+                }
+                active = header
+                bitstream = ByteArray(header.totalBytes)
+                received = 0
+            }
+            require(active == header && offset == received) {
+                "Encoded-video fragments are out of order or inconsistent."
+            }
+            System.arraycopy(packet, ENCODED_VIDEO_HEADER_BYTES, requireNotNull(bitstream), received, count)
+            received += count
+            if (received == header.totalBytes) {
+                val completed = requireNotNull(bitstream)
+                val sequenceGap = lastCompletedSequence != 0L && header.sequence != lastCompletedSequence + 1L
+                lastCompletedSequence = header.sequence
+                reset()
+                return BridgeEncodedVideoFrame(
+                    deviceId = "",
+                    sequence = header.sequence,
+                    width = header.width,
+                    height = header.height,
+                    timestampNs = header.timestampNs,
+                    keyframe = header.keyframe,
+                    bitstream = completed,
+                    sequenceGap = sequenceGap,
+                    receivedAtElapsedRealtimeNs = receivedAtElapsedRealtimeNs
+                )
+            }
+            return null
+        } catch (error: Exception) {
+            reset()
+            throw error
+        }
+    }
+}
+
+/** Reassembles one ordered BGRA8 frame and caps its allocation at 64 MiB. */
+private class DisplayFrameAssembler {
+    private data class Header(
+        val sequence: Long, val width: Int, val height: Int, val stride: Int,
+        val timestampNs: Long, val totalBytes: Int
+    )
+    private var active: Header? = null
+    private var pixels: ByteArray? = null
+    private var received = 0
+    private var lastCompletedSequence = 0L
+
+    fun reset() {
+        active = null
+        pixels = null
+        received = 0
+    }
+
+    fun push(packet: ByteArray): BridgeDisplayFrame? {
+        try {
+            require(packet.size > DISPLAY_FRAME_HEADER_BYTES &&
+                packet.size <= DISPLAY_FRAME_HEADER_BYTES + DISPLAY_FRAME_FRAGMENT_BYTES &&
+                packet[0].toInt() and 0xff == DISPLAY_FRAME_TAG) { "Invalid display-frame packet size or tag." }
+            val buffer = ByteBuffer.wrap(packet).order(java.nio.ByteOrder.BIG_ENDIAN)
+            buffer.get()
+            val header = Header(
+                buffer.long, buffer.int, buffer.int, buffer.int, buffer.long, buffer.int
+            )
+            val offset = buffer.int
+            val expectedStride = Math.multiplyExact(header.width, 4)
+            val expectedBytes = header.stride.toLong() * header.height.toLong()
+            require(header.sequence > 0 && header.width in 1..4096 && header.height in 1..4096 &&
+                header.stride == expectedStride && expectedBytes in 1..MAX_DISPLAY_FRAME_BYTES.toLong() &&
+                header.totalBytes.toLong() == expectedBytes) { "Invalid display-frame metadata." }
+            val count = packet.size - DISPLAY_FRAME_HEADER_BYTES
+            require(count in 1..DISPLAY_FRAME_FRAGMENT_BYTES &&
+                offset >= 0 && offset.toLong() + count <= header.totalBytes.toLong()) {
+                "Invalid display-frame fragment range."
+            }
+            if (offset == 0) {
+                require(active == null) { "A new frame arrived before the previous frame completed." }
+                require(header.sequence > lastCompletedSequence) { "Display-frame sequence is stale or duplicated." }
+                active = header
+                pixels = ByteArray(header.totalBytes)
+                received = 0
+            }
+            require(active == header && offset == received) { "Display-frame fragments are out of order." }
+            System.arraycopy(packet, DISPLAY_FRAME_HEADER_BYTES, requireNotNull(pixels), received, count)
+            received += count
+            if (received == header.totalBytes) {
+                val completed = requireNotNull(pixels)
+                lastCompletedSequence = header.sequence
+                reset()
+                return BridgeDisplayFrame(
+                    deviceId = "", sequence = header.sequence, width = header.width,
+                    height = header.height, stride = header.stride,
+                    timestampNs = header.timestampNs, pixels = completed
+                )
+            }
+            return null
+        } catch (error: Exception) {
+            reset()
+            throw error
+        }
+    }
+}
+
+
+/**
+ * Keeps at most one pending UI update per authenticated session. If rendering
+ * falls behind the main thread, newer complete frames replace older ones
+ * instead of building an unbounded callback backlog.
+ *
+ * The posting function is injected so the coalescing behavior can be tested
+ * without Android's Looper in local JVM tests.
+ */
+internal class LatestFrameDispatcher<T>(
+    private val post: (Runnable) -> Boolean,
+    private val onFrame: (T) -> Unit
+) {
+    private val latest = AtomicReference<T?>(null)
+    private val scheduled = AtomicBoolean(false)
+    @Volatile private var closed = false
+
+    private val drain = object : Runnable {
+        override fun run() {
+            try {
+                if (closed) {
+                    latest.set(null)
+                } else {
+                    latest.getAndSet(null)?.let(onFrame)
+                }
+            } finally {
+                scheduled.set(false)
+                if (!closed && latest.get() != null && scheduled.compareAndSet(false, true)) {
+                    if (!post(this)) scheduled.set(false)
+                }
+            }
+        }
+    }
+
+    fun offer(frame: T) {
+        if (closed) return
+        latest.set(frame)
+        if (scheduled.compareAndSet(false, true) && !post(drain)) {
+            scheduled.set(false)
+        }
+    }
+
+    fun close() {
+        closed = true
+        latest.set(null)
+    }
+}
 
 internal data class BridgeIncomingOffer(
     val deviceId: String,
@@ -36,8 +278,11 @@ internal data class BridgeIncomingOffer(
  */
 internal class BridgeTransferReceiver(
     context: Context,
+    private val localNoiseFingerprint: String,
     private val onOffer: (BridgeIncomingOffer) -> Unit,
     private val onClipboardText: (String, String) -> Unit,
+    private val onDisplayFrame: (BridgeDisplayFrame) -> Unit,
+    private val onEncodedVideoFrame: (BridgeEncodedVideoFrame) -> Unit,
     private val onStatus: (String) -> Unit,
     private val onSessionEnded: (String, Long) -> Unit
 ) {
@@ -48,10 +293,19 @@ internal class BridgeTransferReceiver(
     private val pending = ConcurrentHashMap<String, BridgeIncomingOffer>()
     private val transferLocks = ConcurrentHashMap<Long, ReentrantLock>()
     private val cancellations = ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicBoolean>()
+    private val displayInputSequence = java.util.concurrent.atomic.AtomicLong(0)
+    private val displayDispatchers = ConcurrentHashMap<Long, LatestFrameDispatcher<BridgeDisplayFrame>>()
+    private val encodedVideoDispatchers = ConcurrentHashMap<Long, LatestFrameDispatcher<BridgeEncodedVideoFrame>>()
 
-    fun attach(deviceId: String, handle: Long) {
+    fun attach(deviceId: String, handle: Long, allowDisplayAttestation: Boolean = false) {
         if (readers.containsKey(handle)) return
         val queue = LinkedBlockingQueue<ByteArray>(8)
+        val displayAssembler = DisplayFrameAssembler()
+        val encodedVideoAssembler = EncodedVideoFrameAssembler()
+        val displayDispatcher = LatestFrameDispatcher<BridgeDisplayFrame>(main::post, onDisplayFrame)
+        val encodedVideoDispatcher = LatestFrameDispatcher<BridgeEncodedVideoFrame>(main::post, onEncodedVideoFrame)
+        displayDispatchers.put(handle, displayDispatcher)?.close()
+        encodedVideoDispatchers.put(handle, encodedVideoDispatcher)?.close()
         queues[handle] = queue
         val thread = Thread({
             try {
@@ -62,7 +316,31 @@ internal class BridgeTransferReceiver(
                         error("The secure device session has ended.")
                     }
                     if (packet.isEmpty()) continue
-                    if (packet[0].toInt() == CLIPBOARD_TAG) {
+                    if ((packet[0].toInt() and 0xff) == DISPLAY_FRAME_TAG) {
+                        try {
+                            displayAssembler.push(packet)?.let { frame ->
+                                displayDispatcher.offer(frame.copy(deviceId = deviceId))
+                            }
+                        } catch (error: Exception) {
+                            postStatus("Dropped invalid second-screen frame: ${error.message}")
+                        }
+                        continue
+                    }
+                    if ((packet[0].toInt() and 0xff) == ENCODED_VIDEO_TAG) {
+                        try {
+                            encodedVideoAssembler.push(packet)?.let { frame ->
+                                if (frame.sequenceGap) {
+                                    runCatching { requestVideoKeyframe(handle, frame.sequence) }
+                                        .onFailure { postStatus("Could not request an H.264 recovery keyframe: ${it.message}") }
+                                }
+                                encodedVideoDispatcher.offer(frame.copy(deviceId = deviceId, sessionHandle = handle))
+                            }
+                        } catch (error: Exception) {
+                            postStatus("Dropped invalid H.264 access unit: ${error.message}")
+                        }
+                        continue
+                    }
+                    if ((packet[0].toInt() and 0xff) == CLIPBOARD_TAG) {
                         val payloadSize = packet.size - 1
                         if (payloadSize in 0..MAX_CLIPBOARD_TEXT_BYTES) {
                             val text = String(packet, 1, payloadSize, Charsets.UTF_8)
@@ -87,20 +365,49 @@ internal class BridgeTransferReceiver(
                                 main.post { onOffer(offer) }
                             }
                             "display_challenge_request" -> {
-                                // Echo only a well-formed one-time challenge received
-                                // inside this already-authenticated Noise session.
+                                require(allowDisplayAttestation) {
+                                    "Display attestation is only available to an explicitly trusted Windows peer."
+                                }
                                 val requestId = control.getString("request_id")
+                                val sessionId = control.getString("session_id")
                                 val nonce = control.getString("nonce")
                                 require(requestId.matches(Regex("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}"))) {
                                     "Invalid display challenge request ID."
                                 }
+                                require(sessionId.matches(Regex("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}"))) {
+                                    "Invalid display attestation session ID."
+                                }
                                 require(nonce.matches(Regex("[0-9a-fA-F]{64}"))) {
                                     "Invalid display challenge nonce."
+                                }
+                                require(localNoiseFingerprint.matches(Regex("[0-9a-fA-F]{64}"))) {
+                                    "Local Noise identity fingerprint is invalid."
+                                }
+                                val seed = BridgeIdentityStore.loadOrCreateAttestationSeed(appContext)
+                                val proof = try {
+                                    JSONObject(BridgeNative.attestationSign(
+                                        seed, nonce, sessionId, localNoiseFingerprint
+                                    ))
+                                } finally {
+                                    seed.fill(0)
+                                }
+                                check(proof.optBoolean("ok")) {
+                                    proof.optString("error", "Could not sign Android display attestation.")
+                                }
+                                val signature = proof.getString("signature")
+                                check(signature.matches(Regex("[0-9a-fA-F]{128}"))) {
+                                    "Native attestation signer returned an invalid signature."
+                                }
+                                check(proof.getString("device_fingerprint").equals(localNoiseFingerprint, ignoreCase = true)) {
+                                    "Native attestation signer returned a mismatched device fingerprint."
                                 }
                                 sendControl(handle, JSONObject()
                                     .put("type", "display_challenge_response")
                                     .put("request_id", requestId)
-                                    .put("nonce", nonce))
+                                    .put("session_id", sessionId)
+                                    .put("nonce", nonce)
+                                    .put("device_fingerprint", proof.getString("device_fingerprint"))
+                                    .put("signature", signature))
                             }
                             else -> queue.put(packet)
                         }
@@ -111,6 +418,10 @@ internal class BridgeTransferReceiver(
             } catch (error: Exception) {
                 if (!Thread.currentThread().isInterrupted) postStatus("Transfer connection ended: ${error.message}")
             } finally {
+                displayDispatcher.close()
+                encodedVideoDispatcher.close()
+                displayDispatchers.remove(handle, displayDispatcher)
+                encodedVideoDispatchers.remove(handle, encodedVideoDispatcher)
                 queues.remove(handle, queue)
                 readers.remove(handle, Thread.currentThread())
                 onSessionEnded(deviceId, handle)
@@ -349,6 +660,34 @@ internal class BridgeTransferReceiver(
         queue.clear()
     }
 
+    fun requestVideoKeyframe(handle: Long, lastSequence: Long) {
+        require(lastSequence >= 0) { "Invalid last decoded video sequence." }
+        val packet = ByteBuffer.allocate(9).order(java.nio.ByteOrder.BIG_ENDIAN)
+            .put(VIDEO_KEYFRAME_REQUEST_TAG.toByte())
+            .putLong(lastSequence)
+            .array()
+        sendBytes(handle, packet)
+    }
+
+    fun sendDisplayInput(handle: Long, action: Int, pointerId: Int, x: Int, y: Int) {
+        require(action in 1..4) { "Invalid display input action." }
+        require(pointerId in 0..9) { "Invalid display pointer ID." }
+        require(x in 0..65535 && y in 0..65535) { "Display coordinates must be normalized to 16-bit values." }
+        val sequence = displayInputSequence.incrementAndGet()
+        require(sequence > 0) { "Display input sequence exhausted." }
+        val timestampNs = System.nanoTime()
+        val packet = ByteBuffer.allocate(23).order(java.nio.ByteOrder.BIG_ENDIAN)
+            .put(DISPLAY_INPUT_TAG.toByte())
+            .putLong(sequence)
+            .putLong(timestampNs)
+            .put(pointerId.toByte())
+            .put(action.toByte())
+            .putShort(x.toShort())
+            .putShort(y.toShort())
+            .array()
+        sendBytes(handle, packet)
+    }
+
     fun sendClipboard(handle: Long, text: String) {
         val payload = text.toByteArray(Charsets.UTF_8)
         require(payload.size <= MAX_CLIPBOARD_TEXT_BYTES) { "Text exceeds the 16 KiB clipboard limit." }
@@ -374,6 +713,8 @@ internal class BridgeTransferReceiver(
     }
 
     fun stop() {
+        displayDispatchers.values.forEach { it.close() }
+        displayDispatchers.clear()
         readers.values.forEach { it.interrupt() }
         readers.clear()
         queues.clear()

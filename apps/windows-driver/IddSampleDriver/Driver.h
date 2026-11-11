@@ -16,6 +16,8 @@
 #include <vector>
 #include <mutex>
 #include <atomic>
+#include <cstdint>
+#include <cstring>
 
 #include "BridgeDisplayControl.h"
 
@@ -59,10 +61,13 @@ namespace Microsoft
         /// <summary>
         /// Manages a thread that consumes buffers from an indirect display swap-chain object.
         /// </summary>
+        class IndirectDeviceContext;
+
         class SwapChainProcessor
         {
         public:
-            SwapChainProcessor(IDDCX_SWAPCHAIN hSwapChain, std::shared_ptr<Direct3DDevice> Device, HANDLE NewFrameEvent);
+            SwapChainProcessor(IDDCX_SWAPCHAIN hSwapChain, std::shared_ptr<Direct3DDevice> Device, HANDLE NewFrameEvent, IndirectDeviceContext* FrameSink);
+            NTSTATUS Start();
             ~SwapChainProcessor();
 
         private:
@@ -74,6 +79,7 @@ namespace Microsoft
             IDDCX_SWAPCHAIN m_hSwapChain;
             std::shared_ptr<Direct3DDevice> m_Device;
             HANDLE m_hAvailableBufferEvent;
+            IndirectDeviceContext* m_FrameSink;
             Microsoft::WRL::Wrappers::Thread m_hThread;
             Microsoft::WRL::Wrappers::Event m_hTerminateEvent;
         };
@@ -92,6 +98,10 @@ namespace Microsoft
             NTSTATUS ConnectMonitor(UINT ConnectorIndex);
             NTSTATUS DisconnectMonitor();
             void GetDisplayStatus(BRIDGE_DISPLAY_STATUS& Status);
+            NTSTATUS QueryLatestFrameHeader(BRIDGE_DISPLAY_FRAME_HEADER& Header);
+            NTSTATUS CopyLatestFrame(PVOID Buffer, size_t BufferLength, size_t* BytesWritten);
+            void PublishLatestFrame(ULONG Width, ULONG Height, ULONG Stride, ULONG PixelFormat, const BYTE* Data, size_t DataSize);
+            void ClearLatestFrame();
 
         protected:
             WDFDEVICE m_WdfDevice;
@@ -99,19 +109,24 @@ namespace Microsoft
             IDDCX_MONITOR m_Monitor;
             std::mutex m_MonitorLock;
             std::atomic<bool> m_AdapterReady{ false };
+            std::mutex m_FrameLock;
+            std::vector<BYTE> m_LatestFrame;
+            BRIDGE_DISPLAY_FRAME_HEADER m_LatestFrameHeader{};
+            std::atomic<ULONGLONG> m_FrameSequence{ 0 };
         };
 
         class IndirectMonitorContext
         {
         public:
-            IndirectMonitorContext(_In_ IDDCX_MONITOR Monitor);
+            IndirectMonitorContext(_In_ IDDCX_MONITOR Monitor, IndirectDeviceContext* FrameSink);
             virtual ~IndirectMonitorContext();
 
-            void AssignSwapChain(IDDCX_SWAPCHAIN SwapChain, LUID RenderAdapter, HANDLE NewFrameEvent);
+            NTSTATUS AssignSwapChain(IDDCX_SWAPCHAIN SwapChain, LUID RenderAdapter, HANDLE NewFrameEvent);
             void UnassignSwapChain();
 
         private:
             IDDCX_MONITOR m_Monitor;
+            IndirectDeviceContext* m_FrameSink;
             std::unique_ptr<SwapChainProcessor> m_ProcessingThread;
         } ;
     }

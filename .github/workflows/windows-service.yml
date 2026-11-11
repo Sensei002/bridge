@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - "apps/windows-service/**"
+      - "scripts/windows/*BridgeDisplayService.ps1"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/windows-service.yml"
@@ -11,6 +12,7 @@ on:
     branches: [development]
     paths:
       - "apps/windows-service/**"
+      - "scripts/windows/*BridgeDisplayService.ps1"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/windows-service.yml"
@@ -33,6 +35,19 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
       - uses: Swatinem/rust-cache@v2
+      - name: Validate Windows installation scripts
+        shell: pwsh
+        run: |
+          $scripts = @(
+            "scripts/windows/Install-BridgeDisplayService.ps1",
+            "scripts/windows/Uninstall-BridgeDisplayService.ps1"
+          )
+          foreach ($path in $scripts) {
+            if (-not (Test-Path $path)) { throw "Missing service installation script: $path" }
+            $source = Get-Content -LiteralPath $path -Raw
+            [void][scriptblock]::Create($source)
+            Write-Host "PowerShell syntax valid: $path"
+          }
       - name: Test service protocol
         run: cargo test -p bridge-display-service
       - name: Build Windows service executable

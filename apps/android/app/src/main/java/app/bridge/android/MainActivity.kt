@@ -1,6 +1,11 @@
 package app.bridge.android
 
 import android.os.Bundle
+import android.view.MotionEvent
+import android.graphics.Bitmap
+import java.nio.ByteBuffer
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.ExperimentalComposeUiApi
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
@@ -23,6 +28,8 @@ import java.io.File
 import androidx.compose.foundation.Image
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -40,7 +47,12 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.withContext
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.input.pointer.pointerInteropFilter
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -65,6 +77,7 @@ private enum class BridgeTab(val label: String, val symbol: String) {
     Devices("Devices", "⌁"),
     Transfers("Files", "⇧"),
     Clipboard("Clip", "▤"),
+    SecondScreen("Screen", "▣"),
     Tools("Tools", "⌘"),
     Settings("Settings", "⚙")
 }
@@ -81,6 +94,8 @@ class MainActivity : ComponentActivity() {
     private val clipboardStatus get() = BridgeRuntimeState.clipboardStatus.value
     private val pairingStatus get() = BridgeRuntimeState.pairingStatus.value
     private val transferStatus get() = BridgeRuntimeState.transferStatus.value
+    private val latestDisplayFrame get() = BridgeRuntimeState.latestDisplayFrame.value
+    private val latestEncodedVideoFrame get() = BridgeRuntimeState.latestEncodedVideoFrame.value
 
     private var pendingExportFile: File? = null
     private lateinit var exportFileLauncher: ActivityResultLauncher<String>
@@ -91,6 +106,18 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        BridgeDiagnostics.initialize(this)
+        BridgeDiagnostics.record("app", "Bridge Android starting · ${BuildConfig.VERSION_NAME}")
+        val previousHandler = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, error ->
+            BridgeDiagnostics.record("crash", "Uncaught exception on ${thread.name}: ${error.stackTraceToString()}")
+            if (previousHandler != null) {
+                previousHandler.uncaughtException(thread, error)
+            } else {
+                android.os.Process.killProcess(android.os.Process.myPid())
+                kotlin.system.exitProcess(10)
+            }
+        }
 
         // The foreground service owns discovery, trusted sessions and transfers.
         // Starting it while the Activity is visible is allowed on modern Android.
@@ -130,6 +157,17 @@ class MainActivity : ComponentActivity() {
                 pairingStatus = pairingStatus,
                 incomingOffers = incomingOffers,
                 transferStatus = transferStatus,
+                latestDisplayFrame = latestDisplayFrame,
+                latestEncodedVideoFrame = latestEncodedVideoFrame,
+                onImmersiveModeChange = { setSecondScreenImmersive(it) },
+                onCopyLogs = {
+                    val clipboard = getSystemService(android.content.ClipboardManager::class.java)
+                    clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Bridge Android diagnostics", BridgeDiagnostics.snapshot()))
+                    BridgeDiagnostics.record("diagnostics", "Diagnostic log copied to clipboard")
+                },
+                onDisplayInput = { deviceId, action, pointerId, x, y ->
+                    BridgeConnectionService.instance?.sendDisplayInput(deviceId, action, pointerId, x, y)
+                },
                 receivedFiles = receivedFiles,
                 clipboardReceivedText = clipboardReceivedText,
                 clipboardReceivedFrom = clipboardReceivedFrom,
@@ -177,9 +215,40 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun setSecondScreenImmersive(enabled: Boolean) {
+        if (android.os.Build.VERSION.SDK_INT >= 30) {
+            window.insetsController?.let { controller ->
+                if (enabled) {
+                    controller.systemBarsBehavior =
+                        android.view.WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                    controller.hide(android.view.WindowInsets.Type.systemBars())
+                } else {
+                    controller.show(android.view.WindowInsets.Type.systemBars())
+                }
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            window.decorView.systemUiVisibility = if (enabled) {
+                (android.view.View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                    or android.view.View.SYSTEM_UI_FLAG_FULLSCREEN
+                    or android.view.View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                    or android.view.View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                    or android.view.View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                    or android.view.View.SYSTEM_UI_FLAG_LAYOUT_STABLE)
+            } else {
+                android.view.View.SYSTEM_UI_FLAG_VISIBLE
+            }
+        }
+    }
+
     override fun onResume() {
         super.onResume()
         BridgeConnectionService.instance?.refreshReceivedFiles()
+    }
+
+    override fun onDestroy() {
+        setSecondScreenImmersive(false)
+        super.onDestroy()
     }
 
     // Deliberately do not stop networking here. Android may destroy this Activity
@@ -251,6 +320,11 @@ private fun BridgeApp(
     pairingStatus: String,
     incomingOffers: List<BridgeIncomingOffer>,
     transferStatus: String,
+    latestDisplayFrame: BridgeDisplayFrame?,
+    latestEncodedVideoFrame: BridgeEncodedVideoFrame?,
+    onImmersiveModeChange: (Boolean) -> Unit,
+    onCopyLogs: () -> Unit,
+    onDisplayInput: (String, Int, Int, Int, Int) -> Unit,
     receivedFiles: List<File>,
     clipboardReceivedText: String?,
     clipboardReceivedFrom: String,
@@ -274,6 +348,7 @@ private fun BridgeApp(
         mutableStateOf(updatePreferences.getString("update_channel", "development") ?: "development")
     }
     var selected by remember { mutableStateOf(BridgeTab.Home) }
+    var immersiveSecondScreen by remember { mutableStateOf(false) }
     var showPairDialog by remember { mutableStateOf(false) }
     var clipboardSync by remember { mutableStateOf(updatePreferences.getBoolean("clipboard_sync_enabled", false)) }
     var notifications by remember { mutableStateOf(true) }
@@ -289,7 +364,7 @@ private fun BridgeApp(
     )) {
         Surface(modifier = Modifier.fillMaxSize(), color = Background) {
             Column {
-                HeaderBar()
+                if (!immersiveSecondScreen) HeaderBar()
                 Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                     when (selected) {
                         BridgeTab.Home -> HomeScreen(
@@ -330,6 +405,17 @@ private fun BridgeApp(
                             status = clipboardStatus,
                             onSend = onSendClipboard
                         )
+                        BridgeTab.SecondScreen -> SecondScreenView(
+                            frame = latestDisplayFrame,
+                            encodedFrame = latestEncodedVideoFrame,
+                            connectedDevices = connectedSessionHandles.size,
+                            immersive = immersiveSecondScreen,
+                            onImmersiveChange = { enabled ->
+                                immersiveSecondScreen = enabled
+                                onImmersiveModeChange(enabled)
+                            },
+                            onDisplayInput = onDisplayInput
+                        )
                         BridgeTab.Tools -> ToolsScreen()
                         BridgeTab.Settings -> SettingsScreen(
                             notifications = notifications,
@@ -342,11 +428,20 @@ private fun BridgeApp(
                                 updatePreferences.edit().putString("update_channel", it).apply()
                             },
                             updateStatus = updateStatus,
-                            onCheckUpdates = { onCheckUpdates(updateChannel) }
+                            onCheckUpdates = { onCheckUpdates(updateChannel) },
+                            onCopyLogs = onCopyLogs
                         )
                     }
                 }
-                BottomNavigation(selected = selected, onSelect = { selected = it })
+                if (!immersiveSecondScreen) {
+                    BottomNavigation(selected = selected, onSelect = {
+                        if (immersiveSecondScreen) {
+                            immersiveSecondScreen = false
+                            onImmersiveModeChange(false)
+                        }
+                        selected = it
+                    })
+                }
             }
         }
     }
@@ -468,6 +563,338 @@ private fun HeaderBar() {
     }
 }
 
+private const val DISPLAY_FRAME_STALE_AFTER_MS = 1_500L
+
+@OptIn(ExperimentalComposeUiApi::class)
+@Composable
+private fun SecondScreenView(
+    frame: BridgeDisplayFrame?,
+    encodedFrame: BridgeEncodedVideoFrame?,
+    connectedDevices: Int,
+    immersive: Boolean,
+    onImmersiveChange: (Boolean) -> Unit,
+    onDisplayInput: (String, Int, Int, Int, Int) -> Unit
+) {
+    var imageSize by remember { mutableStateOf(IntSize.Zero) }
+    var frameRate by remember { mutableStateOf(0f) }
+    var previousFrameAtNs by remember { mutableStateOf(0L) }
+    var frameAgeMs by remember { mutableStateOf<Long?>(null) }
+    val avcDecoders by produceState(initialValue = emptyList<AvcDecoderCapability>()) {
+        value = withContext(Dispatchers.Default) { inspectAvcDecoders() }
+    }
+    LaunchedEffect(frame?.sequence) {
+        val receivedAt = frame?.receivedAtElapsedRealtimeNs ?: 0L
+        if (receivedAt > 0L) {
+            if (previousFrameAtNs > 0L) {
+                val intervalNs = receivedAt - previousFrameAtNs
+                if (intervalNs > 0L) {
+                    val instantaneousFps = 1_000_000_000f / intervalNs.toFloat()
+                    frameRate = if (frameRate == 0f) instantaneousFps
+                        else frameRate * 0.75f + instantaneousFps * 0.25f
+                }
+            }
+            previousFrameAtNs = receivedAt
+        } else {
+            previousFrameAtNs = 0L
+            frameRate = 0f
+        }
+    }
+    LaunchedEffect(frame?.sequence, frame?.receivedAtElapsedRealtimeNs) {
+        val receivedAt = frame?.receivedAtElapsedRealtimeNs ?: 0L
+        if (receivedAt <= 0L) {
+            frameAgeMs = null
+        } else {
+            while (isActive) {
+                frameAgeMs = ((android.os.SystemClock.elapsedRealtimeNanos() - receivedAt) / 1_000_000L)
+                    .coerceAtLeast(0L)
+                delay(250L)
+            }
+        }
+    }
+    val streamStale = frame != null && (frameAgeMs ?: 0L) > DISPLAY_FRAME_STALE_AFTER_MS
+    val staleDurationSeconds = ((frameAgeMs ?: 0L) / 1_000L)
+    val activePointers = remember { mutableSetOf<Int>() }
+    val bitmap by produceState<androidx.compose.ui.graphics.ImageBitmap?>(
+        initialValue = null,
+        key1 = frame?.sequence,
+        key2 = frame?.width,
+        key3 = frame?.height
+    ) {
+        value = if (frame == null) {
+            null
+        } else {
+            // Bitmap allocation and BGRA-to-platform pixel upload can be expensive
+            // at display refresh rates; keep that work off the Compose main thread.
+            withContext(Dispatchers.Default) {
+                Bitmap.createBitmap(frame.width, frame.height, Bitmap.Config.ARGB_8888).also { image ->
+                    image.copyPixelsFromBuffer(ByteBuffer.wrap(frame.pixels))
+                }.asImageBitmap()
+            }
+        }
+    }
+    // Snapshot delegated state into a stable local value for Kotlin smart casts.
+    val displayBitmap = bitmap
+
+    if (immersive) {
+        Column(
+            modifier = Modifier.fillMaxSize().background(Color.Black).padding(8.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(
+                        when {
+                            frame == null -> "WAITING FOR WINDOWS"
+                            streamStale -> "STREAM STALLED"
+                            else -> "BRIDGE SECOND SCREEN"
+                        },
+                        color = when {
+                            frame == null -> Muted
+                            streamStale -> Amber
+                            else -> Accent
+                        },
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 1.sp
+                    )
+                    Text(
+                        if (frame == null) "No display frame yet" else "${frame.width} × ${frame.height} · Frame ${frame.sequence}",
+                        color = Color.White,
+                        fontSize = 11.sp
+                    )
+                    Text(
+                        when {
+                            frame == null -> "— FPS"
+                            streamStale -> "No new frame for ${staleDurationSeconds}s"
+                            frameRate <= 0f -> "Measuring incoming FPS…"
+                            else -> "${frameRate.toInt()} FPS · incoming"
+                        },
+                        color = if (streamStale) Amber else Muted,
+                        fontSize = 10.sp
+                    )
+                }
+                Button(
+                    onClick = { onImmersiveChange(false) },
+                    colors = ButtonDefaults.buttonColors(containerColor = PanelAlt, contentColor = Color.White),
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
+                ) { Text("Exit", fontSize = 12.sp) }
+            }
+            Box(
+                modifier = Modifier.weight(1f).fillMaxWidth().background(Color.Black),
+                contentAlignment = Alignment.Center
+            ) {
+                if (displayBitmap != null) {
+                    Image(
+                        bitmap = displayBitmap,
+                        contentDescription = "Windows secondary display",
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier.fillMaxSize().onSizeChanged { imageSize = it }.pointerInteropFilter { event ->
+                            val currentFrame = frame ?: return@pointerInteropFilter true
+                            val imageWidth = currentFrame.width.toFloat()
+                            val imageHeight = currentFrame.height.toFloat()
+                            val viewWidth = imageSize.width.toFloat().coerceAtLeast(1f)
+                            val viewHeight = imageSize.height.toFloat().coerceAtLeast(1f)
+                            val scale = minOf(viewWidth / imageWidth, viewHeight / imageHeight)
+                            val drawnWidth = imageWidth * scale
+                            val drawnHeight = imageHeight * scale
+                            val left = (viewWidth - drawnWidth) / 2f
+                            val top = (viewHeight - drawnHeight) / 2f
+                            fun send(index: Int, action: Int) {
+                                val pointerId = event.getPointerId(index)
+                                if (pointerId !in 0..9) return
+                                val rawX = event.getX(index)
+                                val rawY = event.getY(index)
+                                if (action == 1 && (rawX < left || rawX > left + drawnWidth ||
+                                    rawY < top || rawY > top + drawnHeight)) return
+                                val x = (((rawX - left) / drawnWidth).coerceIn(0f, 1f) * 65535f).toInt()
+                                val y = (((rawY - top) / drawnHeight).coerceIn(0f, 1f) * 65535f).toInt()
+                                onDisplayInput(currentFrame.deviceId, action, pointerId, x, y)
+                            }
+                            when (event.actionMasked) {
+                                MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
+                                    val index = event.actionIndex
+                                    val id = event.getPointerId(index)
+                                    val before = activePointers.contains(id)
+                                    send(index, 1)
+                                    if (!before && id in 0..9) {
+                                        val x = event.getX(index)
+                                        val y = event.getY(index)
+                                        if (x >= left && x <= left + drawnWidth && y >= top && y <= top + drawnHeight) {
+                                            activePointers.add(id)
+                                        }
+                                    }
+                                }
+                                MotionEvent.ACTION_MOVE -> {
+                                    for (index in 0 until event.pointerCount) {
+                                        if (activePointers.contains(event.getPointerId(index))) send(index, 2)
+                                    }
+                                }
+                                MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> {
+                                    val index = event.actionIndex
+                                    val id = event.getPointerId(index)
+                                    if (activePointers.remove(id)) send(index, 3)
+                                }
+                                MotionEvent.ACTION_CANCEL -> {
+                                    activePointers.toList().forEach { id ->
+                                        if (id in 0..9) onDisplayInput(currentFrame.deviceId, 4, id, 0, 0)
+                                    }
+                                    activePointers.clear()
+                                }
+                            }
+                            true
+                        }
+                    )
+                }
+                if (encodedFrame != null) {
+                    AvcSurfaceRenderer(
+                        frame = encodedFrame,
+                        modifier = Modifier.fillMaxSize(),
+                        onStatus = { message -> BridgeRuntimeState.transferStatus.value = message }
+                    )
+                }
+                if (displayBitmap == null) {
+                    Text(
+                        if (connectedDevices == 0) "Connect a trusted Windows PC first."
+                        else "Waiting for the Windows display stream…",
+                        color = Muted,
+                        fontSize = 12.sp
+                    )
+                }
+            }
+        }
+    } else {
+        ScreenContent {
+            Eyebrow("WIRELESS DISPLAY")
+            ScreenHeading(
+                "SECOND SCREEN",
+                "Your phone as a monitor",
+                "Windows sends captured display frames over your trusted encrypted connection."
+            )
+            Surface(color = Panel, shape = RoundedCornerShape(14.dp), modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("H.264 HARDWARE DECODER", color = Accent, fontSize = 9.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+                    when {
+                        avcDecoders.isEmpty() -> {
+                            Text("No regular H.264 decoder reported", color = Amber, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                            Text("This device may not be able to use the planned hardware video path.", color = Muted, fontSize = 10.sp)
+                        }
+                        else -> {
+                            val preferredDecoder = avcDecoders.first()
+                            Text(
+                                if (preferredDecoder.hardwareAccelerated == true) "Hardware decoder available"
+                                else if (preferredDecoder.hardwareAccelerated == false) "Software decoder available"
+                                else "H.264 decoder available · acceleration not reported",
+                                color = if (preferredDecoder.hardwareAccelerated == true) Good else Amber,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(preferredDecoder.name, color = Color.White, fontSize = 10.sp)
+                            Text(
+                                "Max declared ${preferredDecoder.maxWidth} × ${preferredDecoder.maxHeight} · ${preferredDecoder.maxFrameRate.toInt()} FPS · ${preferredDecoder.maxBitrate / 1_000_000} Mbps",
+                                color = Muted,
+                                fontSize = 10.sp
+                            )
+                            Text(
+                                if (preferredDecoder.supportsRedmiTargetMode) "1080 × 2340 @ 30 FPS: declared supported"
+                                else "1080 × 2340 @ 30 FPS: not declared supported",
+                                color = if (preferredDecoder.supportsRedmiTargetMode) Good else Amber,
+                                fontSize = 10.sp
+                            )
+                            if (avcDecoders.size > 1) {
+                                Text("${avcDecoders.size} H.264 decoders reported by Android", color = Muted, fontSize = 9.sp)
+                            }
+                        }
+                    }
+                    Text(
+                        "Capability declaration only; actual codec and Surface initialization will be verified by the video renderer.",
+                        color = Muted,
+                        fontSize = 9.sp,
+                        lineHeight = 13.sp
+                    )
+                }
+            }
+            Surface(color = Panel, shape = RoundedCornerShape(14.dp), modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            when {
+                                frame == null -> "Waiting for Windows frames"
+                                streamStale -> "Frame stream stalled"
+                                else -> "Live frame received"
+                            },
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 14.sp
+                        )
+                        Text(
+                            when {
+                                frame == null -> "IDLE"
+                                streamStale -> "STALE"
+                                else -> "RECEIVING"
+                            },
+                            color = when {
+                                frame == null -> Muted
+                                streamStale -> Amber
+                                else -> Good
+                            },
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    if (displayBitmap != null) {
+                        Image(
+                            bitmap = displayBitmap,
+                            contentDescription = "Windows secondary display",
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier.fillMaxWidth().background(Color.Black, RoundedCornerShape(8.dp))
+                        )
+                        Text("${frame!!.width} × ${frame.height} · Frame ${frame.sequence}", color = Muted, fontSize = 11.sp)
+                        Text(
+                            when {
+                                streamStale -> "No new frames for ${staleDurationSeconds}s"
+                                frameRate <= 0f -> "Measuring incoming frame rate…"
+                                else -> "${frameRate.toInt()} FPS incoming"
+                            },
+                            color = if (streamStale) Amber else Muted,
+                            fontSize = 10.sp
+                        )
+                    } else {
+                        Box(
+                            Modifier.fillMaxWidth().height(190.dp).background(Color.Black, RoundedCornerShape(8.dp)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                if (connectedDevices == 0) "Connect a trusted Windows PC first."
+                                else "Waiting for the Windows display stream…",
+                                color = Muted,
+                                fontSize = 12.sp
+                            )
+                        }
+                    }
+                    Button(
+                        onClick = { onImmersiveChange(true) },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Ink)
+                    ) { Text("Open full-screen display", fontWeight = FontWeight.Bold) }
+                    Text(
+                        "Touch and multi-pointer events are forwarded over the trusted encrypted session. Windows-side input handling is not available yet.",
+                        color = Muted,
+                        fontSize = 11.sp,
+                        lineHeight = 16.sp
+                    )
+                }
+            }
+        }
+    }
+}
 @Composable
 private fun BottomNavigation(selected: BridgeTab, onSelect: (BridgeTab) -> Unit) {
     Row(
@@ -871,7 +1298,8 @@ private fun SettingsScreen(
     updateChannel: String,
     onUpdateChannelChange: (String) -> Unit,
     updateStatus: String,
-    onCheckUpdates: () -> Unit
+    onCheckUpdates: () -> Unit,
+    onCopyLogs: () -> Unit
 ) {
     ScreenContent {
         ScreenHeading("MAKE IT YOURS", "Settings", "Privacy and preferences for your Bridge workspace.")
@@ -916,6 +1344,13 @@ private fun SettingsScreen(
             FeatureLine("⌑", "Per-device permissions", "Choose what each device can access.", "PLANNED")
             DividerLine()
             FeatureLine("⚿", "Encrypted connections", "Secure transport foundation in shared core.", "FOUNDATION")
+        }
+        Panel {
+            Eyebrow("SHOW LOGS")
+            Text("Diagnostics", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+            Text("Recent Bridge events and errors from this Android device. Logs stay on this phone.", color = Muted, fontSize = 10.sp, lineHeight = 15.sp)
+            PrimaryAction("Copy Logs", onCopyLogs, Modifier.fillMaxWidth())
+            Text("Copies the latest diagnostic history, including startup and connection errors.", color = Muted, fontSize = 10.sp, lineHeight = 15.sp)
         }
         Panel {
             Eyebrow("ABOUT BRIDGE")

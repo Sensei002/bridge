@@ -22,7 +22,8 @@ internal data class BridgePendingPairing(
     val fingerprint: String,
     val deviceId: String,
     val name: String,
-    val platform: String
+    val platform: String,
+    val attestationPublicKey: String?
 )
 
 internal data class BridgeTrustedDevice(
@@ -30,7 +31,8 @@ internal data class BridgeTrustedDevice(
     val name: String,
     val platform: String,
     val fingerprint: String,
-    val pairedAt: Long
+    val pairedAt: Long,
+    val attestationPublicKey: String? = null
 )
 
 /**
@@ -42,6 +44,7 @@ internal class BridgePairingController(
     private val privateKey: ByteArray,
     private val fingerprint: String,
     private val deviceId: String,
+    private val attestationPublicKey: String,
     private val onPending: (BridgePendingPairing) -> Unit,
     private val onStatus: (String) -> Unit
 ) {
@@ -55,6 +58,7 @@ internal class BridgePairingController(
         .put("display_name", android.os.Build.MODEL?.take(64) ?: "Bridge Android")
         .put("platform", "android")
         .put("protocol_version", 1)
+        .put("attestation_public_key", attestationPublicKey)
     private val activeSessions = ConcurrentHashMap<String, Long>()
     private val pendingSessions = ConcurrentHashMap<Long, Boolean>()
     @Volatile private var stopped = false
@@ -118,7 +122,7 @@ internal class BridgePairingController(
             return false
         }
         val all = currentTrusted.filterNot { it.deviceId == pending.deviceId }.toMutableList()
-        all += BridgeTrustedDevice(pending.deviceId, pending.name, pending.platform, pending.fingerprint, System.currentTimeMillis())
+        all += BridgeTrustedDevice(pending.deviceId, pending.name, pending.platform, pending.fingerprint, System.currentTimeMillis(), pending.attestationPublicKey)
         if (!saveTrusted(all)) {
             pendingSessions.remove(pending.handle)
             BridgeNative.sessionClose(pending.handle)
@@ -160,7 +164,7 @@ internal class BridgePairingController(
             val existing = current.firstOrNull { it.deviceId == peerId }
             check(existing == null || existing.fingerprint == fingerprint) { "Trusted device identity changed." }
             val all = current.filterNot { it.deviceId == peerId }.toMutableList()
-            all += BridgeTrustedDevice(peerId, remote.getString("display_name"), remote.getString("platform"), fingerprint, System.currentTimeMillis())
+            all += BridgeTrustedDevice(peerId, remote.getString("display_name"), remote.getString("platform"), fingerprint, System.currentTimeMillis(), remote.optString("attestation_public_key").takeIf { it.isNotBlank() })
             check(saveTrusted(all)) { "Could not save the trusted device." }
             activeSessions.put(peerId, handle)?.let(BridgeNative::sessionClose)
             onSessionReady?.invoke(peerId, handle)
@@ -218,7 +222,11 @@ internal class BridgePairingController(
             require(fingerprint.matches(Regex("[0-9a-fA-F]{64}"))) {
                 "Trusted-device record $index has an invalid fingerprint"
             }
-            BridgeTrustedDevice(deviceId, name, platform, fingerprint, item.optLong("paired_at"))
+            val attestationPublicKey = item.optString("attestation_public_key").takeIf { it.isNotBlank() }
+            require(attestationPublicKey == null || attestationPublicKey.matches(Regex("[0-9a-fA-F]{64}"))) {
+                "Trusted-device record $index has an invalid attestation public key"
+            }
+            BridgeTrustedDevice(deviceId, name, platform, fingerprint, item.optLong("paired_at"), attestationPublicKey)
         }
 
     fun stop() {
@@ -248,8 +256,17 @@ internal class BridgePairingController(
             postStatus("Could not read trusted-device registry: ${error.message}")
             return
         }
+        val remoteAttestationKey = remote.optString("attestation_public_key").takeIf { it.isNotBlank() }
+        if (remote.optString("platform") == "android") {
+            if (remoteAttestationKey == null || !remoteAttestationKey.matches(Regex("[0-9a-fA-F]{64}"))) {
+                BridgeNative.sessionClose(handle)
+                postStatus("Android peer did not provide a valid attestation public key. Pairing blocked.")
+                return
+            }
+        }
         if (trusted != null) {
-            if (trusted.fingerprint == remoteFingerprint) {
+            if (trusted.fingerprint == remoteFingerprint &&
+                (trusted.attestationPublicKey == null || trusted.attestationPublicKey.equals(remoteAttestationKey, ignoreCase = true))) {
                 // A trusted responder must acknowledge the initiator. Without this
                 // encrypted decision, a peer that has revoked its local trust waits
                 // forever for approval even though this device auto-accepted it.
@@ -261,6 +278,15 @@ internal class BridgePairingController(
                     if (!sent.optBoolean("ok")) {
                         BridgeNative.sessionClose(handle)
                         postStatus("Could not confirm the trusted session: ${sent.optString("error")}")
+                        return
+                    }
+                }
+                if (trusted.attestationPublicKey == null && remoteAttestationKey != null) {
+                    val upgraded = trustedDevices().filterNot { it.deviceId == peerId }.toMutableList()
+                    upgraded += trusted.copy(attestationPublicKey = remoteAttestationKey)
+                    if (!saveTrusted(upgraded)) {
+                        BridgeNative.sessionClose(handle)
+                        postStatus("Could not persist the Android attestation key pin.")
                         return
                     }
                 }
@@ -285,7 +311,8 @@ internal class BridgePairingController(
             fingerprint = remoteFingerprint,
             deviceId = peerId,
             name = remote.getString("display_name"),
-            platform = remote.getString("platform")
+            platform = remote.getString("platform"),
+            attestationPublicKey = remoteAttestationKey
         )
         mainHandler.post {
             if (!stopped) onPending(pending) else {
@@ -322,7 +349,8 @@ internal class BridgePairingController(
                 .put("name", device.name)
                 .put("platform", device.platform)
                 .put("fingerprint", device.fingerprint)
-                .put("paired_at", device.pairedAt))
+                .put("paired_at", device.pairedAt)
+                .put("attestation_public_key", device.attestationPublicKey ?: JSONObject.NULL))
         }
         val encrypted = BridgeIdentityStore.encryptLocalData(
             appContext, TRUST_STORE_PURPOSE, array.toString().toByteArray(Charsets.UTF_8)

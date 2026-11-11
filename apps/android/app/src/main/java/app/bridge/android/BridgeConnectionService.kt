@@ -36,6 +36,8 @@ internal object BridgeRuntimeState {
     val clipboardStatus = mutableStateOf("Clipboard sharing is off.")
     val pairingStatus = mutableStateOf("Starting Bridge background connection…")
     val transferStatus = mutableStateOf("Waiting for a connected trusted device.")
+    val latestDisplayFrame = mutableStateOf<BridgeDisplayFrame?>(null)
+    val latestEncodedVideoFrame = mutableStateOf<BridgeEncodedVideoFrame?>(null)
 }
 
 /**
@@ -83,6 +85,8 @@ class BridgeConnectionService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        BridgeDiagnostics.initialize(this)
+        BridgeDiagnostics.record("service", "Bridge connection service created")
         instance = this
         createNotificationChannel()
         val notification = buildNotification()
@@ -132,6 +136,7 @@ class BridgeConnectionService : Service() {
     }
 
     private fun postStatus(message: String) {
+        BridgeDiagnostics.record("connection", message)
         mainHandler.post {
             if (!stopping) BridgeRuntimeState.pairingStatus.value = message
         }
@@ -145,6 +150,21 @@ class BridgeConnectionService : Service() {
                 val fingerprintResult = org.json.JSONObject(BridgeNative.identityFingerprint(keyHex))
                 check(fingerprintResult.optBoolean("ok")) { fingerprintResult.optString("error") }
                 val fingerprint = fingerprintResult.getString("fingerprint")
+                // Create and validate the independent signing identity before pairing starts.
+                // The seed is reloaded only by the future signing path, never retained here.
+                val attestationSeed = BridgeIdentityStore.loadOrCreateAttestationSeed(this)
+                val attestationKeyResult = try {
+                    org.json.JSONObject(BridgeNative.attestationPublicKey(attestationSeed))
+                } finally {
+                    attestationSeed.fill(0)
+                }
+                check(attestationKeyResult.optBoolean("ok")) {
+                    attestationKeyResult.optString("error", "Could not derive Android attestation public key")
+                }
+                val attestationPublicKey = attestationKeyResult.getString("public_key")
+                check(attestationPublicKey.matches(Regex("[0-9a-fA-F]{64}"))) {
+                    "Native attestation key derivation returned an invalid public key"
+                }
                 val identityPreferences = getSharedPreferences("bridge_secure_identity", MODE_PRIVATE)
                 val deviceId = identityPreferences.getString("device_id", null)
                     ?: UUID.randomUUID().toString().also {
@@ -153,10 +173,35 @@ class BridgeConnectionService : Service() {
 
                 val receiver = BridgeTransferReceiver(
                     this,
+                    fingerprint,
                     onOffer = { offer ->
                         mainHandler.post {
                             if (!stopping && BridgeRuntimeState.incomingOffers.none { it.transferId == offer.transferId }) {
                                 BridgeRuntimeState.incomingOffers.add(offer)
+                            }
+                        }
+                    },
+                    onDisplayFrame = { frame ->
+                        if (frame.sequence == 1L || frame.sequence % 120L == 0L) {
+                            BridgeDiagnostics.record("video-bgra", "Frame ${frame.sequence} · ${frame.width}x${frame.height}")
+                        }
+                        mainHandler.post {
+                            if (!stopping) {
+                                BridgeRuntimeState.latestDisplayFrame.value = frame
+                                BridgeRuntimeState.transferStatus.value =
+                                    "Second screen frame received · ${frame.width}×${frame.height} · #${frame.sequence}"
+                            }
+                        }
+                    },
+                    onEncodedVideoFrame = { frame ->
+                        if (frame.keyframe || frame.sequence == 1L || frame.sequence % 120L == 0L) {
+                            BridgeDiagnostics.record("video-h264", "Access unit ${frame.sequence} · ${frame.width}x${frame.height} · keyframe=${frame.keyframe}")
+                        }
+                        mainHandler.post {
+                            if (!stopping) {
+                                BridgeRuntimeState.latestEncodedVideoFrame.value = frame
+                                BridgeRuntimeState.transferStatus.value =
+                                    "H.264 access unit received · ${frame.width}×${frame.height} · #${frame.sequence}${if (frame.keyframe) " · keyframe" else ""}"
                             }
                         }
                     },
@@ -176,6 +221,7 @@ class BridgeConnectionService : Service() {
                         }
                     },
                     onStatus = { message ->
+                        BridgeDiagnostics.record("transfer", message)
                         mainHandler.post {
                             if (!stopping) {
                                 BridgeRuntimeState.transferStatus.value = message
@@ -184,9 +230,16 @@ class BridgeConnectionService : Service() {
                         }
                     },
                     onSessionEnded = { peerId, handle ->
+                        BridgeDiagnostics.record("connection", "Session ended for peer ${peerId.take(12)}")
                         mainHandler.post {
                             if (stopping) return@post
                             pairingController?.onSessionEnded(peerId, handle)
+                            if (BridgeRuntimeState.latestDisplayFrame.value?.deviceId == peerId) {
+                                BridgeRuntimeState.latestDisplayFrame.value = null
+                            }
+                            if (BridgeRuntimeState.latestEncodedVideoFrame.value?.deviceId == peerId) {
+                                BridgeRuntimeState.latestEncodedVideoFrame.value = null
+                            }
                             if (BridgeRuntimeState.connectedSessionHandles[peerId] == handle) {
                                 BridgeRuntimeState.connectedSessionHandles.remove(peerId)
                             }
@@ -211,6 +264,7 @@ class BridgeConnectionService : Service() {
                     privateKey,
                     fingerprint,
                     deviceId,
+                    attestationPublicKey,
                     onPending = { pending ->
                         mainHandler.post {
                             if (!stopping && BridgeRuntimeState.pendingPairings.none { it.handle == pending.handle }) {
@@ -241,7 +295,9 @@ class BridgeConnectionService : Service() {
                     mainHandler.post {
                         if (!stopping) {
                             BridgeRuntimeState.connectedSessionHandles[peerId] = handle
-                            receiver.attach(peerId, handle)
+                            val peerPlatform = controller.trustedDevices()
+                                .firstOrNull { it.deviceId == peerId }?.platform
+                            receiver.attach(peerId, handle, allowDisplayAttestation = peerPlatform == "windows")
                         } else {
                             BridgeNative.sessionClose(handle)
                         }
@@ -293,7 +349,7 @@ class BridgeConnectionService : Service() {
                         BridgeRuntimeState.trustedDevices.clear()
                         BridgeRuntimeState.trustedDevices.addAll(restoredDevices)
                         BridgeRuntimeState.pairingStatus.value =
-                            "Identity protected by Android Keystore · Noise XX ready."
+                            "Noise XX ready · Android attestation identity protected by Keystore."
                         refreshReceivedFiles()
                     }
                 }
@@ -347,6 +403,29 @@ class BridgeConnectionService : Service() {
 
     internal fun sendFile(uri: Uri, sessionHandle: Long) {
         transferReceiver?.sendFile(uri, sessionHandle)
+    }
+
+    internal fun requestVideoKeyframe(deviceId: String, sessionHandle: Long, lastSequence: Long) {
+        if (sessionHandle == 0L) return
+        try {
+            transferReceiver?.requestVideoKeyframe(sessionHandle, lastSequence)
+        } catch (error: Exception) {
+            mainHandler.post {
+                if (!stopping) BridgeRuntimeState.transferStatus.value =
+                    "Could not request an H.264 recovery keyframe from $deviceId: ${error.message ?: error.javaClass.simpleName}"
+            }
+        }
+    }
+
+    internal fun sendDisplayInput(deviceId: String, action: Int, pointerId: Int, x: Int, y: Int) {
+        // Route input only to the authenticated peer that supplied the displayed frame.
+        val handle = BridgeRuntimeState.connectedSessionHandles[deviceId] ?: return
+        try {
+            transferReceiver?.sendDisplayInput(handle, action, pointerId, x, y)
+        } catch (error: Exception) {
+            BridgeRuntimeState.transferStatus.value =
+                "Could not forward second-screen input: ${error.message ?: error.javaClass.simpleName}"
+        }
     }
 
     internal fun sendClipboard(text: String) {

@@ -82,7 +82,7 @@ jobs:
           gradle-version: "9.6.0"
       - name: Build Android APK
         working-directory: apps/android
-        run: gradle :app:assembleDebug
+        run: gradle :app:testDebugUnitTest :app:assembleDebug
       - name: Verify Android native library is packaged
         run: test -f apps/android/app/src/main/jniLibs/arm64-v8a/libbridge_mobile.so
       - uses: actions/upload-artifact@v4

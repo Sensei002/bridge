@@ -68,10 +68,16 @@ pub enum TransferControl {
     FileReject { transfer_id: Uuid, reason: String },
     FileComplete { transfer_id: Uuid },
     FileCancel { transfer_id: Uuid },
-    /// Relay a one-time challenge issued by the local Windows display service.
-    DisplayChallengeRequest { request_id: Uuid, nonce: String },
-    /// Echoed only over the authenticated Noise session that received the request.
-    DisplayChallengeResponse { request_id: Uuid, nonce: String },
+    /// Relay a one-time challenge and the live desktop/Android Noise session ID.
+    DisplayChallengeRequest { request_id: Uuid, session_id: Uuid, nonce: String },
+    /// Ed25519 proof returned only over the authenticated Noise session that received the request.
+    DisplayChallengeResponse {
+        request_id: Uuid,
+        session_id: Uuid,
+        nonce: String,
+        device_fingerprint: String,
+        signature: String,
+    },
 }
 
 pub fn encode_control(message: &TransferControl) -> Result<Vec<u8>, TransferError> {
@@ -79,8 +85,12 @@ pub fn encode_control(message: &TransferControl) -> Result<Vec<u8>, TransferErro
         TransferControl::FileOffer { offer } => offer.validate()?,
         TransferControl::FileReject { reason, .. } if reason.len() > 256 =>
             return Err(TransferError::InvalidOffer("rejection reason is too long".into())),
-        TransferControl::DisplayChallengeRequest { nonce, .. }
-        | TransferControl::DisplayChallengeResponse { nonce, .. } => validate_challenge_nonce(nonce)?,
+        TransferControl::DisplayChallengeRequest { nonce, .. } => validate_challenge_nonce(nonce)?,
+        TransferControl::DisplayChallengeResponse { nonce, device_fingerprint, signature, .. } => {
+            validate_challenge_nonce(nonce)?;
+            validate_hex_field(device_fingerprint, 64, "device fingerprint")?;
+            validate_hex_field(signature, 128, "attestation signature")?;
+        },
         _ => {}
     }
     serde_json::to_vec(message).map_err(|error| TransferError::InvalidOffer(error.to_string()))
@@ -100,11 +110,23 @@ pub fn decode_control(bytes: &[u8]) -> Result<TransferControl, TransferError> {
             return Err(TransferError::InvalidOffer("rejection reason is too long".into()));
         }
     }
-    if let TransferControl::DisplayChallengeRequest { nonce, .. }
-    | TransferControl::DisplayChallengeResponse { nonce, .. } = &message {
-        validate_challenge_nonce(nonce)?;
+    match &message {
+        TransferControl::DisplayChallengeRequest { nonce, .. } => validate_challenge_nonce(nonce)?,
+        TransferControl::DisplayChallengeResponse { nonce, device_fingerprint, signature, .. } => {
+            validate_challenge_nonce(nonce)?;
+            validate_hex_field(device_fingerprint, 64, "device fingerprint")?;
+            validate_hex_field(signature, 128, "attestation signature")?;
+        }
+        _ => {}
     }
     Ok(message)
+}
+
+fn validate_hex_field(value: &str, expected_len: usize, label: &str) -> Result<(), TransferError> {
+    if value.len() != expected_len || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(TransferError::InvalidOffer(format!("{label} must be {expected_len} hexadecimal characters")));
+    }
+    Ok(())
 }
 
 fn validate_challenge_nonce(nonce: &str) -> Result<(), TransferError> {
@@ -138,15 +160,83 @@ pub fn encode_chunk(chunk: &FileChunk) -> Result<Vec<u8>, TransferError> {
 /// A transfer packet carried as one encrypted Noise application message.
 /// The leading discriminator prevents JSON control messages from being confused
 /// with binary file chunks while preserving the existing chunk wire format.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum DisplayInputAction {
+    Down = 1,
+    Move = 2,
+    Up = 3,
+    Cancel = 4,
+}
+
+/// One normalized pointer sample from the Android display surface.
+/// Coordinates use the inclusive 0..=65535 range so the Windows side can
+/// map them to the active virtual-monitor dimensions without trusting pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DisplayInputEvent {
+    pub sequence: u64,
+    pub timestamp_ns: u64,
+    pub pointer_id: u8,
+    pub action: DisplayInputAction,
+    pub x: u16,
+    pub y: u16,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TransferPacket {
     Control(TransferControl),
     Chunk(FileChunk),
+    DisplayFrame(DisplayFrameFragment),
+    EncodedVideoFrame(EncodedVideoFrameFragment),
+    DisplayInput(DisplayInputEvent),
 }
 
 pub const CONTROL_PACKET_TAG: u8 = 0x01;
 pub const CHUNK_PACKET_TAG: u8 = 0x02;
+pub const DISPLAY_INPUT_PACKET_TAG: u8 = 0x05;
+pub const MAX_DISPLAY_INPUT_POINTERS: u8 = 10;
+const DISPLAY_INPUT_PACKET_BYTES: usize = 1 + 8 + 8 + 1 + 1 + 2 + 2;
 pub const MAX_PACKET_BYTES: usize = 65_519;
+
+fn encode_display_input(event: DisplayInputEvent) -> Result<Vec<u8>, TransferError> {
+    if event.sequence == 0 || event.timestamp_ns == 0 || event.pointer_id >= MAX_DISPLAY_INPUT_POINTERS {
+        return Err(TransferError::InvalidChunk("display input sequence, timestamp, or pointer ID is invalid".into()));
+    }
+    let mut bytes = Vec::with_capacity(DISPLAY_INPUT_PACKET_BYTES);
+    bytes.push(DISPLAY_INPUT_PACKET_TAG);
+    bytes.extend_from_slice(&event.sequence.to_be_bytes());
+    bytes.extend_from_slice(&event.timestamp_ns.to_be_bytes());
+    bytes.push(event.pointer_id);
+    bytes.push(event.action as u8);
+    bytes.extend_from_slice(&event.x.to_be_bytes());
+    bytes.extend_from_slice(&event.y.to_be_bytes());
+    Ok(bytes)
+}
+
+fn decode_display_input(bytes: &[u8]) -> Result<DisplayInputEvent, TransferError> {
+    if bytes.len() != DISPLAY_INPUT_PACKET_BYTES || bytes[0] != DISPLAY_INPUT_PACKET_TAG {
+        return Err(TransferError::InvalidChunk("display input packet size or tag is invalid".into()));
+    }
+    let sequence = u64::from_be_bytes(bytes[1..9].try_into().expect("fixed display input header"));
+    let timestamp_ns = u64::from_be_bytes(bytes[9..17].try_into().expect("fixed display input header"));
+    let pointer_id = bytes[17];
+    let action = match bytes[18] {
+        1 => DisplayInputAction::Down,
+        2 => DisplayInputAction::Move,
+        3 => DisplayInputAction::Up,
+        4 => DisplayInputAction::Cancel,
+        _ => return Err(TransferError::InvalidChunk("unknown display input action".into())),
+    };
+    let event = DisplayInputEvent {
+        sequence, timestamp_ns, pointer_id, action,
+        x: u16::from_be_bytes(bytes[19..21].try_into().expect("fixed display input header")),
+        y: u16::from_be_bytes(bytes[21..23].try_into().expect("fixed display input header")),
+    };
+    if event.sequence == 0 || event.timestamp_ns == 0 || event.pointer_id >= MAX_DISPLAY_INPUT_POINTERS {
+        return Err(TransferError::InvalidChunk("display input sequence, timestamp, or pointer ID is invalid".into()));
+    }
+    Ok(event)
+}
 
 pub fn encode_packet(packet: &TransferPacket) -> Result<Vec<u8>, TransferError> {
     let encoded = match packet {
@@ -160,6 +250,9 @@ pub fn encode_packet(packet: &TransferPacket) -> Result<Vec<u8>, TransferError> 
             bytes.extend_from_slice(&encode_chunk(chunk)?);
             bytes
         }
+        TransferPacket::DisplayFrame(fragment) => encode_display_frame_fragment(fragment)?,
+        TransferPacket::EncodedVideoFrame(fragment) => encode_encoded_video_fragment(fragment)?,
+        TransferPacket::DisplayInput(event) => encode_display_input(*event)?,
     };
     if encoded.len() > MAX_PACKET_BYTES {
         return Err(TransferError::InvalidChunk("packet exceeds the encrypted transport limit".into()));
@@ -174,6 +267,9 @@ pub fn decode_packet(bytes: &[u8]) -> Result<TransferPacket, TransferError> {
     match bytes[0] {
         CONTROL_PACKET_TAG => Ok(TransferPacket::Control(decode_control(&bytes[1..])?)),
         CHUNK_PACKET_TAG => Ok(TransferPacket::Chunk(decode_chunk(&bytes[1..])?)),
+        DISPLAY_FRAME_PACKET_TAG => Ok(TransferPacket::DisplayFrame(decode_display_frame_fragment(bytes)?)),
+        ENCODED_VIDEO_PACKET_TAG => Ok(TransferPacket::EncodedVideoFrame(decode_encoded_video_fragment(bytes)?)),
+        DISPLAY_INPUT_PACKET_TAG => Ok(TransferPacket::DisplayInput(decode_display_input(bytes)?)),
         _ => Err(TransferError::InvalidChunk("unknown transfer packet type".into())),
     }
 }
@@ -379,6 +475,460 @@ impl Drop for IncomingFile {
     }
 }
 
+
+/// Maximum uncompressed BGRA8 display frame accepted by the transport.
+pub const MAX_DISPLAY_FRAME_BYTES: usize = 64 * 1024 * 1024;
+/// Each display fragment fits inside one authenticated Noise application message.
+pub const DISPLAY_FRAME_FRAGMENT_BYTES: usize = 48 * 1024;
+pub const DISPLAY_FRAME_PACKET_TAG: u8 = 0x04;
+const DISPLAY_FRAME_FRAGMENT_HEADER_BYTES: usize = 1 + 8 + 4 + 4 + 4 + 8 + 4 + 4;
+
+/// H.264 access units use a separate packet discriminator from raw BGRA frames.
+pub const ENCODED_VIDEO_PACKET_TAG: u8 = 0x06;
+/// Bound a single encoded access unit to 16 MiB, including large keyframes.
+pub const MAX_ENCODED_VIDEO_FRAME_BYTES: usize = 16 * 1024 * 1024;
+const ENCODED_VIDEO_FRAGMENT_HEADER_BYTES: usize = 1 + 8 + 4 + 4 + 8 + 4 + 4 + 1;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DisplayFrameFragment {
+    pub sequence: u64,
+    pub width: u32,
+    pub height: u32,
+    pub stride: u32,
+    pub timestamp_ns: u64,
+    pub total_bytes: u32,
+    pub offset: u32,
+    pub data: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DisplayFrame {
+    pub sequence: u64,
+    pub width: u32,
+    pub height: u32,
+    pub stride: u32,
+    pub timestamp_ns: u64,
+    pub pixels: Vec<u8>,
+}
+
+
+/// A tightly packed NV12 frame ready for a Media Foundation encoder input sample.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Nv12Frame {
+    pub sequence: u64,
+    pub width: u32,
+    pub height: u32,
+    pub timestamp_ns: u64,
+    /// Y plane followed by interleaved U/V chroma plane.
+    pub pixels: Vec<u8>,
+}
+
+/// Convert a tightly packed BGRA8 display frame to 8-bit BT.709 limited-range NV12.
+/// Chroma is averaged over each 2x2 pixel block; NV12 requires even dimensions.
+pub fn bgra_to_nv12(frame: &DisplayFrame) -> Result<Nv12Frame, TransferError> {
+    let total_bytes = u32::try_from(frame.pixels.len())
+        .map_err(|_| TransferError::InvalidChunk("BGRA frame is too large".into()))?;
+    validate_display_frame_metadata(
+        frame.sequence, frame.width, frame.height, frame.stride, total_bytes,
+    )?;
+    if !frame.width.is_multiple_of(2) || !frame.height.is_multiple_of(2) {
+        return Err(TransferError::InvalidChunk("NV12 conversion requires even frame dimensions".into()));
+    }
+    let width = frame.width as usize;
+    let height = frame.height as usize;
+    let y_bytes = width.checked_mul(height)
+        .ok_or_else(|| TransferError::InvalidChunk("NV12 luma size overflow".into()))?;
+    let total_nv12 = y_bytes.checked_add(y_bytes / 2)
+        .ok_or_else(|| TransferError::InvalidChunk("NV12 frame size overflow".into()))?;
+    if total_nv12 > MAX_DISPLAY_FRAME_BYTES {
+        return Err(TransferError::InvalidChunk("NV12 frame exceeds 64 MiB".into()));
+    }
+    let mut pixels = vec![0_u8; total_nv12];
+
+    // BT.709 RGB-to-Y'CbCr coefficients with video-range offsets.
+    let yuv = |pixel: usize| -> (u8, i32, i32) {
+        let b = frame.pixels[pixel] as i32;
+        let g = frame.pixels[pixel + 1] as i32;
+        let r = frame.pixels[pixel + 2] as i32;
+        let y = 16 + ((47 * r + 157 * g + 16 * b + 128) >> 8);
+        let u = 128 + ((-26 * r - 87 * g + 112 * b + 128) >> 8);
+        let v = 128 + ((112 * r - 102 * g - 10 * b + 128) >> 8);
+        (y.clamp(16, 235) as u8, u, v)
+    };
+
+    for row in 0..height {
+        for col in 0..width {
+            let source = row * frame.stride as usize + col * 4;
+            pixels[row * width + col] = yuv(source).0;
+        }
+    }
+    let uv_start = y_bytes;
+    for row in (0..height).step_by(2) {
+        for col in (0..width).step_by(2) {
+            let mut u_sum = 0_i32;
+            let mut v_sum = 0_i32;
+            for dy in 0..2 {
+                for dx in 0..2 {
+                    let source = (row + dy) * frame.stride as usize + (col + dx) * 4;
+                    let (_, u, v) = yuv(source);
+                    u_sum += u;
+                    v_sum += v;
+                }
+            }
+            let destination = uv_start + (row / 2) * width + col;
+            pixels[destination] = ((u_sum + 2) / 4).clamp(16, 240) as u8;
+            pixels[destination + 1] = ((v_sum + 2) / 4).clamp(16, 240) as u8;
+        }
+    }
+    Ok(Nv12Frame {
+        sequence: frame.sequence, width: frame.width, height: frame.height,
+        timestamp_ns: frame.timestamp_ns, pixels,
+    })
+}
+
+/// One bounded fragment of an Annex-B H.264 access unit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EncodedVideoFrameFragment {
+    pub sequence: u64,
+    pub width: u32,
+    pub height: u32,
+    pub timestamp_ns: u64,
+    pub total_bytes: u32,
+    pub offset: u32,
+    pub keyframe: bool,
+    pub data: Vec<u8>,
+}
+
+/// Complete encoded H.264 access unit, ready for a decoder input buffer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EncodedVideoFrame {
+    pub sequence: u64,
+    pub width: u32,
+    pub height: u32,
+    pub timestamp_ns: u64,
+    pub keyframe: bool,
+    /// Annex-B byte stream. The encoder is responsible for including SPS/PPS
+    /// on keyframes or the receiver must obtain codec configuration separately.
+    pub bitstream: Vec<u8>,
+}
+
+fn validate_encoded_video_metadata(
+    sequence: u64, width: u32, height: u32, timestamp_ns: u64, total_bytes: u32,
+) -> Result<(), TransferError> {
+    if sequence == 0 || timestamp_ns == 0 || width == 0 || height == 0
+        || width > 4096 || height > 4096
+        || total_bytes == 0 || total_bytes as usize > MAX_ENCODED_VIDEO_FRAME_BYTES
+    {
+        return Err(TransferError::InvalidChunk("encoded video metadata is invalid or exceeds the 16 MiB access-unit limit".into()));
+    }
+    Ok(())
+}
+
+pub fn encode_encoded_video_fragment(
+    fragment: &EncodedVideoFrameFragment,
+) -> Result<Vec<u8>, TransferError> {
+    validate_encoded_video_metadata(
+        fragment.sequence, fragment.width, fragment.height,
+        fragment.timestamp_ns, fragment.total_bytes,
+    )?;
+    let end = (fragment.offset as u64).checked_add(fragment.data.len() as u64)
+        .ok_or_else(|| TransferError::InvalidChunk("encoded video fragment range overflow".into()))?;
+    if fragment.data.is_empty() || fragment.data.len() > DISPLAY_FRAME_FRAGMENT_BYTES
+        || end > fragment.total_bytes as u64
+    {
+        return Err(TransferError::InvalidChunk("encoded video fragment payload range is invalid".into()));
+    }
+    let mut bytes = Vec::with_capacity(ENCODED_VIDEO_FRAGMENT_HEADER_BYTES + fragment.data.len());
+    bytes.push(ENCODED_VIDEO_PACKET_TAG);
+    bytes.extend_from_slice(&fragment.sequence.to_be_bytes());
+    bytes.extend_from_slice(&fragment.width.to_be_bytes());
+    bytes.extend_from_slice(&fragment.height.to_be_bytes());
+    bytes.extend_from_slice(&fragment.timestamp_ns.to_be_bytes());
+    bytes.extend_from_slice(&fragment.total_bytes.to_be_bytes());
+    bytes.extend_from_slice(&fragment.offset.to_be_bytes());
+    bytes.push(u8::from(fragment.keyframe));
+    bytes.extend_from_slice(&fragment.data);
+    if bytes.len() > MAX_PACKET_BYTES {
+        return Err(TransferError::InvalidChunk("encoded video fragment exceeds the encrypted message limit".into()));
+    }
+    Ok(bytes)
+}
+
+pub fn decode_encoded_video_fragment(
+    bytes: &[u8],
+) -> Result<EncodedVideoFrameFragment, TransferError> {
+    if bytes.len() <= ENCODED_VIDEO_FRAGMENT_HEADER_BYTES || bytes.len() > MAX_PACKET_BYTES
+        || bytes[0] != ENCODED_VIDEO_PACKET_TAG
+    {
+        return Err(TransferError::InvalidChunk("encoded video fragment packet size or tag is invalid".into()));
+    }
+    let u32_at = |offset: usize| -> Result<u32, TransferError> {
+        let value: [u8; 4] = bytes.get(offset..offset + 4)
+            .ok_or_else(|| TransferError::InvalidChunk("truncated encoded video header".into()))?
+            .try_into().map_err(|_| TransferError::InvalidChunk("invalid encoded video field".into()))?;
+        Ok(u32::from_be_bytes(value))
+    };
+    let u64_at = |offset: usize| -> Result<u64, TransferError> {
+        let value: [u8; 8] = bytes.get(offset..offset + 8)
+            .ok_or_else(|| TransferError::InvalidChunk("truncated encoded video header".into()))?
+            .try_into().map_err(|_| TransferError::InvalidChunk("invalid encoded video field".into()))?;
+        Ok(u64::from_be_bytes(value))
+    };
+    let keyframe = match bytes[33] {
+        0 => false,
+        1 => true,
+        _ => return Err(TransferError::InvalidChunk("encoded video keyframe flag is invalid".into())),
+    };
+    let fragment = EncodedVideoFrameFragment {
+        sequence: u64_at(1)?,
+        width: u32_at(9)?,
+        height: u32_at(13)?,
+        timestamp_ns: u64_at(17)?,
+        total_bytes: u32_at(25)?,
+        offset: u32_at(29)?,
+        keyframe,
+        data: bytes[ENCODED_VIDEO_FRAGMENT_HEADER_BYTES..].to_vec(),
+    };
+    validate_encoded_video_metadata(
+        fragment.sequence, fragment.width, fragment.height,
+        fragment.timestamp_ns, fragment.total_bytes,
+    )?;
+    let end = (fragment.offset as u64).checked_add(fragment.data.len() as u64)
+        .ok_or_else(|| TransferError::InvalidChunk("encoded video fragment range overflow".into()))?;
+    if fragment.data.is_empty() || fragment.data.len() > DISPLAY_FRAME_FRAGMENT_BYTES
+        || end > fragment.total_bytes as u64
+    {
+        return Err(TransferError::InvalidChunk("encoded video fragment payload range is invalid".into()));
+    }
+    Ok(fragment)
+}
+
+pub fn fragment_encoded_video_frame(
+    frame: &EncodedVideoFrame,
+) -> Result<Vec<Vec<u8>>, TransferError> {
+    let total_bytes = u32::try_from(frame.bitstream.len())
+        .map_err(|_| TransferError::InvalidChunk("encoded video access unit is too large".into()))?;
+    validate_encoded_video_metadata(
+        frame.sequence, frame.width, frame.height, frame.timestamp_ns, total_bytes,
+    )?;
+    let mut packets = Vec::with_capacity(frame.bitstream.len().div_ceil(DISPLAY_FRAME_FRAGMENT_BYTES));
+    for (index, data) in frame.bitstream.chunks(DISPLAY_FRAME_FRAGMENT_BYTES).enumerate() {
+        let offset = index.checked_mul(DISPLAY_FRAME_FRAGMENT_BYTES)
+            .ok_or_else(|| TransferError::InvalidChunk("encoded video fragment offset overflow".into()))?;
+        packets.push(encode_encoded_video_fragment(&EncodedVideoFrameFragment {
+            sequence: frame.sequence,
+            width: frame.width,
+            height: frame.height,
+            timestamp_ns: frame.timestamp_ns,
+            total_bytes,
+            offset: u32::try_from(offset)
+                .map_err(|_| TransferError::InvalidChunk("encoded video fragment offset overflow".into()))?,
+            keyframe: frame.keyframe,
+            data: data.to_vec(),
+        })?);
+    }
+    Ok(packets)
+}
+
+/// Reassembles one bounded H.264 access unit and rejects stale or reordered fragments.
+#[derive(Default)]
+pub struct EncodedVideoFrameAssembler {
+    active: Option<EncodedVideoFrameFragment>,
+    bitstream: Vec<u8>,
+    last_completed_sequence: u64,
+}
+
+impl EncodedVideoFrameAssembler {
+    pub fn reset(&mut self) {
+        self.active = None;
+        self.bitstream.clear();
+    }
+
+    pub fn push(&mut self, packet: &[u8]) -> Result<Option<EncodedVideoFrame>, TransferError> {
+        let fragment = decode_encoded_video_fragment(packet)?;
+        if fragment.offset == 0 {
+            if self.active.is_some() || fragment.sequence <= self.last_completed_sequence {
+                self.reset();
+                return Err(TransferError::InvalidChunk("encoded video access unit is overlapping or stale".into()));
+            }
+            self.bitstream = Vec::with_capacity(fragment.total_bytes as usize);
+            self.active = Some(fragment.clone());
+        }
+        let Some(first) = self.active.as_ref() else {
+            return Err(TransferError::InvalidChunk("encoded video access unit must begin with offset zero".into()));
+        };
+        if fragment.sequence != first.sequence || fragment.width != first.width
+            || fragment.height != first.height || fragment.timestamp_ns != first.timestamp_ns
+            || fragment.total_bytes != first.total_bytes || fragment.keyframe != first.keyframe
+            || fragment.offset as usize != self.bitstream.len()
+        {
+            self.reset();
+            return Err(TransferError::InvalidChunk("encoded video fragments are out of order or have inconsistent metadata".into()));
+        }
+        self.bitstream.extend_from_slice(&fragment.data);
+        if self.bitstream.len() == fragment.total_bytes as usize {
+            let first = self.active.take().expect("active encoded frame exists");
+            let bitstream = std::mem::take(&mut self.bitstream);
+            self.last_completed_sequence = first.sequence;
+            return Ok(Some(EncodedVideoFrame {
+                sequence: first.sequence,
+                width: first.width,
+                height: first.height,
+                timestamp_ns: first.timestamp_ns,
+                keyframe: first.keyframe,
+                bitstream,
+            }));
+        }
+        Ok(None)
+    }
+}
+
+fn validate_display_frame_metadata(
+    sequence: u64, width: u32, height: u32, stride: u32, total_bytes: u32,
+) -> Result<(), TransferError> {
+    let expected_stride = width.checked_mul(4)
+        .ok_or_else(|| TransferError::InvalidChunk("display frame stride overflow".into()))?;
+    let expected_bytes = (stride as u64).checked_mul(height as u64)
+        .ok_or_else(|| TransferError::InvalidChunk("display frame size overflow".into()))?;
+    if sequence == 0 || width == 0 || height == 0 || width > 4096 || height > 4096
+        || stride != expected_stride || expected_bytes == 0
+        || expected_bytes > MAX_DISPLAY_FRAME_BYTES as u64
+        || total_bytes as u64 != expected_bytes
+    {
+        return Err(TransferError::InvalidChunk("display frame metadata is invalid or exceeds 64 MiB".into()));
+    }
+    Ok(())
+}
+
+pub fn encode_display_frame_fragment(fragment: &DisplayFrameFragment) -> Result<Vec<u8>, TransferError> {
+    validate_display_frame_metadata(fragment.sequence, fragment.width, fragment.height, fragment.stride, fragment.total_bytes)?;
+    let end = (fragment.offset as u64).checked_add(fragment.data.len() as u64)
+        .ok_or_else(|| TransferError::InvalidChunk("display fragment range overflow".into()))?;
+    if fragment.data.is_empty() || fragment.data.len() > DISPLAY_FRAME_FRAGMENT_BYTES
+        || end > fragment.total_bytes as u64
+    {
+        return Err(TransferError::InvalidChunk("display fragment payload range is invalid".into()));
+    }
+    let mut bytes = Vec::with_capacity(DISPLAY_FRAME_FRAGMENT_HEADER_BYTES + fragment.data.len());
+    bytes.push(DISPLAY_FRAME_PACKET_TAG);
+    bytes.extend_from_slice(&fragment.sequence.to_be_bytes());
+    bytes.extend_from_slice(&fragment.width.to_be_bytes());
+    bytes.extend_from_slice(&fragment.height.to_be_bytes());
+    bytes.extend_from_slice(&fragment.stride.to_be_bytes());
+    bytes.extend_from_slice(&fragment.timestamp_ns.to_be_bytes());
+    bytes.extend_from_slice(&fragment.total_bytes.to_be_bytes());
+    bytes.extend_from_slice(&fragment.offset.to_be_bytes());
+    bytes.extend_from_slice(&fragment.data);
+    if bytes.len() > MAX_PACKET_BYTES {
+        return Err(TransferError::InvalidChunk("display fragment exceeds the encrypted message limit".into()));
+    }
+    Ok(bytes)
+}
+
+pub fn decode_display_frame_fragment(bytes: &[u8]) -> Result<DisplayFrameFragment, TransferError> {
+    if bytes.len() <= DISPLAY_FRAME_FRAGMENT_HEADER_BYTES || bytes.len() > MAX_PACKET_BYTES
+        || bytes[0] != DISPLAY_FRAME_PACKET_TAG
+    {
+        return Err(TransferError::InvalidChunk("display fragment packet size or tag is invalid".into()));
+    }
+    let u32_at = |offset: usize| -> Result<u32, TransferError> {
+        let value: [u8; 4] = bytes.get(offset..offset + 4)
+            .ok_or_else(|| TransferError::InvalidChunk("truncated display fragment header".into()))?
+            .try_into().map_err(|_| TransferError::InvalidChunk("invalid display fragment field".into()))?;
+        Ok(u32::from_be_bytes(value))
+    };
+    let u64_at = |offset: usize| -> Result<u64, TransferError> {
+        let value: [u8; 8] = bytes.get(offset..offset + 8)
+            .ok_or_else(|| TransferError::InvalidChunk("truncated display fragment header".into()))?
+            .try_into().map_err(|_| TransferError::InvalidChunk("invalid display fragment field".into()))?;
+        Ok(u64::from_be_bytes(value))
+    };
+    let fragment = DisplayFrameFragment {
+        sequence: u64_at(1)?,
+        width: u32_at(9)?,
+        height: u32_at(13)?,
+        stride: u32_at(17)?,
+        timestamp_ns: u64_at(21)?,
+        total_bytes: u32_at(29)?,
+        offset: u32_at(33)?,
+        data: bytes[DISPLAY_FRAME_FRAGMENT_HEADER_BYTES..].to_vec(),
+    };
+    validate_display_frame_metadata(fragment.sequence, fragment.width, fragment.height, fragment.stride, fragment.total_bytes)?;
+    let end = (fragment.offset as u64).checked_add(fragment.data.len() as u64)
+        .ok_or_else(|| TransferError::InvalidChunk("display fragment range overflow".into()))?;
+    if fragment.data.is_empty() || fragment.data.len() > DISPLAY_FRAME_FRAGMENT_BYTES
+        || end > fragment.total_bytes as u64
+    {
+        return Err(TransferError::InvalidChunk("display fragment payload range is invalid".into()));
+    }
+    Ok(fragment)
+}
+
+/// Splits a validated BGRA8 frame into bounded packets for the Noise transport.
+pub fn fragment_display_frame(frame: &DisplayFrame) -> Result<Vec<Vec<u8>>, TransferError> {
+    let total_bytes = u32::try_from(frame.pixels.len())
+        .map_err(|_| TransferError::InvalidChunk("display frame is too large".into()))?;
+    validate_display_frame_metadata(frame.sequence, frame.width, frame.height, frame.stride, total_bytes)?;
+    let mut packets = Vec::with_capacity(frame.pixels.len().div_ceil(DISPLAY_FRAME_FRAGMENT_BYTES));
+    for (index, data) in frame.pixels.chunks(DISPLAY_FRAME_FRAGMENT_BYTES).enumerate() {
+        let offset = index.checked_mul(DISPLAY_FRAME_FRAGMENT_BYTES)
+            .ok_or_else(|| TransferError::InvalidChunk("display fragment offset overflow".into()))?;
+        packets.push(encode_display_frame_fragment(&DisplayFrameFragment {
+            sequence: frame.sequence, width: frame.width, height: frame.height,
+            stride: frame.stride, timestamp_ns: frame.timestamp_ns, total_bytes,
+            offset: u32::try_from(offset).map_err(|_| TransferError::InvalidChunk("display fragment offset overflow".into()))?,
+            data: data.to_vec(),
+        })?);
+    }
+    Ok(packets)
+}
+
+/// Reassembles one frame at a time and never allocates beyond the 64 MiB frame cap.
+#[derive(Default)]
+pub struct DisplayFrameAssembler {
+    active: Option<DisplayFrameFragment>,
+    pixels: Vec<u8>,
+}
+
+impl DisplayFrameAssembler {
+    pub fn reset(&mut self) {
+        self.active = None;
+        self.pixels.clear();
+    }
+
+    pub fn push(&mut self, packet: &[u8]) -> Result<Option<DisplayFrame>, TransferError> {
+        let fragment = decode_display_frame_fragment(packet)?;
+        if fragment.offset == 0 {
+            if self.active.is_some() {
+                return Err(TransferError::InvalidChunk("a new display frame arrived before the previous frame completed".into()));
+            }
+            self.pixels = Vec::with_capacity(fragment.total_bytes as usize);
+            self.active = Some(fragment.clone());
+        }
+        let Some(first) = self.active.as_ref() else {
+            return Err(TransferError::InvalidChunk("display frame must begin with offset zero".into()));
+        };
+        if fragment.sequence != first.sequence || fragment.width != first.width
+            || fragment.height != first.height || fragment.stride != first.stride
+            || fragment.timestamp_ns != first.timestamp_ns || fragment.total_bytes != first.total_bytes
+            || fragment.offset as usize != self.pixels.len()
+        {
+            self.reset();
+            return Err(TransferError::InvalidChunk("display frame fragments are out of order or have inconsistent metadata".into()));
+        }
+        self.pixels.extend_from_slice(&fragment.data);
+        if self.pixels.len() == fragment.total_bytes as usize {
+            let first = self.active.take().expect("active frame exists");
+            let pixels = std::mem::take(&mut self.pixels);
+            return Ok(Some(DisplayFrame {
+                sequence: first.sequence, width: first.width, height: first.height,
+                stride: first.stride, timestamp_ns: first.timestamp_ns, pixels,
+            }));
+        }
+        Ok(None)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -399,6 +949,40 @@ mod tests {
     }
 
     #[test]
+    fn bgra_to_nv12_converts_black_and_white_to_video_range() {
+        let mut pixels = Vec::new();
+        for _ in 0..4 { pixels.extend_from_slice(&[0, 0, 0, 255]); }
+        for _ in 0..4 { pixels.extend_from_slice(&[255, 255, 255, 255]); }
+        let frame = DisplayFrame { sequence: 7, width: 4, height: 2, stride: 16, timestamp_ns: 99, pixels };
+        let converted = bgra_to_nv12(&frame).unwrap();
+        assert_eq!((converted.sequence, converted.width, converted.height, converted.timestamp_ns), (7, 4, 2, 99));
+        assert_eq!(&converted.pixels[..4], &[16, 16, 16, 16]);
+        assert_eq!(&converted.pixels[4..8], &[235, 235, 235, 235]);
+        assert_eq!(converted.pixels.len(), 12);
+        assert_eq!(&converted.pixels[8..], &[128, 128, 128, 128]);
+    }
+
+    #[test]
+    fn bgra_to_nv12_averages_chroma_over_each_2x2_block() {
+        let pixels = vec![
+            0, 0, 255, 255, 0, 0, 255, 255,
+            255, 0, 0, 255, 255, 0, 0, 255,
+        ];
+        let frame = DisplayFrame { sequence: 1, width: 2, height: 2, stride: 8, timestamp_ns: 1, pixels };
+        let converted = bgra_to_nv12(&frame).unwrap();
+        assert_eq!(converted.pixels.len(), 6);
+        assert_eq!(&converted.pixels[4..], &[171, 179]);
+    }
+
+    #[test]
+    fn bgra_to_nv12_rejects_odd_dimensions_and_invalid_source_layout() {
+        let odd = DisplayFrame { sequence: 1, width: 3, height: 2, stride: 12, timestamp_ns: 1, pixels: vec![0; 24] };
+        assert!(bgra_to_nv12(&odd).is_err());
+        let malformed = DisplayFrame { sequence: 1, width: 2, height: 2, stride: 8, timestamp_ns: 1, pixels: vec![0; 15] };
+        assert!(bgra_to_nv12(&malformed).is_err());
+    }
+
+    #[test]
     fn control_round_trip_and_offer_validation() {
         let offer = offer(b"hello", "hello.txt");
         let encoded = encode_control(&TransferControl::FileOffer { offer: offer.clone() }).unwrap();
@@ -406,12 +990,20 @@ mod tests {
     }
 
     #[test]
-    fn display_challenge_messages_round_trip_and_reject_malformed_nonces() {
+    fn display_challenge_messages_round_trip_and_reject_malformed_proofs() {
         let request_id = Uuid::new_v4();
+        let session_id = Uuid::new_v4();
         let nonce = "a5".repeat(32);
+        let response = TransferControl::DisplayChallengeResponse {
+            request_id,
+            session_id,
+            nonce: nonce.clone(),
+            device_fingerprint: "b6".repeat(32),
+            signature: "c7".repeat(64),
+        };
         for message in [
-            TransferControl::DisplayChallengeRequest { request_id, nonce: nonce.clone() },
-            TransferControl::DisplayChallengeResponse { request_id, nonce: nonce.clone() },
+            TransferControl::DisplayChallengeRequest { request_id, session_id, nonce: nonce.clone() },
+            response.clone(),
         ] {
             let encoded = encode_control(&message).unwrap();
             assert_eq!(decode_control(&encoded).unwrap(), message);
@@ -419,11 +1011,18 @@ mod tests {
             assert_eq!(decode_packet(&encode_packet(&packet).unwrap()).unwrap(), packet);
         }
         let malformed = TransferControl::DisplayChallengeRequest {
-            request_id,
-            nonce: "not-a-nonce".into(),
+            request_id, session_id, nonce: "not-a-nonce".into(),
         };
         assert!(encode_control(&malformed).is_err());
-        let malformed_json = format!(r#"{{"type":"display_challenge_response","request_id":"{request_id}","nonce":"bad"}}"#);
+        let malformed_proof = TransferControl::DisplayChallengeResponse {
+            request_id,
+            session_id,
+            nonce: nonce.clone(),
+            device_fingerprint: "b6".repeat(32),
+            signature: "bad".into(),
+        };
+        assert!(encode_control(&malformed_proof).is_err());
+        let malformed_json = format!(r#"{{"type":"display_challenge_response","request_id":"{request_id}","session_id":"{session_id}","nonce":"bad","device_fingerprint":"{}","signature":"{}"}}"#, "b6".repeat(32), "c7".repeat(64));
         assert!(decode_control(malformed_json.as_bytes()).is_err());
     }
 
@@ -517,4 +1116,147 @@ mod tests {
         assert!(matches!(incoming.finish(), Err(TransferError::ChecksumMismatch)));
         fs::remove_dir_all(directory).unwrap();
     }
+
+
+
+    #[test]
+    fn display_input_packets_round_trip_and_reject_invalid_samples() {
+        let event = DisplayInputEvent {
+            sequence: 42,
+            timestamp_ns: 123_456,
+            pointer_id: 2,
+            action: DisplayInputAction::Move,
+            x: 0,
+            y: u16::MAX,
+        };
+        let packet = TransferPacket::DisplayInput(event);
+        let encoded = encode_packet(&packet).unwrap();
+        assert_eq!(encoded.len(), DISPLAY_INPUT_PACKET_BYTES);
+        assert_eq!(decode_packet(&encoded).unwrap(), packet);
+
+        for invalid in [
+            DisplayInputEvent { sequence: 0, ..event },
+            DisplayInputEvent { timestamp_ns: 0, ..event },
+            DisplayInputEvent { pointer_id: MAX_DISPLAY_INPUT_POINTERS, ..event },
+        ] {
+            assert!(encode_packet(&TransferPacket::DisplayInput(invalid)).is_err());
+        }
+
+        let mut malformed_action = encoded.clone();
+        malformed_action[18] = 0xff;
+        assert!(decode_packet(&malformed_action).is_err());
+        assert!(decode_packet(&encoded[..encoded.len() - 1]).is_err());
+    }
+
+    #[test]
+    fn encoded_video_fragments_round_trip_through_packet_decoder() {
+        let frame = EncodedVideoFrame {
+            sequence: 11,
+            width: 1080,
+            height: 2340,
+            timestamp_ns: 987_654,
+            keyframe: true,
+            bitstream: vec![0x65; DISPLAY_FRAME_FRAGMENT_BYTES + 31],
+        };
+        let packets = fragment_encoded_video_frame(&frame).unwrap();
+        assert!(packets.len() > 1);
+        assert!(packets.iter().all(|packet| packet.len() <= MAX_PACKET_BYTES));
+        let first = decode_packet(&packets[0]).unwrap();
+        assert!(matches!(first, TransferPacket::EncodedVideoFrame(_)));
+        let mut assembler = EncodedVideoFrameAssembler::default();
+        for packet in &packets[..packets.len() - 1] {
+            assert!(assembler.push(packet).unwrap().is_none());
+        }
+        assert_eq!(assembler.push(packets.last().unwrap()).unwrap(), Some(frame));
+        assert!(assembler.push(&packets[0]).is_err());
+    }
+
+    #[test]
+    fn encoded_video_rejects_invalid_metadata_flags_and_oversized_access_units() {
+        let mut invalid = EncodedVideoFrame {
+            sequence: 1, width: 1920, height: 1080, timestamp_ns: 1,
+            keyframe: false, bitstream: vec![0x41; 10],
+        };
+        invalid.sequence = 0;
+        assert!(fragment_encoded_video_frame(&invalid).is_err());
+        invalid.sequence = 1;
+        invalid.bitstream = vec![0; MAX_ENCODED_VIDEO_FRAME_BYTES + 1];
+        assert!(fragment_encoded_video_frame(&invalid).is_err());
+
+        let fragment = EncodedVideoFrameFragment {
+            sequence: 1, width: 2, height: 2, timestamp_ns: 1,
+            total_bytes: 4, offset: 0, keyframe: true, data: vec![1, 2, 3, 4],
+        };
+        let mut encoded = encode_encoded_video_fragment(&fragment).unwrap();
+        encoded[33] = 2;
+        assert!(decode_encoded_video_fragment(&encoded).is_err());
+    }
+
+    #[test]
+    fn encoded_video_assembler_rejects_out_of_order_fragments() {
+        let frame = EncodedVideoFrame {
+            sequence: 3, width: 16, height: 16, timestamp_ns: 9,
+            keyframe: false, bitstream: vec![0x41; DISPLAY_FRAME_FRAGMENT_BYTES + 4],
+        };
+        let packets = fragment_encoded_video_frame(&frame).unwrap();
+        let mut assembler = EncodedVideoFrameAssembler::default();
+        assert!(assembler.push(&packets[1]).is_err());
+        assert!(assembler.push(&packets[0]).unwrap().is_none());
+        assert!(assembler.push(&packets[0]).is_err());
+    }
+
+    #[test]
+    fn display_frame_fragments_use_the_shared_transfer_packet_decoder() {
+        let fragment = DisplayFrameFragment {
+            sequence: 2, width: 2, height: 2, stride: 8, timestamp_ns: 7,
+            total_bytes: 16, offset: 0, data: vec![0x44; 16],
+        };
+        let packet = TransferPacket::DisplayFrame(fragment.clone());
+        let encoded = encode_packet(&packet).unwrap();
+        assert_eq!(decode_packet(&encoded).unwrap(), packet);
+    }
+
+    #[test]
+    fn display_frames_fragment_and_reassemble_in_order() {
+        let frame = DisplayFrame {
+            sequence: 7, width: 128, height: 128, stride: 512, timestamp_ns: 99,
+            pixels: vec![0x5a; 512 * 128],
+        };
+        let packets = fragment_display_frame(&frame).unwrap();
+        assert!(packets.len() > 1);
+        assert!(packets.iter().all(|packet| packet.len() <= MAX_PACKET_BYTES));
+        let mut assembler = DisplayFrameAssembler::default();
+        for packet in &packets[..packets.len() - 1] {
+            assert!(assembler.push(packet).unwrap().is_none());
+        }
+        assert_eq!(assembler.push(packets.last().unwrap()).unwrap(), Some(frame));
+    }
+
+    #[test]
+    fn display_frame_assembler_rejects_out_of_order_fragments() {
+        let frame = DisplayFrame {
+            sequence: 8, width: 128, height: 128, stride: 512, timestamp_ns: 100,
+            pixels: vec![0x33; 512 * 128],
+        };
+        let packets = fragment_display_frame(&frame).unwrap();
+        let mut assembler = DisplayFrameAssembler::default();
+        assert!(assembler.push(&packets[1]).is_err());
+        assert!(assembler.push(&packets[0]).unwrap().is_none());
+        assert!(assembler.push(&packets[0]).is_err());
+    }
+
+    #[test]
+    fn display_frame_transport_rejects_invalid_metadata_and_oversized_fragments() {
+        let invalid = DisplayFrame {
+            sequence: 1, width: 10, height: 10, stride: 40, timestamp_ns: 1,
+            pixels: vec![0; 399],
+        };
+        assert!(fragment_display_frame(&invalid).is_err());
+        let fragment = DisplayFrameFragment {
+            sequence: 1, width: 2, height: 2, stride: 8, timestamp_ns: 1,
+            total_bytes: 16, offset: 0, data: vec![0; DISPLAY_FRAME_FRAGMENT_BYTES + 1],
+        };
+        assert!(encode_display_frame_fragment(&fragment).is_err());
+    }
+
 }

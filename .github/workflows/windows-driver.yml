@@ -4,11 +4,13 @@ on:
   pull_request:
     paths:
       - "apps/windows-driver/**"
+      - "scripts/windows/Install-BridgeIddCxDriver.ps1"
       - ".github/workflows/windows-driver.yml"
   push:
     branches: [development, stable]
     paths:
       - "apps/windows-driver/**"
+      - "scripts/windows/Install-BridgeIddCxDriver.ps1"
       - ".github/workflows/windows-driver.yml"
   workflow_dispatch:
 
@@ -25,6 +27,14 @@ jobs:
     runs-on: windows-2025-vs2026
     steps:
       - uses: actions/checkout@v4
+
+      - name: Validate driver installation script syntax
+        shell: pwsh
+        run: |
+          $path = "scripts/windows/Install-BridgeIddCxDriver.ps1"
+          if (-not (Test-Path -LiteralPath $path)) { throw "Missing driver installer: $path" }
+          [void][scriptblock]::Create((Get-Content -LiteralPath $path -Raw))
+          Write-Host "PowerShell syntax valid: $path"
 
       - name: Reject manual runs from untrusted branches
         if: github.event_name == 'workflow_dispatch'
