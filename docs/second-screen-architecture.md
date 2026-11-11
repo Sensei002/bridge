@@ -143,3 +143,8 @@ The shared transfer crate defines a dedicated packet discriminator for encoded H
 ## Android encoded-video packet reception
 
 The Android authenticated-session reader recognizes the H.264 access-unit packet tag separately from raw BGRA frames. It reassembles one access unit at a time with a 16 MiB cap, validates metadata, keyframe flag, contiguous fragment offsets, and strictly increasing completed sequences, then exposes the completed access unit and source metadata to the connection runtime. Session teardown clears the latest encoded frame for that peer. The access unit is not yet passed to MediaCodec; decoder configuration, input-buffer scheduling, SurfaceView rendering, and sender-side H.264 encoding remain separate milestones.
+
+
+## Windows Media Foundation encoder foundation
+
+The Windows desktop stream lifecycle now initializes Media Foundation before starting its frame worker and owns a guard that pairs each successful startup with one shutdown. Initialization failure is reported and does not silently claim that hardware encoding is available. The current sender continues using the existing BGRA packet path; H.264 encoder MFT discovery/activation, GPU-surface input, rate control, and encoded access-unit transmission are subsequent steps. This milestone validates only runtime initialization, not encoder availability or encoded streaming.
