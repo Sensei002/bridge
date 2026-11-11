@@ -4,7 +4,7 @@
 //! claim that an H.264 encoder is present; encoder MFT discovery and activation
 //! are performed by the next stage.
 
-use std::ptr::{null, null_mut, read};
+use std::ptr::{null_mut, read};
 
 use windows::Win32::Media::MediaFoundation::{
     IMFActivate, IMFTransform, MFTEnumEx, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG,
@@ -78,7 +78,7 @@ unsafe fn test_nv12_h264_profile(transform: &IMFTransform) -> Result<(), String>
             .map_err(|error| format!("could not set H.264 frame rate: {error}"))?;
         output.SetUINT32(&MF_MT_AVG_BITRATE, 8_000_000)
             .map_err(|error| format!("could not set H.264 target bitrate: {error}"))?;
-        transform.SetOutputType(0, &output, MFT_SET_TYPE_TEST_ONLY)
+        transform.SetOutputType(0, &output, MFT_SET_TYPE_TEST_ONLY.0)
             .map_err(|error| format!("encoder rejected H.264 output profile: {error}"))?;
         transform.SetInputType(0, &input, MFT_SET_TYPE_TEST_ONLY)
             .map_err(|error| format!("encoder rejected NV12 input profile: {error}"))?;
