@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_LOG_BYTES: u64 = 512 * 1024;
+static LOG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn log_path() -> PathBuf {
     std::env::var_os("LOCALAPPDATA")
@@ -16,6 +17,7 @@ fn log_path() -> PathBuf {
 }
 
 pub fn record(component: &str, message: &str) {
+    let Ok(_guard) = LOG_LOCK.lock() else { return };
     let path = log_path();
     let Some(parent) = path.parent() else {
         return;
@@ -46,6 +48,7 @@ pub fn record(component: &str, message: &str) {
 }
 
 pub fn snapshot() -> String {
+    let Ok(_guard) = LOG_LOCK.lock() else { return "Bridge desktop diagnostics\\nLog is busy; try again.".into() };
     let path = log_path();
     let Ok(mut file) = OpenOptions::new().read(true).open(path) else {
         return "Bridge desktop diagnostics\nNo log entries have been recorded yet.".into();
