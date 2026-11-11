@@ -78,6 +78,9 @@ private class AvcSurfaceDecoder(
     private var codec: MediaCodec? = null
     private var configuredWidth = 0
     private var configuredHeight = 0
+    private var surfaceWidth = 0
+    private var surfaceHeight = 0
+    @Volatile private var latestFrame: BridgeEncodedVideoFrame? = null
     private var waitingForKeyframe = true
     private val recoveryState = AvcDecoderRecoveryState()
 
@@ -93,12 +96,30 @@ private class AvcSurfaceDecoder(
         } }
     }
 
-    override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) = Unit
+    override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+        if (closed || width <= 0 || height <= 0) return
+        if (width == surfaceWidth && height == surfaceHeight) return
+        surfaceWidth = width
+        surfaceHeight = height
+        executor.queue.clear()
+        runCatching {
+            executor.execute {
+                if (!closed) {
+                    releaseCodec()
+                    requestKeyframe(latestFrame)
+                    postStatus("Android output Surface changed to ${width}×${height}; decoder reset and requesting a fresh IDR.")
+                }
+            }
+        }
+    }
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
         if (closed) return
+        executor.queue.clear()
         runCatching { executor.execute {
             surface = null
+            surfaceWidth = 0
+            surfaceHeight = 0
             releaseCodec()
             postStatus("H.264 output Surface was destroyed; BGRA fallback remains available.")
         } }
@@ -106,6 +127,7 @@ private class AvcSurfaceDecoder(
 
     fun submit(frame: BridgeEncodedVideoFrame) {
         if (closed) return
+        latestFrame = frame
         try {
             executor.execute { decode(frame) }
         } catch (_: java.util.concurrent.RejectedExecutionException) {
@@ -121,11 +143,16 @@ private class AvcSurfaceDecoder(
         val recovery = recoveryState.observe(frame)
         if (recovery.sequenceGap) {
             releaseCodec()
+            // The receiver requests recovery for gaps observed before UI dispatch.
+            // This catches additional frames coalesced after reassembly.
+            if (!frame.sequenceGap) requestKeyframe(frame)
             postStatus("H.264 frame sequence gap detected; decoder reset and waiting for the next IDR keyframe.")
         }
 
         if (codec != null && (configuredWidth != frame.width || configuredHeight != frame.height)) {
             releaseCodec()
+            requestKeyframe(frame)
+            postStatus("Encoded video dimensions changed; decoder is being reconfigured.")
         }
 
         if (codec == null) {
@@ -193,7 +220,14 @@ private class AvcSurfaceDecoder(
         } catch (error: Exception) {
             releaseCodec()
             postRendered(false)
+            requestKeyframe(frame)
             postStatus("H.264 decoding stopped; BGRA fallback remains active: ${error.message}")
+        }
+    }
+
+    private fun requestKeyframe(frame: BridgeEncodedVideoFrame?) {
+        if (frame != null) {
+            BridgeConnectionService.instance?.requestVideoKeyframe(frame.deviceId, frame.sessionHandle, frame.sequence)
         }
     }
 
@@ -230,6 +264,9 @@ private class AvcSurfaceDecoder(
             executor.execute {
                 releaseCodec()
                 surface = null
+                surfaceWidth = 0
+                surfaceHeight = 0
+                latestFrame = null
             }
         }
         executor.shutdown()

@@ -59,7 +59,7 @@ This is a wire-format foundation only. It does not yet inject input into Windows
 
 ## Android frame delivery status
 
-The Android receiver reassembles bounded BGRA8 frame fragments on the authenticated session reader. Completed frames are coalesced before dispatch to the main thread: at most one UI callback is pending per session, and a newer complete frame replaces an older pending frame. Completed frame sequence numbers must increase monotonically. This prevents a slow UI from accumulating stale frame callbacks, but the current renderer still converts BGRA8 frames into Compose bitmaps on the UI side. A dedicated MediaCodec/SurfaceView renderer and hardware video codec pipeline remain future work.
+The Android receiver reassembles bounded BGRA8 and H.264 access-unit fragments on the authenticated session reader. Completed frames are coalesced before main-thread dispatch: at most one UI callback is pending per session, and a newer complete frame replaces an older pending frame. The encoded-video path also detects gaps in completed access-unit sequences. The Android AVC renderer uses MediaCodec and SurfaceView with SPS/PPS configuration, a bounded decode worker, keyframe-based recovery, and BGRA fallback. Physical-device playback and end-to-end latency remain unverified.
 
 ## Android frame-rate diagnostics
 
@@ -183,9 +183,9 @@ The shared Rust transfer crate now provides a bounded CPU conversion from tightl
 
 ## Android MediaCodec Surface renderer foundation
 
-The Android second-screen UI now owns a bounded, single-threaded AVC decode worker and a native SurfaceView. It configures the platform MediaCodec decoder for the dimensions carried by the authenticated H.264 access units, waits for an IDR access unit before submitting compressed input, queues timestamps in microseconds, and releases decoded output buffers to the Surface. The worker queue is bounded to two pending frames so UI/network callbacks cannot create an unbounded decode backlog. Codec and Surface teardown are handled when dimensions change, the Surface is destroyed, or the composable leaves the screen.
+The Android second-screen UI owns a bounded, single-threaded AVC decode worker and a native SurfaceView. It configures MediaCodec for the dimensions carried by authenticated H.264 access units, supplies SPS/PPS as codec-specific data, queues presentation timestamps in microseconds, and releases decoded output buffers to the Surface. The worker queue is bounded to two pending frames. Surface size changes and destruction clear stale queued work, release the codec on its worker, and return visibility to the BGRA fallback. Decoder errors and frame-sequence gaps request a fresh keyframe from Windows.
 
-The raw BGRA image remains the visible fallback until MediaCodec has actually released decoded output to the Surface. This is an initial integration, not yet a validated playback path: the sender must provide usable SPS/PPS configuration with keyframes, access-unit timestamp ordering and recovery after packet loss still need hardening, and physical Android device tests are required before relying on H.264 instead of BGRA.
+The Windows session reader accepts a fixed-size keyframe-request message only inside the existing authenticated Noise session. The stream worker coalesces requests into an atomic flag and restarts its encoder instance to begin a fresh GOP. The persistent encoder is created for the actual virtual-display dimensions and recreated when those dimensions change; NV12/H.264 media types are negotiated against that size rather than assuming 1080×2340. Encoder reinitialization and keyframe output behavior still require validation with real Windows hardware and an Android device. The BGRA path remains available throughout.
 
 
 ## Android AVC decoder configuration
@@ -196,3 +196,10 @@ Before creating the MediaCodec decoder, the Android renderer now extracts Annex-
 ## Preserve H.264 presentation timestamps
 
 The persistent Windows Media Foundation encoder now reads the presentation timestamp from each emitted output sample instead of assigning the timestamp of whichever captured frame happened to trigger the drain. Encoded access units carry the encoder's 100 ns timestamp through the desktop sender and convert it to nanoseconds for the Android packet protocol. This preserves timestamps when the encoder buffers or reorders output. If an output sample has no timestamp, the H.264 encode path reports an error and retains the BGRA fallback rather than silently attaching a potentially incorrect timestamp. Physical-device A/V timing and encoder-specific timestamp behavior still require validation.
+
+
+## H.264 recovery and dynamic display dimensions
+
+Android detects missing access-unit sequence numbers both before main-thread dispatch and inside the decoder after callback coalescing. It sends a bounded 9-byte recovery request over the authenticated Noise session. Windows validates the discriminator and packet length, coalesces requests, and recreates the per-session Media Foundation encoder so the next GOP starts from a fresh encoder state. Android waits for a configured IDR before resuming decode. The request carries the last observed sequence for diagnostics; it does not create a separate socket or trust path.
+
+The Windows persistent encoder now negotiates NV12 input and H.264 output for the current even-sized virtual-display dimensions (bounded to 2–4096 in each axis). A display-size change tears down and recreates the encoder on the existing COM/MF worker. If a dimension is unsupported or reconfiguration fails, H.264 is disabled for that attempt and the BGRA stream continues. This is software/CI coverage only: actual encoder IDR behavior, rotation transitions, and playback must still be checked on the target Windows host and Android handset.

@@ -23,6 +23,7 @@ import kotlin.concurrent.withLock
 private const val CLIPBOARD_TAG = 0x03
 private const val DISPLAY_FRAME_TAG = 0x04
 private const val ENCODED_VIDEO_TAG = 0x06
+private const val VIDEO_KEYFRAME_REQUEST_TAG = 0x07
 private const val ENCODED_VIDEO_HEADER_BYTES = 34
 private const val MAX_ENCODED_VIDEO_BYTES = 16 * 1024 * 1024
 private const val DISPLAY_FRAME_HEADER_BYTES = 37
@@ -44,12 +45,14 @@ internal data class BridgeDisplayFrame(
 
 internal data class BridgeEncodedVideoFrame(
     val deviceId: String,
+    val sessionHandle: Long = 0L,
     val sequence: Long,
     val width: Int,
     val height: Int,
     val timestampNs: Long,
     val keyframe: Boolean,
     val bitstream: ByteArray,
+    val sequenceGap: Boolean = false,
     val receivedAtElapsedRealtimeNs: Long = android.os.SystemClock.elapsedRealtimeNanos()
 )
 
@@ -75,7 +78,10 @@ internal class EncodedVideoFrameAssembler {
         received = 0
     }
 
-    fun push(packet: ByteArray): BridgeEncodedVideoFrame? {
+    fun push(
+        packet: ByteArray,
+        receivedAtElapsedRealtimeNs: Long = android.os.SystemClock.elapsedRealtimeNanos()
+    ): BridgeEncodedVideoFrame? {
         try {
             require(packet.size > ENCODED_VIDEO_HEADER_BYTES &&
                 packet.size <= ENCODED_VIDEO_HEADER_BYTES + DISPLAY_FRAME_FRAGMENT_BYTES &&
@@ -120,6 +126,7 @@ internal class EncodedVideoFrameAssembler {
             received += count
             if (received == header.totalBytes) {
                 val completed = requireNotNull(bitstream)
+                val sequenceGap = lastCompletedSequence != 0L && header.sequence != lastCompletedSequence + 1L
                 lastCompletedSequence = header.sequence
                 reset()
                 return BridgeEncodedVideoFrame(
@@ -129,7 +136,9 @@ internal class EncodedVideoFrameAssembler {
                     height = header.height,
                     timestampNs = header.timestampNs,
                     keyframe = header.keyframe,
-                    bitstream = completed
+                    bitstream = completed,
+                    sequenceGap = sequenceGap,
+                    receivedAtElapsedRealtimeNs = receivedAtElapsedRealtimeNs
                 )
             }
             return null
@@ -320,7 +329,11 @@ internal class BridgeTransferReceiver(
                     if ((packet[0].toInt() and 0xff) == ENCODED_VIDEO_TAG) {
                         try {
                             encodedVideoAssembler.push(packet)?.let { frame ->
-                                encodedVideoDispatcher.offer(frame.copy(deviceId = deviceId))
+                                if (frame.sequenceGap) {
+                                    runCatching { requestVideoKeyframe(handle, frame.sequence) }
+                                        .onFailure { postStatus("Could not request an H.264 recovery keyframe: ${it.message}") }
+                                }
+                                encodedVideoDispatcher.offer(frame.copy(deviceId = deviceId, sessionHandle = handle))
                             }
                         } catch (error: Exception) {
                             postStatus("Dropped invalid H.264 access unit: ${error.message}")
@@ -645,6 +658,15 @@ internal class BridgeTransferReceiver(
         }
         // The sender may have disconnected; discard residual chunks before reuse.
         queue.clear()
+    }
+
+    fun requestVideoKeyframe(handle: Long, lastSequence: Long) {
+        require(lastSequence >= 0) { "Invalid last decoded video sequence." }
+        val packet = ByteBuffer.allocate(9).order(java.nio.ByteOrder.BIG_ENDIAN)
+            .put(VIDEO_KEYFRAME_REQUEST_TAG.toByte())
+            .putLong(lastSequence)
+            .array()
+        sendBytes(handle, packet)
     }
 
     fun sendDisplayInput(handle: Long, action: Int, pointerId: Int, x: Int, y: Int) {

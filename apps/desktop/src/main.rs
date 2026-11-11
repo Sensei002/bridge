@@ -30,7 +30,7 @@ use std::sync::Arc;
 #[cfg(windows)]
 use std::sync::Mutex;
 #[cfg(windows)]
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver};
 #[cfg(windows)]
 use std::sync::mpsc::Sender;
@@ -60,6 +60,8 @@ const HEARTBEAT_PONG: &[u8] = b"\0BRIDGE_HEARTBEAT_PONG_V1";
 const CLIPBOARD_PACKET_TAG: u8 = 0x03;
 #[cfg(windows)]
 const MAX_CLIPBOARD_TEXT_BYTES: usize = 16 * 1024;
+#[cfg(windows)]
+const VIDEO_KEYFRAME_REQUEST_TAG: u8 = 0x07;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Page { Overview, Devices, Transfers, Clipboard, Tools, Settings }
@@ -144,6 +146,7 @@ struct DesktopSession {
     clipboard_incoming: std::sync::Mutex<Receiver<String>>,
     challenge_responses: std::sync::Mutex<Receiver<AndroidAttestationResponse>>,
     display_inputs: std::sync::Mutex<Receiver<DisplayInputEvent>>,
+    video_keyframe_requested: Arc<AtomicBool>,
     session_id: Uuid,
     attestation_public_key: Option<String>,
     stop: Arc<std::sync::atomic::AtomicBool>,
@@ -169,6 +172,8 @@ impl DesktopSession {
         let (clipboard_sender, clipboard_incoming) = mpsc::sync_channel(4);
         let (challenge_sender, challenge_responses) = mpsc::sync_channel(8);
         let (display_input_sender, display_inputs) = mpsc::sync_channel(256);
+        let video_keyframe_requested = Arc::new(AtomicBool::new(false));
+        let reader_video_keyframe_requested = Arc::clone(&video_keyframe_requested);
         let reader_connection_for_thread = Arc::clone(&reader_connection);
         thread::Builder::new()
             .name("bridge-desktop-session-reader".into())
@@ -203,6 +208,15 @@ impl DesktopSession {
                         continue;
                     }
                     if plaintext == HEARTBEAT_PONG { continue; }
+                    if plaintext.len() == 9 && plaintext[0] == VIDEO_KEYFRAME_REQUEST_TAG {
+                        // The request travels only inside the authenticated Noise session.
+                        // Its sequence is diagnostic; a new encoder instance starts a fresh GOP.
+                        let _last_sequence = u64::from_be_bytes(
+                            plaintext[1..9].try_into().expect("validated keyframe request length")
+                        );
+                        reader_video_keyframe_requested.store(true, Ordering::Release);
+                        continue;
+                    }
                     if plaintext.first() == Some(&CLIPBOARD_PACKET_TAG) {
                         let text = &plaintext[1..];
                         if text.len() <= MAX_CLIPBOARD_TEXT_BYTES {
@@ -278,11 +292,15 @@ impl DesktopSession {
                 }
             })
             .map_err(|error| error.to_string())?;
-        Ok(Arc::new(Self { connection, incoming: std::sync::Mutex::new(incoming), incoming_offers: std::sync::Mutex::new(incoming_offers), clipboard_incoming: std::sync::Mutex::new(clipboard_incoming), challenge_responses: std::sync::Mutex::new(challenge_responses), display_inputs: std::sync::Mutex::new(display_inputs), session_id, attestation_public_key, stop, alive, remote_fingerprint }))
+        Ok(Arc::new(Self { connection, incoming: std::sync::Mutex::new(incoming), incoming_offers: std::sync::Mutex::new(incoming_offers), clipboard_incoming: std::sync::Mutex::new(clipboard_incoming), challenge_responses: std::sync::Mutex::new(challenge_responses), display_inputs: std::sync::Mutex::new(display_inputs), video_keyframe_requested, session_id, attestation_public_key, stop, alive, remote_fingerprint }))
     }
 
     fn is_alive(&self) -> bool {
         self.alive.load(Ordering::Acquire)
+    }
+
+    fn take_video_keyframe_request(&self) -> bool {
+        self.video_keyframe_requested.swap(false, Ordering::AcqRel)
     }
 
     fn shutdown(&self) {
@@ -644,27 +662,11 @@ fn start_display_frame_stream(
                 });
             }
             let _com_apartment = com_apartment;
-            let mut persistent_encoder = if _com_apartment.is_ok() && _media_foundation.is_some() {
-                match media_foundation::PersistentH264Encoder::start() {
-                    Ok(encoder) => {
-                        let name = encoder.encoder_name().to_string();
-                        let _ = events.send(DisplayLeaseEvent::Status {
-                            session_key: session_key.clone(),
-                            message: format!("Persistent H.264 encoder ready: {name}. BGRA remains the active stream while sustained encoding is validated."),
-                        });
-                        Some(encoder)
-                    }
-                    Err(error) => {
-                        let _ = events.send(DisplayLeaseEvent::Status {
-                            session_key: session_key.clone(),
-                            message: format!("Persistent H.264 encoder unavailable: {error}. BGRA remains active."),
-                        });
-                        None
-                    }
-                }
-            } else {
-                None
-            };
+            // Create the encoder only after the first real frame reveals the active
+            // virtual-display dimensions. Recreate it on rotation or recovery requests.
+            let mut persistent_encoder: Option<media_foundation::PersistentH264Encoder> = None;
+            let mut encoder_dimensions: Option<(u32, u32)> = None;
+            let mut encoder_unavailable = false;
             let mut encoder_frames_reported = 0_u64;
             let mut h264_sequence = 0_u64;
             let mut h264_samples_sent = 0_u64;
@@ -688,6 +690,44 @@ fn start_display_frame_stream(
                             timestamp_ns: frame.timestamp_ns,
                             pixels: frame.pixels,
                         };
+                        let keyframe_requested = session.take_video_keyframe_request();
+                        let dimensions_changed = encoder_dimensions
+                            .is_some_and(|dimensions| dimensions != (display_frame.width, display_frame.height));
+                        if keyframe_requested || dimensions_changed {
+                            persistent_encoder = None;
+                            encoder_unavailable = false;
+                            let _ = events.send(DisplayLeaseEvent::Status {
+                                session_key: session_key.clone(),
+                                message: if keyframe_requested {
+                                    "Android requested H.264 recovery; restarting the encoder to begin a fresh GOP.".into()
+                                } else {
+                                    format!("Virtual display changed to {}×{}; reconfiguring H.264 encoder.", display_frame.width, display_frame.height)
+                                },
+                            });
+                        }
+                        if persistent_encoder.is_none() && !encoder_unavailable
+                            && _com_apartment.is_ok() && _media_foundation.is_some()
+                        {
+                            match media_foundation::PersistentH264Encoder::start(display_frame.width, display_frame.height) {
+                                Ok(encoder) => {
+                                    encoder_dimensions = Some((display_frame.width, display_frame.height));
+                                    let name = encoder.encoder_name().to_string();
+                                    let _ = events.send(DisplayLeaseEvent::Status {
+                                        session_key: session_key.clone(),
+                                        message: format!("Persistent H.264 encoder ready: {name} at {}×{}.", display_frame.width, display_frame.height),
+                                    });
+                                    persistent_encoder = Some(encoder);
+                                }
+                                Err(error) => {
+                                    encoder_dimensions = Some((display_frame.width, display_frame.height));
+                                    encoder_unavailable = true;
+                                    let _ = events.send(DisplayLeaseEvent::Status {
+                                        session_key: session_key.clone(),
+                                        message: format!("H.264 encoder unavailable for {}×{}: {error}. BGRA fallback remains active.", display_frame.width, display_frame.height),
+                                    });
+                                }
+                            }
+                        }
                         let mut encoded_access_units = Vec::new();
                         if let Some(encoder) = persistent_encoder.as_mut() {
                             match bridge_transfer::bgra_to_nv12(&display_frame) {
@@ -712,6 +752,7 @@ fn start_display_frame_stream(
                                             message: format!("Persistent H.264 encoder stopped after {} frame(s): {error}. Falling back to BGRA.", encoder_frames_reported),
                                         });
                                         persistent_encoder = None;
+                                        encoder_unavailable = true;
                                     }
                                 },
                                 Err(error) => {
@@ -720,12 +761,13 @@ fn start_display_frame_stream(
                                         message: format!("Could not convert frame for persistent H.264 encoding: {error}. Falling back to BGRA."),
                                     });
                                     persistent_encoder = None;
+                                    encoder_unavailable = true;
                                 }
                             }
                         }
                         // Send Annex-B access units over the existing authenticated Noise
-                        // session. BGRA remains the active Android rendering path until
-                        // MediaCodec playback and recovery are implemented and validated.
+                        // session. Android MediaCodec renders H.264 while BGRA remains the
+                        // fallback if decoder configuration or playback is unavailable.
                         for access_unit in encoded_access_units {
                             let Some(keyframe) = h264_annex_b_keyframe(&access_unit.bytes) else {
                                 let _ = events.send(DisplayLeaseEvent::Status {
@@ -766,7 +808,7 @@ fn start_display_frame_stream(
                                         if h264_samples_sent == 1 || h264_samples_sent % 120 == 0 {
                                             let _ = events.send(DisplayLeaseEvent::Status {
                                                 session_key: session_key.clone(),
-                                                message: format!("Windows sent {h264_samples_sent} bounded H.264 access unit(s) to Android over the authenticated session. BGRA remains the active display path; Android decoding is not enabled yet."),
+                                                message: format!("Windows sent {h264_samples_sent} bounded H.264 access unit(s) to Android over the authenticated session. Android MediaCodec receives the encoded stream alongside the BGRA fallback."),
                                             });
                                         }
                                     }

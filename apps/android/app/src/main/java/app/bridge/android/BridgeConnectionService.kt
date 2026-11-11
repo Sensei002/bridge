@@ -394,6 +394,18 @@ class BridgeConnectionService : Service() {
         transferReceiver?.sendFile(uri, sessionHandle)
     }
 
+    internal fun requestVideoKeyframe(deviceId: String, sessionHandle: Long, lastSequence: Long) {
+        if (sessionHandle == 0L) return
+        try {
+            transferReceiver?.requestVideoKeyframe(sessionHandle, lastSequence)
+        } catch (error: Exception) {
+            mainHandler.post {
+                if (!stopping) BridgeRuntimeState.transferStatus.value =
+                    "Could not request an H.264 recovery keyframe from $deviceId: ${error.message ?: error.javaClass.simpleName}"
+            }
+        }
+    }
+
     internal fun sendDisplayInput(deviceId: String, action: Int, pointerId: Int, x: Int, y: Int) {
         // Route input only to the authenticated peer that supplied the displayed frame.
         val handle = BridgeRuntimeState.connectedSessionHandles[deviceId] ?: return
