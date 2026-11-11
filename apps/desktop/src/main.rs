@@ -557,10 +557,33 @@ fn start_display_frame_stream(
     // after the stream exits. BGRA streaming remains the active fallback path.
     let media_foundation = match media_foundation::MediaFoundationRuntime::start() {
         Ok(runtime) => {
-            let _ = events.send(DisplayLeaseEvent::Status {
-                session_key: session_key.clone(),
-                message: "Media Foundation runtime ready; H.264 encoder discovery is pending. Using BGRA fallback.".into(),
-            });
+            match media_foundation::discover_h264_encoders() {
+                Ok(encoders) if !encoders.is_empty() => {
+                    let names = encoders.iter().take(3)
+                        .map(|encoder| encoder.friendly_name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let _ = events.send(DisplayLeaseEvent::Status {
+                        session_key: session_key.clone(),
+                        message: format!(
+                            "Media Foundation found {} video encoder(s): {}. H.264 output activation is not enabled yet; using BGRA fallback.",
+                            encoders.len(), names
+                        ),
+                    });
+                }
+                Ok(_) => {
+                    let _ = events.send(DisplayLeaseEvent::Status {
+                        session_key: session_key.clone(),
+                        message: "Media Foundation is ready but no registered video encoder MFT was found. Using BGRA fallback.".into(),
+                    });
+                }
+                Err(error) => {
+                    let _ = events.send(DisplayLeaseEvent::Status {
+                        session_key: session_key.clone(),
+                        message: format!("{error}. Using BGRA fallback."),
+                    });
+                }
+            }
             runtime
         }
         Err(error) => {
