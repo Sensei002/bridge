@@ -19,7 +19,84 @@ import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
 private const val CLIPBOARD_TAG = 0x03
+private const val DISPLAY_FRAME_TAG = 0x04
+private const val DISPLAY_FRAME_HEADER_BYTES = 37
+private const val DISPLAY_FRAME_FRAGMENT_BYTES = 48 * 1024
+private const val MAX_DISPLAY_FRAME_BYTES = 64 * 1024 * 1024
 private const val MAX_CLIPBOARD_TEXT_BYTES = 16 * 1024
+
+internal data class BridgeDisplayFrame(
+    val deviceId: String,
+    val sequence: Long,
+    val width: Int,
+    val height: Int,
+    val stride: Int,
+    val timestampNs: Long,
+    val pixels: ByteArray
+)
+
+/** Reassembles one ordered BGRA8 frame and caps its allocation at 64 MiB. */
+private class DisplayFrameAssembler {
+    private data class Header(
+        val sequence: Long, val width: Int, val height: Int, val stride: Int,
+        val timestampNs: Long, val totalBytes: Int
+    )
+    private var active: Header? = null
+    private var pixels: ByteArray? = null
+    private var received = 0
+
+    fun reset() {
+        active = null
+        pixels = null
+        received = 0
+    }
+
+    fun push(packet: ByteArray): BridgeDisplayFrame? {
+        try {
+            require(packet.size > DISPLAY_FRAME_HEADER_BYTES &&
+                packet.size <= DISPLAY_FRAME_HEADER_BYTES + DISPLAY_FRAME_FRAGMENT_BYTES &&
+                packet[0].toInt() and 0xff == DISPLAY_FRAME_TAG) { "Invalid display-frame packet size or tag." }
+            val buffer = ByteBuffer.wrap(packet).order(java.nio.ByteOrder.BIG_ENDIAN)
+            buffer.get()
+            val header = Header(
+                buffer.long, buffer.int, buffer.int, buffer.int, buffer.long, buffer.int
+            )
+            val offset = buffer.int
+            val expectedStride = Math.multiplyExact(header.width, 4)
+            val expectedBytes = header.stride.toLong() * header.height.toLong()
+            require(header.sequence > 0 && header.width in 1..4096 && header.height in 1..4096 &&
+                header.stride == expectedStride && expectedBytes in 1..MAX_DISPLAY_FRAME_BYTES.toLong() &&
+                header.totalBytes.toLong() == expectedBytes) { "Invalid display-frame metadata." }
+            val count = packet.size - DISPLAY_FRAME_HEADER_BYTES
+            require(count in 1..DISPLAY_FRAME_FRAGMENT_BYTES &&
+                offset >= 0 && offset.toLong() + count <= header.totalBytes.toLong()) {
+                "Invalid display-frame fragment range."
+            }
+            if (offset == 0) {
+                require(active == null) { "A new frame arrived before the previous frame completed." }
+                active = header
+                pixels = ByteArray(header.totalBytes)
+                received = 0
+            }
+            require(active == header && offset == received) { "Display-frame fragments are out of order." }
+            System.arraycopy(packet, DISPLAY_FRAME_HEADER_BYTES, requireNotNull(pixels), received, count)
+            received += count
+            if (received == header.totalBytes) {
+                val completed = requireNotNull(pixels)
+                reset()
+                return BridgeDisplayFrame(
+                    deviceId = "", sequence = header.sequence, width = header.width,
+                    height = header.height, stride = header.stride,
+                    timestampNs = header.timestampNs, pixels = completed
+                )
+            }
+            return null
+        } catch (error: Exception) {
+            reset()
+            throw error
+        }
+    }
+}
 
 internal data class BridgeIncomingOffer(
     val deviceId: String,
@@ -39,6 +116,7 @@ internal class BridgeTransferReceiver(
     private val localNoiseFingerprint: String,
     private val onOffer: (BridgeIncomingOffer) -> Unit,
     private val onClipboardText: (String, String) -> Unit,
+    private val onDisplayFrame: (BridgeDisplayFrame) -> Unit,
     private val onStatus: (String) -> Unit,
     private val onSessionEnded: (String, Long) -> Unit
 ) {
@@ -53,6 +131,7 @@ internal class BridgeTransferReceiver(
     fun attach(deviceId: String, handle: Long, allowDisplayAttestation: Boolean = false) {
         if (readers.containsKey(handle)) return
         val queue = LinkedBlockingQueue<ByteArray>(8)
+        val displayAssembler = DisplayFrameAssembler()
         queues[handle] = queue
         val thread = Thread({
             try {
@@ -63,7 +142,19 @@ internal class BridgeTransferReceiver(
                         error("The secure device session has ended.")
                     }
                     if (packet.isEmpty()) continue
-                    if (packet[0].toInt() == CLIPBOARD_TAG) {
+                    if ((packet[0].toInt() and 0xff) == DISPLAY_FRAME_TAG) {
+                        try {
+                            displayAssembler.push(packet)?.let { frame ->
+                                main.post {
+                                    onDisplayFrame(frame.copy(deviceId = deviceId))
+                                }
+                            }
+                        } catch (error: Exception) {
+                            postStatus("Dropped invalid second-screen frame: ${error.message}")
+                        }
+                        continue
+                    }
+                    if ((packet[0].toInt() and 0xff) == CLIPBOARD_TAG) {
                         val payloadSize = packet.size - 1
                         if (payloadSize in 0..MAX_CLIPBOARD_TEXT_BYTES) {
                             val text = String(packet, 1, payloadSize, Charsets.UTF_8)

@@ -409,7 +409,7 @@ impl Drop for IncomingFile {
 pub const MAX_DISPLAY_FRAME_BYTES: usize = 64 * 1024 * 1024;
 /// Each display fragment fits inside one authenticated Noise application message.
 pub const DISPLAY_FRAME_FRAGMENT_BYTES: usize = 48 * 1024;
-pub const DISPLAY_FRAME_PACKET_TAG: u8 = 0x03;
+pub const DISPLAY_FRAME_PACKET_TAG: u8 = 0x04;
 const DISPLAY_FRAME_FRAGMENT_HEADER_BYTES: usize = 1 + 8 + 4 + 4 + 4 + 8 + 4 + 4;
 
 #[derive(Clone, Debug, PartialEq, Eq)]

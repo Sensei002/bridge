@@ -36,6 +36,7 @@ internal object BridgeRuntimeState {
     val clipboardStatus = mutableStateOf("Clipboard sharing is off.")
     val pairingStatus = mutableStateOf("Starting Bridge background connection…")
     val transferStatus = mutableStateOf("Waiting for a connected trusted device.")
+    val latestDisplayFrame = mutableStateOf<BridgeDisplayFrame?>(null)
 }
 
 /**
@@ -176,6 +177,15 @@ class BridgeConnectionService : Service() {
                             }
                         }
                     },
+                    onDisplayFrame = { frame ->
+                        mainHandler.post {
+                            if (!stopping) {
+                                BridgeRuntimeState.latestDisplayFrame.value = frame
+                                BridgeRuntimeState.transferStatus.value =
+                                    "Second screen frame received · ${frame.width}×${frame.height} · #${frame.sequence}"
+                            }
+                        }
+                    },
                     onClipboardText = { peerId, text ->
                         val enabled = getSharedPreferences("bridge_settings", MODE_PRIVATE)
                             .getBoolean("clipboard_sync_enabled", false)
@@ -203,6 +213,9 @@ class BridgeConnectionService : Service() {
                         mainHandler.post {
                             if (stopping) return@post
                             pairingController?.onSessionEnded(peerId, handle)
+                            if (BridgeRuntimeState.latestDisplayFrame.value?.deviceId == peerId) {
+                                BridgeRuntimeState.latestDisplayFrame.value = null
+                            }
                             if (BridgeRuntimeState.connectedSessionHandles[peerId] == handle) {
                                 BridgeRuntimeState.connectedSessionHandles.remove(peerId)
                             }
