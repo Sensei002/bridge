@@ -83,6 +83,7 @@ private class AvcSurfaceDecoder(
     @Volatile private var latestFrame: BridgeEncodedVideoFrame? = null
     private var waitingForKeyframe = true
     private val recoveryState = AvcDecoderRecoveryState()
+    private val keyframeRequestGate = AvcKeyframeRequestGate()
 
     override fun surfaceCreated(holder: SurfaceHolder) {
         val newSurface = holder.surface
@@ -156,10 +157,14 @@ private class AvcSurfaceDecoder(
         }
 
         if (codec == null) {
-            if (!frame.keyframe) return
+            if (!frame.keyframe) {
+                requestKeyframe(frame)
+                return
+            }
             val parameterSets = recovery.parameterSets
             if (parameterSets == null) {
-                postStatus("Received an H.264 IDR frame but no cached SPS/PPS is available; waiting for a configured keyframe.")
+                requestKeyframe(frame)
+                postStatus("Received an H.264 IDR frame but no cached SPS/PPS is available; requesting a fresh configured keyframe.")
                 return
             }
             try {
@@ -226,7 +231,7 @@ private class AvcSurfaceDecoder(
     }
 
     private fun requestKeyframe(frame: BridgeEncodedVideoFrame?) {
-        if (frame != null) {
+        if (frame != null && keyframeRequestGate.shouldRequest(android.os.SystemClock.elapsedRealtime())) {
             BridgeConnectionService.instance?.requestVideoKeyframe(frame.deviceId, frame.sessionHandle, frame.sequence)
         }
     }
