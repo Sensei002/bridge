@@ -37,3 +37,32 @@ internal class AvcDecoderRecoveryState {
         cachedParameterSets = null
     }
 }
+
+
+/**
+ * Limits recovery requests sent over the authenticated session. A decoder can
+ * observe many dependent frames while waiting for an IDR; requesting a restart
+ * for every one would repeatedly recreate the Windows encoder.
+ */
+internal class AvcKeyframeRequestGate(
+    private val minimumIntervalMs: Long = 1_000L
+) {
+    init {
+        require(minimumIntervalMs > 0L) { "minimum request interval must be positive" }
+    }
+
+    private var lastRequestAtMs: Long? = null
+
+    fun shouldRequest(nowMs: Long): Boolean {
+        val previous = lastRequestAtMs
+        if (previous == null || nowMs < previous || nowMs - previous >= minimumIntervalMs) {
+            lastRequestAtMs = nowMs
+            return true
+        }
+        return false
+    }
+
+    fun reset() {
+        lastRequestAtMs = null
+    }
+}
