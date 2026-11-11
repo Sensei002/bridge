@@ -148,3 +148,8 @@ The Android authenticated-session reader recognizes the H.264 access-unit packet
 ## Windows Media Foundation encoder foundation
 
 The Windows desktop stream lifecycle now initializes Media Foundation before starting its frame worker and owns a guard that pairs each successful startup with one shutdown. Initialization failure is reported and does not silently claim that hardware encoding is available. The current sender continues using the existing BGRA packet path; H.264 encoder MFT discovery/activation, GPU-surface input, rate control, and encoded access-unit transmission are subsequent steps. This milestone validates only runtime initialization, not encoder availability or encoded streaming.
+
+
+## Windows Media Foundation encoder discovery
+
+The desktop stream startup now enumerates registered Media Foundation video-encoder transforms after platform initialization and reports the discovered names in the second-screen status. Enumeration requests hardware, synchronous, asynchronous, and local transforms. The current result is diagnostic only: it does not yet prove a transform accepts Bridge's target NV12 dimensions/rate, does not activate an encoder, and does not emit H.264 access units. BGRA remains the active transport fallback.
