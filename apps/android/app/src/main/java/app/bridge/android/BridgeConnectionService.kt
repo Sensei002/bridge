@@ -180,6 +180,9 @@ class BridgeConnectionService : Service() {
                         }
                     },
                     onDisplayFrame = { frame ->
+                        if (frame.sequence == 1L || frame.sequence % 120L == 0L) {
+                            BridgeDiagnostics.record("video-bgra", "Frame ${frame.sequence} · ${frame.width}x${frame.height}")
+                        }
                         mainHandler.post {
                             if (!stopping) {
                                 BridgeRuntimeState.latestDisplayFrame.value = frame
@@ -189,6 +192,9 @@ class BridgeConnectionService : Service() {
                         }
                     },
                     onEncodedVideoFrame = { frame ->
+                        if (frame.keyframe || frame.sequence == 1L || frame.sequence % 120L == 0L) {
+                            BridgeDiagnostics.record("video-h264", "Access unit ${frame.sequence} · ${frame.width}x${frame.height} · keyframe=${frame.keyframe}")
+                        }
                         mainHandler.post {
                             if (!stopping) {
                                 BridgeRuntimeState.latestEncodedVideoFrame.value = frame
@@ -221,6 +227,7 @@ class BridgeConnectionService : Service() {
                         }
                     },
                     onSessionEnded = { peerId, handle ->
+                        BridgeDiagnostics.record("connection", "Session ended for peer ${peerId.take(12)}")
                         mainHandler.post {
                             if (stopping) return@post
                             pairingController?.onSessionEnded(peerId, handle)
