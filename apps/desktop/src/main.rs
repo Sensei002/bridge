@@ -552,56 +552,10 @@ fn start_display_frame_stream(
     stop: Arc<std::sync::atomic::AtomicBool>,
     events: Sender<DisplayLeaseEvent>,
 ) -> Result<(), String> {
-    // Initialize Media Foundation on the caller thread, before the stream
-    // worker starts. The runtime guard is moved into that worker and shut down
-    // after the stream exits. BGRA streaming remains the active fallback path.
+    // Keep Media Foundation alive for the full frame-worker lifetime.
+    // The persistent encoder itself is created inside the worker's COM MTA.
     let media_foundation = match media_foundation::MediaFoundationRuntime::start() {
-        Ok(runtime) => {
-            match media_foundation::discover_h264_encoders() {
-                Ok(encoders) if !encoders.is_empty() => {
-                    let activated = encoders.iter()
-                        .filter(|encoder| encoder.activation_succeeded).count();
-                    let profile_matches = encoders.iter()
-                        .filter(|encoder| encoder.supports_nv12_h264_1080x2340_60).count();
-                    let configured = encoders.iter()
-                        .filter(|encoder| encoder.profile_configured).count();
-                    let names = encoders.iter().take(3)
-                        .map(|encoder| {
-                            if encoder.profile_configured {
-                                format!("{} (1080x2340@60 NV12 -> H.264 configured)", encoder.friendly_name)
-                            } else if encoder.supports_nv12_h264_1080x2340_60 {
-                                format!("{} (profile accepted; commit failed)", encoder.friendly_name)
-                            } else if encoder.activation_succeeded {
-                                format!("{} (activated; target profile unsupported)", encoder.friendly_name)
-                            } else {
-                                encoder.friendly_name.clone()
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    let _ = events.send(DisplayLeaseEvent::Status {
-                        session_key: session_key.clone(),
-                        message: format!(
-                            "Media Foundation: {} H.264 candidate(s), {} activated, {} accept and {} configure NV12 -> H.264 at 1080x2340@60: {}. Encoder is shut down after this probe; BGRA remains active.",
-                            encoders.len(), activated, profile_matches, configured, names
-                        ),
-                    });
-                }
-                Ok(_) => {
-                    let _ = events.send(DisplayLeaseEvent::Status {
-                        session_key: session_key.clone(),
-                        message: "Media Foundation is ready but no registered video encoder MFT was found. Using BGRA fallback.".into(),
-                    });
-                }
-                Err(error) => {
-                    let _ = events.send(DisplayLeaseEvent::Status {
-                        session_key: session_key.clone(),
-                        message: format!("{error}. Using BGRA fallback."),
-                    });
-                }
-            }
-            Some(runtime)
-        }
+        Ok(runtime) => Some(runtime),
         Err(error) => {
             let _ = events.send(DisplayLeaseEvent::Status {
                 session_key: session_key.clone(),
@@ -615,14 +569,35 @@ fn start_display_frame_stream(
         .spawn(move || {
             let _media_foundation = media_foundation;
             let com_apartment = media_foundation::ComApartment::start();
-            let mut first_sample_probe_done = com_apartment.is_err();
             if let Err(error) = &com_apartment {
                 let _ = events.send(DisplayLeaseEvent::Status {
                     session_key: session_key.clone(),
-                    message: format!("{error}. H.264 sample probe skipped; BGRA remains active."),
+                    message: format!("{error}. H.264 encoder unavailable; BGRA remains active."),
                 });
             }
             let _com_apartment = com_apartment;
+            let mut persistent_encoder = if _com_apartment.is_ok() && _media_foundation.is_some() {
+                match media_foundation::PersistentH264Encoder::start() {
+                    Ok(encoder) => {
+                        let name = encoder.encoder_name().to_string();
+                        let _ = events.send(DisplayLeaseEvent::Status {
+                            session_key: session_key.clone(),
+                            message: format!("Persistent H.264 encoder ready: {name}. BGRA remains the active stream while sustained encoding is validated."),
+                        });
+                        Some(encoder)
+                    }
+                    Err(error) => {
+                        let _ = events.send(DisplayLeaseEvent::Status {
+                            session_key: session_key.clone(),
+                            message: format!("Persistent H.264 encoder unavailable: {error}. BGRA remains active."),
+                        });
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            let mut encoder_frames_reported = 0_u64;
             let mut last_sequence = 0_u64;
             let mut announced = false;
             let mut stats_window_started = Instant::now();
@@ -643,42 +618,37 @@ fn start_display_frame_stream(
                             timestamp_ns: frame.timestamp_ns,
                             pixels: frame.pixels,
                         };
-                        if !first_sample_probe_done {
-                            first_sample_probe_done = true;
+                        if let Some(encoder) = persistent_encoder.as_mut() {
                             match bridge_transfer::bgra_to_nv12(&display_frame) {
-                                Ok(nv12) => match media_foundation::submit_first_nv12_sample(&nv12) {
-                                    Ok(media_foundation::FirstSampleResult::Encoded { encoder_name, bytes }) => {
-                                        let _ = events.send(DisplayLeaseEvent::Status {
-                                            session_key: session_key.clone(),
-                                            message: format!(
-                                                "H.264 first-sample probe succeeded: {encoder_name} produced {bytes} bytes. Output is diagnostic only; BGRA remains the active stream."
-                                            ),
-                                        });
-                                    }
-                                    Ok(media_foundation::FirstSampleResult::Buffered { encoder_name }) => {
-                                        let _ = events.send(DisplayLeaseEvent::Status {
-                                            session_key: session_key.clone(),
-                                            message: format!(
-                                                "{encoder_name} accepted the first NV12 sample but buffered output; BGRA remains the active stream."
-                                            ),
-                                        });
+                                Ok(nv12) => match encoder.encode(&nv12) {
+                                    Ok(encoded) => {
+                                        encoder_frames_reported = encoder_frames_reported.saturating_add(1);
+                                        if encoder_frames_reported == 1 || encoder_frames_reported % 120 == 0 {
+                                            let bytes: usize = encoded.access_units.iter().map(Vec::len).sum();
+                                            let _ = events.send(DisplayLeaseEvent::Status {
+                                                session_key: session_key.clone(),
+                                                message: if encoded.buffered {
+                                                    format!("Persistent H.264 encoder accepted {} frame(s); output is currently buffered. Encoded data remains diagnostic only; BGRA is still streaming.", encoder_frames_reported)
+                                                } else {
+                                                    format!("Persistent H.264 encoder processed {} frame(s), emitted {} output sample(s) / {bytes} bytes. Encoded data remains diagnostic only; BGRA is still streaming.", encoder_frames_reported, encoded.access_units.len())
+                                                },
+                                            });
+                                        }
                                     }
                                     Err(error) => {
                                         let _ = events.send(DisplayLeaseEvent::Status {
                                             session_key: session_key.clone(),
-                                            message: format!(
-                                                "H.264 first-sample probe unavailable: {error}. BGRA remains the active stream."
-                                            ),
+                                            message: format!("Persistent H.264 encoder stopped after {} frame(s): {error}. Falling back to BGRA.", encoder_frames_reported),
                                         });
+                                        persistent_encoder = None;
                                     }
                                 },
                                 Err(error) => {
                                     let _ = events.send(DisplayLeaseEvent::Status {
                                         session_key: session_key.clone(),
-                                        message: format!(
-                                            "Could not prepare NV12 input sample: {error}. BGRA remains the active stream."
-                                        ),
+                                        message: format!("Could not convert frame for persistent H.264 encoding: {error}. Falling back to BGRA."),
                                     });
+                                    persistent_encoder = None;
                                 }
                             }
                         }
