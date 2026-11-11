@@ -49,6 +49,8 @@ pub struct H264EncoderCandidate {
     pub activation_error: Option<String>,
     pub supports_nv12_h264_1080x2340_60: bool,
     pub format_test_error: Option<String>,
+    pub profile_configured: bool,
+    pub configuration_error: Option<String>,
 }
 
 
@@ -82,6 +84,63 @@ unsafe fn test_nv12_h264_profile(transform: &IMFTransform) -> Result<(), String>
             .map_err(|error| format!("encoder rejected H.264 output profile: {error}"))?;
         transform.SetInputType(0, &input, MFT_SET_TYPE_TEST_ONLY.0 as u32)
             .map_err(|error| format!("encoder rejected NV12 input profile: {error}"))?;
+    }
+    Ok(())
+}
+
+
+/// Commit the target profile after the non-mutating compatibility probe.
+/// The transform is shut down by the caller after diagnostics are collected;
+/// this milestone deliberately does not submit input samples.
+unsafe fn configure_nv12_h264_profile(transform: &IMFTransform) -> Result<(), String> {
+    let input = unsafe { MFCreateMediaType() }
+        .map_err(|error| format!("could not create NV12 media type: {error}"))?;
+    unsafe {
+        input.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
+            .map_err(|error| format!("could not set NV12 major type: {error}"))?;
+        input.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_NV12)
+            .map_err(|error| format!("could not set NV12 subtype: {error}"))?;
+        input.SetUINT64(&MF_MT_FRAME_SIZE, (1080_u64 << 32) | 2340)
+            .map_err(|error| format!("could not set NV12 frame size: {error}"))?;
+        input.SetUINT64(&MF_MT_FRAME_RATE, (60_u64 << 32) | 1)
+            .map_err(|error| format!("could not set NV12 frame rate: {error}"))?;
+    }
+
+    let output = unsafe { MFCreateMediaType() }
+        .map_err(|error| format!("could not create H.264 media type: {error}"))?;
+    unsafe {
+        output.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
+            .map_err(|error| format!("could not set H.264 major type: {error}"))?;
+        output.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_H264)
+            .map_err(|error| format!("could not set H.264 subtype: {error}"))?;
+        output.SetUINT64(&MF_MT_FRAME_SIZE, (1080_u64 << 32) | 2340)
+            .map_err(|error| format!("could not set H.264 frame size: {error}"))?;
+        output.SetUINT64(&MF_MT_FRAME_RATE, (60_u64 << 32) | 1)
+            .map_err(|error| format!("could not set H.264 frame rate: {error}"))?;
+        output.SetUINT32(&MF_MT_AVG_BITRATE, 8_000_000)
+            .map_err(|error| format!("could not set H.264 target bitrate: {error}"))?;
+
+        // Most encoder MFTs require output type negotiation before input type.
+        transform.SetOutputType(0, &output, 0)
+            .map_err(|error| format!("encoder rejected committed H.264 output type: {error}"))?;
+        transform.SetInputType(0, &input, 0)
+            .map_err(|error| format!("encoder rejected committed NV12 input type: {error}"))?;
+
+        // Read back the committed types rather than treating Set*Type success
+        // alone as proof that the transform retained the requested profile.
+        let current_input = transform.GetInputCurrentType(0)
+            .map_err(|error| format!("could not read committed NV12 input type: {error}"))?;
+        let current_output = transform.GetOutputCurrentType(0)
+            .map_err(|error| format!("could not read committed H.264 output type: {error}"))?;
+        let input_size = current_input.GetUINT64(&MF_MT_FRAME_SIZE)
+            .map_err(|error| format!("could not read committed NV12 dimensions: {error}"))?;
+        let output_size = current_output.GetUINT64(&MF_MT_FRAME_SIZE)
+            .map_err(|error| format!("could not read committed H.264 dimensions: {error}"))?;
+        if input_size != ((1080_u64 << 32) | 2340)
+            || output_size != ((1080_u64 << 32) | 2340)
+        {
+            return Err("encoder did not retain the requested 1080x2340 frame dimensions".into());
+        }
     }
     Ok(())
 }
@@ -131,12 +190,18 @@ pub fn discover_h264_encoders() -> Result<Vec<H264EncoderCandidate>, String> {
                 let (
                     activation_succeeded, input_streams, output_streams, activation_error,
                     supports_nv12_h264_1080x2340_60, format_test_error,
+                    profile_configured, configuration_error,
                 ) = match activation_result {
                     Ok(transform) => {
                         let mut inputs = 0_u32;
                         let mut outputs = 0_u32;
                         let stream_result = unsafe { transform.GetStreamCount(&mut inputs, &mut outputs) };
                         let profile_result = unsafe { test_nv12_h264_profile(&transform) };
+                        let configuration_result = if profile_result.is_ok() {
+                            unsafe { configure_nv12_h264_profile(&transform) }
+                        } else {
+                            Err("configuration skipped because the compatibility probe failed".into())
+                        };
                         drop(transform);
                         let _ = unsafe { activation.ShutdownObject() };
                         let (input_streams, output_streams, activation_error) = match stream_result {
@@ -145,19 +210,28 @@ pub fn discover_h264_encoders() -> Result<Vec<H264EncoderCandidate>, String> {
                                 "activated but stream enumeration failed: {error}"
                             ))),
                         };
-                        match profile_result {
-                            Ok(()) => (true, input_streams, output_streams, activation_error, true, None),
-                            Err(error) => (true, input_streams, output_streams, activation_error, false, Some(error)),
-                        }
+                        let (supports_profile, format_error) = match profile_result {
+                            Ok(()) => (true, None),
+                            Err(error) => (false, Some(error)),
+                        };
+                        let (configured, config_error) = match configuration_result {
+                            Ok(()) => (true, None),
+                            Err(error) => (false, Some(error)),
+                        };
+                        (
+                            true, input_streams, output_streams, activation_error,
+                            supports_profile, format_error, configured, config_error,
+                        )
                     }
                     Err(error) => (
                         false, None, None, Some(format!("encoder activation failed: {error}")),
-                        false, None,
+                        false, None, false, None,
                     ),
                 };
                 candidates.push(H264EncoderCandidate {
                     friendly_name, activation_succeeded, input_streams, output_streams,
                     activation_error, supports_nv12_h264_1080x2340_60, format_test_error,
+                    profile_configured, configuration_error,
                 });
                 drop(activation);
             }
