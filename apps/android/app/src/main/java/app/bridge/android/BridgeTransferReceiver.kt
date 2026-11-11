@@ -22,6 +22,9 @@ import kotlin.concurrent.withLock
 
 private const val CLIPBOARD_TAG = 0x03
 private const val DISPLAY_FRAME_TAG = 0x04
+private const val ENCODED_VIDEO_TAG = 0x06
+private const val ENCODED_VIDEO_HEADER_BYTES = 34
+private const val MAX_ENCODED_VIDEO_BYTES = 16 * 1024 * 1024
 private const val DISPLAY_FRAME_HEADER_BYTES = 37
 private const val DISPLAY_FRAME_FRAGMENT_BYTES = 48 * 1024
 private const val MAX_DISPLAY_FRAME_BYTES = 64 * 1024 * 1024
@@ -38,6 +41,105 @@ internal data class BridgeDisplayFrame(
     val pixels: ByteArray,
     val receivedAtElapsedRealtimeNs: Long = android.os.SystemClock.elapsedRealtimeNanos()
 )
+
+internal data class BridgeEncodedVideoFrame(
+    val deviceId: String,
+    val sequence: Long,
+    val width: Int,
+    val height: Int,
+    val timestampNs: Long,
+    val keyframe: Boolean,
+    val bitstream: ByteArray,
+    val receivedAtElapsedRealtimeNs: Long = android.os.SystemClock.elapsedRealtimeNanos()
+)
+
+/** Reassembles one bounded Annex-B H.264 access unit from authenticated packets. */
+internal class EncodedVideoFrameAssembler {
+    private data class Header(
+        val sequence: Long,
+        val width: Int,
+        val height: Int,
+        val timestampNs: Long,
+        val totalBytes: Int,
+        val keyframe: Boolean
+    )
+
+    private var active: Header? = null
+    private var bitstream: ByteArray? = null
+    private var received = 0
+    private var lastCompletedSequence = 0L
+
+    fun reset() {
+        active = null
+        bitstream = null
+        received = 0
+    }
+
+    fun push(packet: ByteArray): BridgeEncodedVideoFrame? {
+        try {
+            require(packet.size > ENCODED_VIDEO_HEADER_BYTES &&
+                packet.size <= ENCODED_VIDEO_HEADER_BYTES + DISPLAY_FRAME_FRAGMENT_BYTES &&
+                packet[0].toInt() and 0xff == ENCODED_VIDEO_TAG) {
+                "Invalid encoded-video packet size or tag."
+            }
+            val buffer = ByteBuffer.wrap(packet).order(java.nio.ByteOrder.BIG_ENDIAN)
+            buffer.get()
+            val header = Header(
+                sequence = buffer.long,
+                width = buffer.int,
+                height = buffer.int,
+                timestampNs = buffer.long,
+                totalBytes = buffer.int,
+                keyframe = when (buffer.get().toInt() and 0xff) {
+                    0 -> false
+                    1 -> true
+                    else -> error("Invalid encoded-video keyframe flag.")
+                }
+            )
+            val offset = buffer.int
+            val count = packet.size - ENCODED_VIDEO_HEADER_BYTES
+            require(header.sequence > 0 && header.width in 1..4096 && header.height in 1..4096 &&
+                header.timestampNs > 0 && header.totalBytes in 1..MAX_ENCODED_VIDEO_BYTES) {
+                "Invalid encoded-video metadata."
+            }
+            require(count in 1..DISPLAY_FRAME_FRAGMENT_BYTES &&
+                offset >= 0 && offset.toLong() + count <= header.totalBytes.toLong()) {
+                "Invalid encoded-video fragment range."
+            }
+            if (offset == 0) {
+                require(active == null && header.sequence > lastCompletedSequence) {
+                    "Encoded-video access unit overlaps or has a stale sequence."
+                }
+                active = header
+                bitstream = ByteArray(header.totalBytes)
+                received = 0
+            }
+            require(active == header && offset == received) {
+                "Encoded-video fragments are out of order or inconsistent."
+            }
+            System.arraycopy(packet, ENCODED_VIDEO_HEADER_BYTES, requireNotNull(bitstream), received, count)
+            received += count
+            if (received == header.totalBytes) {
+                val completed = requireNotNull(bitstream)
+                lastCompletedSequence = header.sequence
+                reset()
+                return BridgeEncodedVideoFrame(
+                    deviceId = "",
+                    sequence = header.sequence,
+                    width = header.width,
+                    height = header.height,
+                    timestampNs = header.timestampNs,
+                    keyframe = header.keyframe,
+                    bitstream = completed
+                )
+            }
+            return null
+        } catch (error: Exception) {
+            reset()
+            throw error
+        }
+    }
+}
 
 /** Reassembles one ordered BGRA8 frame and caps its allocation at 64 MiB. */
 private class DisplayFrameAssembler {
@@ -169,6 +271,7 @@ internal class BridgeTransferReceiver(
     private val onOffer: (BridgeIncomingOffer) -> Unit,
     private val onClipboardText: (String, String) -> Unit,
     private val onDisplayFrame: (BridgeDisplayFrame) -> Unit,
+    private val onEncodedVideoFrame: (BridgeEncodedVideoFrame) -> Unit,
     private val onStatus: (String) -> Unit,
     private val onSessionEnded: (String, Long) -> Unit
 ) {
@@ -186,6 +289,7 @@ internal class BridgeTransferReceiver(
         if (readers.containsKey(handle)) return
         val queue = LinkedBlockingQueue<ByteArray>(8)
         val displayAssembler = DisplayFrameAssembler()
+        val encodedVideoAssembler = EncodedVideoFrameAssembler()
         val displayDispatcher = LatestDisplayFrameDispatcher(main, onDisplayFrame)
         displayDispatchers.put(handle, displayDispatcher)?.close()
         queues[handle] = queue
@@ -205,6 +309,16 @@ internal class BridgeTransferReceiver(
                             }
                         } catch (error: Exception) {
                             postStatus("Dropped invalid second-screen frame: ${error.message}")
+                        }
+                        continue
+                    }
+                    if ((packet[0].toInt() and 0xff) == ENCODED_VIDEO_TAG) {
+                        try {
+                            encodedVideoAssembler.push(packet)?.let { frame ->
+                                main.post { onEncodedVideoFrame(frame.copy(deviceId = deviceId)) }
+                            }
+                        } catch (error: Exception) {
+                            postStatus("Dropped invalid H.264 access unit: ${error.message}")
                         }
                         continue
                     }
