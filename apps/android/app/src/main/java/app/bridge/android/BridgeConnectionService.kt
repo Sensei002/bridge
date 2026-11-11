@@ -85,6 +85,8 @@ class BridgeConnectionService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        BridgeDiagnostics.initialize(this)
+        BridgeDiagnostics.record("service", "Bridge connection service created")
         instance = this
         createNotificationChannel()
         val notification = buildNotification()
