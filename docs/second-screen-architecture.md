@@ -168,3 +168,8 @@ For each successfully activated H.264-output transform, the desktop now construc
 ## Windows committed H.264 encoder profile probe
 
 The Windows diagnostic now goes beyond test-only negotiation: for transforms accepting the target profile, it commits H.264 output first and NV12 input second, then reads back the current input/output frame dimensions. Per-candidate results distinguish profile acceptance from successful committed configuration. The temporary transform is still shut down after the probe and no samples are submitted, so this does not yet produce encoded video or switch the sender away from BGRA.
+
+
+## BGRA-to-NV12 conversion foundation
+
+The shared Rust transfer crate now provides a bounded CPU conversion from tightly packed BGRA8 display frames to NV12 using BT.709 video-range luma/chroma coefficients. It validates frame metadata, requires even dimensions, averages chroma over each 2×2 pixel block, preserves sequence/timestamp metadata, and caps output at the existing 64 MiB frame limit. Cross-platform unit tests cover black/white levels, chroma subsampling, and malformed/odd-sized inputs. This is a conversion primitive only: the Windows sender still transmits BGRA, and no Media Foundation input samples are submitted yet.
