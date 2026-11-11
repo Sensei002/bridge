@@ -164,6 +164,7 @@ pub fn encode_chunk(chunk: &FileChunk) -> Result<Vec<u8>, TransferError> {
 pub enum TransferPacket {
     Control(TransferControl),
     Chunk(FileChunk),
+    DisplayFrame(DisplayFrameFragment),
 }
 
 pub const CONTROL_PACKET_TAG: u8 = 0x01;
@@ -182,6 +183,7 @@ pub fn encode_packet(packet: &TransferPacket) -> Result<Vec<u8>, TransferError> 
             bytes.extend_from_slice(&encode_chunk(chunk)?);
             bytes
         }
+        TransferPacket::DisplayFrame(fragment) => encode_display_frame_fragment(fragment)?,
     };
     if encoded.len() > MAX_PACKET_BYTES {
         return Err(TransferError::InvalidChunk("packet exceeds the encrypted transport limit".into()));
@@ -196,6 +198,7 @@ pub fn decode_packet(bytes: &[u8]) -> Result<TransferPacket, TransferError> {
     match bytes[0] {
         CONTROL_PACKET_TAG => Ok(TransferPacket::Control(decode_control(&bytes[1..])?)),
         CHUNK_PACKET_TAG => Ok(TransferPacket::Chunk(decode_chunk(&bytes[1..])?)),
+        DISPLAY_FRAME_PACKET_TAG => Ok(TransferPacket::DisplayFrame(decode_display_frame_fragment(bytes)?)),
         _ => Err(TransferError::InvalidChunk("unknown transfer packet type".into())),
     }
 }
@@ -401,6 +404,182 @@ impl Drop for IncomingFile {
     }
 }
 
+
+/// Maximum uncompressed BGRA8 display frame accepted by the transport.
+pub const MAX_DISPLAY_FRAME_BYTES: usize = 64 * 1024 * 1024;
+/// Each display fragment fits inside one authenticated Noise application message.
+pub const DISPLAY_FRAME_FRAGMENT_BYTES: usize = 48 * 1024;
+pub const DISPLAY_FRAME_PACKET_TAG: u8 = 0x03;
+const DISPLAY_FRAME_FRAGMENT_HEADER_BYTES: usize = 1 + 8 + 4 + 4 + 4 + 8 + 4 + 4;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DisplayFrameFragment {
+    pub sequence: u64,
+    pub width: u32,
+    pub height: u32,
+    pub stride: u32,
+    pub timestamp_ns: u64,
+    pub total_bytes: u32,
+    pub offset: u32,
+    pub data: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DisplayFrame {
+    pub sequence: u64,
+    pub width: u32,
+    pub height: u32,
+    pub stride: u32,
+    pub timestamp_ns: u64,
+    pub pixels: Vec<u8>,
+}
+
+fn validate_display_frame_metadata(
+    sequence: u64, width: u32, height: u32, stride: u32, total_bytes: u32,
+) -> Result<(), TransferError> {
+    let expected_stride = width.checked_mul(4)
+        .ok_or_else(|| TransferError::InvalidChunk("display frame stride overflow".into()))?;
+    let expected_bytes = (stride as u64).checked_mul(height as u64)
+        .ok_or_else(|| TransferError::InvalidChunk("display frame size overflow".into()))?;
+    if sequence == 0 || width == 0 || height == 0 || width > 4096 || height > 4096
+        || stride != expected_stride || expected_bytes == 0
+        || expected_bytes > MAX_DISPLAY_FRAME_BYTES as u64
+        || total_bytes as u64 != expected_bytes
+    {
+        return Err(TransferError::InvalidChunk("display frame metadata is invalid or exceeds 64 MiB".into()));
+    }
+    Ok(())
+}
+
+pub fn encode_display_frame_fragment(fragment: &DisplayFrameFragment) -> Result<Vec<u8>, TransferError> {
+    validate_display_frame_metadata(fragment.sequence, fragment.width, fragment.height, fragment.stride, fragment.total_bytes)?;
+    let end = (fragment.offset as u64).checked_add(fragment.data.len() as u64)
+        .ok_or_else(|| TransferError::InvalidChunk("display fragment range overflow".into()))?;
+    if fragment.data.is_empty() || fragment.data.len() > DISPLAY_FRAME_FRAGMENT_BYTES
+        || end > fragment.total_bytes as u64
+    {
+        return Err(TransferError::InvalidChunk("display fragment payload range is invalid".into()));
+    }
+    let mut bytes = Vec::with_capacity(DISPLAY_FRAME_FRAGMENT_HEADER_BYTES + fragment.data.len());
+    bytes.push(DISPLAY_FRAME_PACKET_TAG);
+    bytes.extend_from_slice(&fragment.sequence.to_be_bytes());
+    bytes.extend_from_slice(&fragment.width.to_be_bytes());
+    bytes.extend_from_slice(&fragment.height.to_be_bytes());
+    bytes.extend_from_slice(&fragment.stride.to_be_bytes());
+    bytes.extend_from_slice(&fragment.timestamp_ns.to_be_bytes());
+    bytes.extend_from_slice(&fragment.total_bytes.to_be_bytes());
+    bytes.extend_from_slice(&fragment.offset.to_be_bytes());
+    bytes.extend_from_slice(&fragment.data);
+    if bytes.len() > MAX_PACKET_BYTES {
+        return Err(TransferError::InvalidChunk("display fragment exceeds the encrypted message limit".into()));
+    }
+    Ok(bytes)
+}
+
+pub fn decode_display_frame_fragment(bytes: &[u8]) -> Result<DisplayFrameFragment, TransferError> {
+    if bytes.len() <= DISPLAY_FRAME_FRAGMENT_HEADER_BYTES || bytes.len() > MAX_PACKET_BYTES
+        || bytes[0] != DISPLAY_FRAME_PACKET_TAG
+    {
+        return Err(TransferError::InvalidChunk("display fragment packet size or tag is invalid".into()));
+    }
+    let u32_at = |offset: usize| -> Result<u32, TransferError> {
+        let value: [u8; 4] = bytes.get(offset..offset + 4)
+            .ok_or_else(|| TransferError::InvalidChunk("truncated display fragment header".into()))?
+            .try_into().map_err(|_| TransferError::InvalidChunk("invalid display fragment field".into()))?;
+        Ok(u32::from_be_bytes(value))
+    };
+    let u64_at = |offset: usize| -> Result<u64, TransferError> {
+        let value: [u8; 8] = bytes.get(offset..offset + 8)
+            .ok_or_else(|| TransferError::InvalidChunk("truncated display fragment header".into()))?
+            .try_into().map_err(|_| TransferError::InvalidChunk("invalid display fragment field".into()))?;
+        Ok(u64::from_be_bytes(value))
+    };
+    let fragment = DisplayFrameFragment {
+        sequence: u64_at(1)?,
+        width: u32_at(9)?,
+        height: u32_at(13)?,
+        stride: u32_at(17)?,
+        timestamp_ns: u64_at(21)?,
+        total_bytes: u32_at(29)?,
+        offset: u32_at(33)?,
+        data: bytes[DISPLAY_FRAME_FRAGMENT_HEADER_BYTES..].to_vec(),
+    };
+    validate_display_frame_metadata(fragment.sequence, fragment.width, fragment.height, fragment.stride, fragment.total_bytes)?;
+    let end = (fragment.offset as u64).checked_add(fragment.data.len() as u64)
+        .ok_or_else(|| TransferError::InvalidChunk("display fragment range overflow".into()))?;
+    if fragment.data.is_empty() || fragment.data.len() > DISPLAY_FRAME_FRAGMENT_BYTES
+        || end > fragment.total_bytes as u64
+    {
+        return Err(TransferError::InvalidChunk("display fragment payload range is invalid".into()));
+    }
+    Ok(fragment)
+}
+
+/// Splits a validated BGRA8 frame into bounded packets for the Noise transport.
+pub fn fragment_display_frame(frame: &DisplayFrame) -> Result<Vec<Vec<u8>>, TransferError> {
+    let total_bytes = u32::try_from(frame.pixels.len())
+        .map_err(|_| TransferError::InvalidChunk("display frame is too large".into()))?;
+    validate_display_frame_metadata(frame.sequence, frame.width, frame.height, frame.stride, total_bytes)?;
+    let mut packets = Vec::with_capacity(frame.pixels.len().div_ceil(DISPLAY_FRAME_FRAGMENT_BYTES));
+    for (index, data) in frame.pixels.chunks(DISPLAY_FRAME_FRAGMENT_BYTES).enumerate() {
+        let offset = index.checked_mul(DISPLAY_FRAME_FRAGMENT_BYTES)
+            .ok_or_else(|| TransferError::InvalidChunk("display fragment offset overflow".into()))?;
+        packets.push(encode_display_frame_fragment(&DisplayFrameFragment {
+            sequence: frame.sequence, width: frame.width, height: frame.height,
+            stride: frame.stride, timestamp_ns: frame.timestamp_ns, total_bytes,
+            offset: u32::try_from(offset).map_err(|_| TransferError::InvalidChunk("display fragment offset overflow".into()))?,
+            data: data.to_vec(),
+        })?);
+    }
+    Ok(packets)
+}
+
+/// Reassembles one frame at a time and never allocates beyond the 64 MiB frame cap.
+#[derive(Default)]
+pub struct DisplayFrameAssembler {
+    active: Option<DisplayFrameFragment>,
+    pixels: Vec<u8>,
+}
+
+impl DisplayFrameAssembler {
+    pub fn reset(&mut self) {
+        self.active = None;
+        self.pixels.clear();
+    }
+
+    pub fn push(&mut self, packet: &[u8]) -> Result<Option<DisplayFrame>, TransferError> {
+        let fragment = decode_display_frame_fragment(packet)?;
+        if fragment.offset == 0 {
+            if self.active.is_some() {
+                return Err(TransferError::InvalidChunk("a new display frame arrived before the previous frame completed".into()));
+            }
+            self.pixels = Vec::with_capacity(fragment.total_bytes as usize);
+            self.active = Some(fragment.clone());
+        }
+        let Some(first) = self.active.as_ref() else {
+            return Err(TransferError::InvalidChunk("display frame must begin with offset zero".into()));
+        };
+        if fragment.sequence != first.sequence || fragment.width != first.width
+            || fragment.height != first.height || fragment.stride != first.stride
+            || fragment.timestamp_ns != first.timestamp_ns || fragment.total_bytes != first.total_bytes
+            || fragment.offset as usize != self.pixels.len()
+        {
+            self.reset();
+            return Err(TransferError::InvalidChunk("display frame fragments are out of order or have inconsistent metadata".into()));
+        }
+        self.pixels.extend_from_slice(&fragment.data);
+        if self.pixels.len() == fragment.total_bytes as usize {
+            let first = self.active.take().expect("active frame exists");
+            let pixels = std::mem::take(&mut self.pixels);
+            return Ok(Some(DisplayFrame {
+                sequence: first.sequence, width: first.width, height: first.height,
+                stride: first.stride, timestamp_ns: first.timestamp_ns, pixels,
+            }));
+        }
+        Ok(None)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -554,4 +733,61 @@ mod tests {
         assert!(matches!(incoming.finish(), Err(TransferError::ChecksumMismatch)));
         fs::remove_dir_all(directory).unwrap();
     }
+
+
+
+    #[test]
+    fn display_frame_fragments_use_the_shared_transfer_packet_decoder() {
+        let fragment = DisplayFrameFragment {
+            sequence: 2, width: 2, height: 2, stride: 8, timestamp_ns: 7,
+            total_bytes: 16, offset: 0, data: vec![0x44; 16],
+        };
+        let packet = TransferPacket::DisplayFrame(fragment.clone());
+        let encoded = encode_packet(&packet).unwrap();
+        assert_eq!(decode_packet(&encoded).unwrap(), packet);
+    }
+
+    #[test]
+    fn display_frames_fragment_and_reassemble_in_order() {
+        let frame = DisplayFrame {
+            sequence: 7, width: 128, height: 128, stride: 512, timestamp_ns: 99,
+            pixels: vec![0x5a; 512 * 128],
+        };
+        let packets = fragment_display_frame(&frame).unwrap();
+        assert!(packets.len() > 1);
+        assert!(packets.iter().all(|packet| packet.len() <= MAX_PACKET_BYTES));
+        let mut assembler = DisplayFrameAssembler::default();
+        for packet in &packets[..packets.len() - 1] {
+            assert!(assembler.push(packet).unwrap().is_none());
+        }
+        assert_eq!(assembler.push(packets.last().unwrap()).unwrap(), Some(frame));
+    }
+
+    #[test]
+    fn display_frame_assembler_rejects_out_of_order_fragments() {
+        let frame = DisplayFrame {
+            sequence: 8, width: 128, height: 128, stride: 512, timestamp_ns: 100,
+            pixels: vec![0x33; 512 * 128],
+        };
+        let packets = fragment_display_frame(&frame).unwrap();
+        let mut assembler = DisplayFrameAssembler::default();
+        assert!(assembler.push(&packets[1]).is_err());
+        assert!(assembler.push(&packets[0]).unwrap().is_none());
+        assert!(assembler.push(&packets[0]).is_err());
+    }
+
+    #[test]
+    fn display_frame_transport_rejects_invalid_metadata_and_oversized_fragments() {
+        let invalid = DisplayFrame {
+            sequence: 1, width: 10, height: 10, stride: 40, timestamp_ns: 1,
+            pixels: vec![0; 399],
+        };
+        assert!(fragment_display_frame(&invalid).is_err());
+        let fragment = DisplayFrameFragment {
+            sequence: 1, width: 2, height: 2, stride: 8, timestamp_ns: 1,
+            total_bytes: 16, offset: 0, data: vec![0; DISPLAY_FRAME_FRAGMENT_BYTES + 1],
+        };
+        assert!(encode_display_frame_fragment(&fragment).is_err());
+    }
+
 }
