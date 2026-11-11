@@ -95,6 +95,7 @@ class MainActivity : ComponentActivity() {
     private val pairingStatus get() = BridgeRuntimeState.pairingStatus.value
     private val transferStatus get() = BridgeRuntimeState.transferStatus.value
     private val latestDisplayFrame get() = BridgeRuntimeState.latestDisplayFrame.value
+    private val latestEncodedVideoFrame get() = BridgeRuntimeState.latestEncodedVideoFrame.value
 
     private var pendingExportFile: File? = null
     private lateinit var exportFileLauncher: ActivityResultLauncher<String>
@@ -145,6 +146,7 @@ class MainActivity : ComponentActivity() {
                 incomingOffers = incomingOffers,
                 transferStatus = transferStatus,
                 latestDisplayFrame = latestDisplayFrame,
+                latestEncodedVideoFrame = latestEncodedVideoFrame,
                 onImmersiveModeChange = { setSecondScreenImmersive(it) },
                 onDisplayInput = { deviceId, action, pointerId, x, y ->
                     BridgeConnectionService.instance?.sendDisplayInput(deviceId, action, pointerId, x, y)
@@ -302,6 +304,7 @@ private fun BridgeApp(
     incomingOffers: List<BridgeIncomingOffer>,
     transferStatus: String,
     latestDisplayFrame: BridgeDisplayFrame?,
+    latestEncodedVideoFrame: BridgeEncodedVideoFrame?,
     onImmersiveModeChange: (Boolean) -> Unit,
     onDisplayInput: (String, Int, Int, Int, Int) -> Unit,
     receivedFiles: List<File>,
@@ -386,6 +389,7 @@ private fun BridgeApp(
                         )
                         BridgeTab.SecondScreen -> SecondScreenView(
                             frame = latestDisplayFrame,
+                            encodedFrame = latestEncodedVideoFrame,
                             connectedDevices = connectedSessionHandles.size,
                             immersive = immersiveSecondScreen,
                             onImmersiveChange = { enabled ->
@@ -546,6 +550,7 @@ private const val DISPLAY_FRAME_STALE_AFTER_MS = 1_500L
 @Composable
 private fun SecondScreenView(
     frame: BridgeDisplayFrame?,
+    encodedFrame: BridgeEncodedVideoFrame?,
     connectedDevices: Int,
     immersive: Boolean,
     onImmersiveChange: (Boolean) -> Unit,
@@ -724,7 +729,15 @@ private fun SecondScreenView(
                             true
                         }
                     )
-                } else {
+                }
+                if (encodedFrame != null) {
+                    AvcSurfaceRenderer(
+                        frame = encodedFrame,
+                        modifier = Modifier.fillMaxSize(),
+                        onStatus = { message -> BridgeRuntimeState.transferStatus.value = message }
+                    )
+                }
+                if (displayBitmap == null) {
                     Text(
                         if (connectedDevices == 0) "Connect a trusted Windows PC first."
                         else "Waiting for the Windows display stream…",
