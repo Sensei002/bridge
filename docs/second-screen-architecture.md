@@ -2,6 +2,8 @@
 
 ## Product requirement
 
+**Current milestone: Milestone 2 — Android as a real extended Windows display.** The implementation status below and [the roadmap](roadmap.md) are authoritative; older design notes are historical context, not a claim that every acceptance gate has passed.
+
 Bridge Second Screen turns a trusted Android phone or tablet into a **real extended Windows display**. Windows must enumerate it as another monitor in Settings > System > Display. The user can choose Extend, move application windows onto it, and arrange its position relative to physical monitors.
 
 This is not desktop mirroring, a remote-control window, Miracast casting, or a video player that happens to show the desktop. The virtual display must exist in the Windows display topology.
@@ -120,86 +122,25 @@ The first physical test target is the currently paired Redmi Note 7 Pro. Start w
 - Microsoft sample README notes that the sample only enumerates a monitor and that its INF and swap-chain processing need production work.
 
 
-## Android stalled-frame detection
 
-The Android second-screen UI tracks the age of the most recently completed frame using Android's monotonic elapsed-realtime clock. If no newer frame arrives for 1.5 seconds, both the compact preview and immersive view report a stalled stream and show the elapsed time since the last frame. The last rendered image remains visible for diagnosis; the warning does not claim that the authenticated device session has disconnected. A new frame immediately clears the warning. This is an arrival watchdog, not a decoder-health or end-to-end latency measurement.
+## Current implementation status (development)
 
+This section supersedes the earlier step-by-step implementation notes that follow the original architecture plan. The live task checklist and acceptance gates are maintained in [the roadmap](roadmap.md).
 
-## Windows frame-sender diagnostics
+### Implemented in the development code
+- The Windows IddCx/UMDF driver project and Bridge Display Service build through GitHub Actions.
+- The driver exposes restricted connect, disconnect, and status controls. The service uses an authenticated desktop-client identity check, Android peer attestation, a short-lived display lease, and lease-bound driver operations.
+- The desktop app can query and display driver monitor status and advertised mode count.
+- Windows sends bounded H.264 access units over the authenticated Bridge session using a persistent Media Foundation encoder. Source timestamps are preserved; dynamic display dimensions recreate the encoder; Android can request a fresh GOP after decoder recovery.
+- Android reassembles H.264 access units, configures MediaCodec with SPS/PPS, renders through SurfaceView, bounds decoder work, detects sequence gaps, and requests keyframe recovery. BGRA remains a fallback path.
+- Android and Windows expose source/receiver frame diagnostics. These are frame-arrival and sender-side measurements, not synchronized end-to-end latency measurements.
+- A bounded pointer-event wire format exists inside the authenticated session. It is a protocol foundation, not a completed touch-input feature.
 
-The Windows desktop sender reports a rolling one-second source-side estimate while frames are successfully delivered through the authenticated session: sent FPS, raw BGRA payload bitrate, the number of capture sequence values superseded before the sender could read them, and average time spent sending each complete frame. The bitrate is raw pixel payload before Noise/TCP framing and is not a measured Wi-Fi wire rate. Superseded sequence values indicate latest-frame replacement between sender polls; they are not evidence of network packet loss. Compare this source estimate with Android's incoming-frame estimate to localize capture, sender, network, and receiver bottlenecks.
+### Not yet proven or complete
+- Physical installation and registration of the driver/service, virtual-monitor arrival/removal, and stable mode negotiation on a real Windows host.
+- Real IddCx Direct3D swap-chain acquisition and delivery of the actual virtual desktop surface into the media pipeline.
+- Sustained H.264 playback, actual IDR/SPS/PPS behaviour after encoder restart, rotation, and dynamic-resolution recovery on the target Windows PC and Redmi Note 7 Pro.
+- A complete Windows Extend-mode session in which normal application windows move to and render on the Android display.
+- Touch/pen input injection into Windows, adaptive bitrate, measured latency, congestion handling, sleep/resume recovery, and production-grade installer/signing validation.
 
-
-## Android H.264 decoder capability probe
-
-The Android Second Screen page inspects the platform's regular (non-encoder) MediaCodec list for H.264/AVC decoders. It reports the preferred declared decoder, hardware-acceleration classification where Android exposes it, maximum declared dimensions/frame rate/bitrate, and whether 1080 × 2340 at 30 FPS is declared supported. The probe does not instantiate or start a codec and does not prove that a decoder can render a live stream to the eventual SurfaceView. Runtime configure/start, color format, sustained playback, rotation, and teardown must be validated by the MediaCodec renderer implementation and on physical hardware.
-
-
-## Bounded H.264 access-unit wire format
-
-The shared transfer crate defines a dedicated packet discriminator for encoded H.264/AVC access-unit fragments, separate from the existing raw BGRA frame tag. Each fragment carries a monotonic frame sequence, dimensions, source timestamp, total access-unit length, byte offset, and keyframe flag. Fragment payloads remain within the existing encrypted-message limit; a complete encoded access unit is capped at 16 MiB. The assembler accepts one access unit at a time, validates contiguous offsets and consistent metadata, and rejects overlapping or stale sequences. This is a protocol foundation only: it does not yet replace the Windows BGRA sender, establish a dedicated datagram media transport, or connect Android MediaCodec to a Surface.
-
-
-## Android encoded-video packet reception
-
-The Android authenticated-session reader recognizes the H.264 access-unit packet tag separately from raw BGRA frames. It reassembles one access unit at a time with a 16 MiB cap, validates metadata, keyframe flag, contiguous fragment offsets, and strictly increasing completed sequences, then exposes the completed access unit and source metadata to the connection runtime. Session teardown clears the latest encoded frame for that peer. The access unit is not yet passed to MediaCodec; decoder configuration, input-buffer scheduling, SurfaceView rendering, and sender-side H.264 encoding remain separate milestones.
-
-
-## Windows Media Foundation encoder foundation
-
-The Windows desktop stream lifecycle now initializes Media Foundation before starting its frame worker and owns a guard that pairs each successful startup with one shutdown. Initialization failure is reported and does not silently claim that hardware encoding is available. The current sender continues using the existing BGRA packet path; H.264 encoder MFT discovery/activation, GPU-surface input, rate control, and encoded access-unit transmission are subsequent steps. This milestone validates only runtime initialization, not encoder availability or encoded streaming.
-
-
-## Windows Media Foundation encoder discovery
-
-The desktop stream startup now enumerates registered Media Foundation video-encoder transforms that advertise H.264 output after platform initialization and reports the discovered names in the second-screen status. Enumeration requests hardware, synchronous, asynchronous, and local transforms. The current result is diagnostic only: it does not yet prove a transform accepts Bridge's target NV12 dimensions/rate, does not activate an encoder, and does not emit H.264 access units. BGRA remains the active transport fallback.
-
-
-## Windows H.264 encoder activation probe
-
-The encoder diagnostic now attempts to activate each registered H.264-output MFT as an IMFTransform and query its input/output stream counts. Activation failures are retained per candidate rather than aborting discovery of other encoders. Successful transform objects are released and shut down immediately; no frame types are negotiated and no samples are submitted. This confirms activation only, not NV12 input support, hardware acceleration, or successful H.264 bitstream production. BGRA remains the active sender.
-
-
-## Windows NV12-to-H.264 profile negotiation probe
-
-For each successfully activated H.264-output transform, the desktop now constructs test-only Media Foundation media types for NV12 input and H.264 output at 1080×2340, 60 fps, and an 8 Mbps target bitrate. It calls the transform's output/input type setters with MFT_SET_TYPE_TEST_ONLY, so no active type is committed and no frames are processed. Diagnostics distinguish activation from acceptance of this exact target profile. Hardware acceleration is still not inferred from registration or friendly names; actual encoding and bitstream output remain future steps.
-
-
-## Windows committed H.264 encoder profile probe
-
-The Windows diagnostic now goes beyond test-only negotiation: for transforms accepting the target profile, it commits H.264 output first and NV12 input second, then reads back the current input/output frame dimensions. Per-candidate results distinguish profile acceptance from successful committed configuration. The temporary transform is still shut down after the probe and no samples are submitted, so this does not yet produce encoded video or switch the sender away from BGRA.
-
-
-## First Windows H.264 encoder sample probe
-
-When the first captured 1080×2340 BGRA frame arrives, the Windows stream worker converts a copy to bounded NV12 and attempts to submit exactly one sample to a compatible synchronous Media Foundation H.264 encoder. The worker initializes its own COM multithreaded apartment; the probe negotiates the configured 60 fps profile, sends begin/start-streaming messages, attaches the NV12 buffer with a 100 ns timestamp and frame duration, and requests an output sample using the transform's advertised allocation model. A returned output is checked against the 16 MiB access-unit bound. A transform that accepts the sample but needs more input is reported separately from one that produces output.
-
-This is a one-sample diagnostic only. The transform is shut down after the probe, encoded bytes are not transmitted, asynchronous MFTs are deliberately excluded, and the existing authenticated BGRA sender remains active. If Media Foundation startup, COM initialization, conversion, activation, or encoding fails, BGRA streaming continues. Sustained encoding, keyframe/configuration handling, persistent encoder lifetime, H.264 packet transmission, and Android MediaCodec rendering remain future milestones.
-
-## BGRA-to-NV12 conversion foundation
-
-The shared Rust transfer crate now provides a bounded CPU conversion from tightly packed BGRA8 display frames to NV12 using BT.709 video-range luma/chroma coefficients. It validates frame metadata, requires even dimensions, averages chroma over each 2×2 pixel block, preserves sequence/timestamp metadata, and caps output at the existing 64 MiB frame limit. Cross-platform unit tests cover black/white levels, chroma subsampling, and malformed/odd-sized inputs. This is a conversion primitive only: the Windows sender still transmits BGRA, and no Media Foundation input samples are submitted yet.
-
-
-## Android MediaCodec Surface renderer foundation
-
-The Android second-screen UI owns a bounded, single-threaded AVC decode worker and a native SurfaceView. It configures MediaCodec for the dimensions carried by authenticated H.264 access units, supplies SPS/PPS as codec-specific data, queues presentation timestamps in microseconds, and releases decoded output buffers to the Surface. The worker queue is bounded to two pending frames. Surface size changes and destruction clear stale queued work, release the codec on its worker, and return visibility to the BGRA fallback. Decoder errors and frame-sequence gaps request a fresh keyframe from Windows.
-
-The Windows session reader accepts a fixed-size keyframe-request message only inside the existing authenticated Noise session. The stream worker coalesces requests into an atomic flag and restarts its encoder instance to begin a fresh GOP. The persistent encoder is created for the actual virtual-display dimensions and recreated when those dimensions change; NV12/H.264 media types are negotiated against that size rather than assuming 1080×2340. Encoder reinitialization and keyframe output behavior still require validation with real Windows hardware and an Android device. The BGRA path remains available throughout.
-
-
-## Android AVC decoder configuration
-
-Before creating the MediaCodec decoder, the Android renderer now extracts Annex-B SPS and PPS NAL units from the first IDR access unit and supplies them as `csd-0` and `csd-1` in the decoder format. It waits for a keyframe containing both parameter sets rather than starting a decoder with incomplete codec configuration. The parser retains the Annex-B start codes and is covered by JVM unit tests for three-/four-byte start codes, missing parameter sets, non-Annex-B input, and trailing zero bytes. This improves decoder initialization but does not yet guarantee that every Media Foundation encoder emits SPS/PPS with every recovery keyframe or solve packet-loss/keyframe requests.
-
-
-## Preserve H.264 presentation timestamps
-
-The persistent Windows Media Foundation encoder now reads the presentation timestamp from each emitted output sample instead of assigning the timestamp of whichever captured frame happened to trigger the drain. Encoded access units carry the encoder's 100 ns timestamp through the desktop sender and convert it to nanoseconds for the Android packet protocol. This preserves timestamps when the encoder buffers or reorders output. If an output sample has no timestamp, the H.264 encode path reports an error and retains the BGRA fallback rather than silently attaching a potentially incorrect timestamp. Physical-device A/V timing and encoder-specific timestamp behavior still require validation.
-
-
-## H.264 recovery and dynamic display dimensions
-
-Android detects missing access-unit sequence numbers both before main-thread dispatch and inside the decoder after callback coalescing. It sends a bounded 9-byte recovery request over the authenticated Noise session. Windows validates the discriminator and packet length, coalesces requests, and recreates the per-session Media Foundation encoder so the next GOP starts from a fresh encoder state. Android waits for a configured IDR before resuming decode. The request carries the last observed sequence for diagnostics; it does not create a separate socket or trust path.
-
-The Windows persistent encoder now negotiates NV12 input and H.264 output for the current even-sized virtual-display dimensions (bounded to 2–4096 in each axis). A display-size change tears down and recreates the encoder on the existing COM/MF worker. If a dimension is unsupported or reconfiguration fails, H.264 is disabled for that attempt and the BGRA stream continues. This is software/CI coverage only: actual encoder IDR behavior, rotation transitions, and playback must still be checked on the target Windows host and Android handset.
+A successful CI build or a published development release does not establish any of these physical acceptance results. Do not describe Second Screen as hardware-validated until the Windows virtual monitor appears in Display Settings and a real extended desktop is visibly rendered on the Android device.

@@ -8,7 +8,7 @@
 
 Bridge is an open-source, local-first device interoperability project for Windows, Android, and iOS. The goal is to make nearby devices work together through one secure, permission-based ecosystem.
 
-> **Status: Milestone 1 complete for the validated Windows + Android pairing target.** Both platforms have passed real-device discovery, bidirectional pairing, receiver approval, trusted reconnection, app restart/reconnection, and local-network reconnect checks. Windows firewall and Android network permissions have been tested successfully. iOS builds in CI but has not been physically tested; Linux desktop validation is deferred until a Linux test environment is available. See the validation scope and remaining follow-up items below.
+> **Current status — Milestone 2: Android as a real extended Windows display (in progress).** The Windows IddCx driver and Bridge Display Service build in CI; the Windows sender and Android H.264/MediaCodec receive-and-render path, dynamic sizing, and keyframe recovery are implemented in the development code. The next gate is physical validation: install and activate the virtual display on Windows, confirm it appears in Display Settings, connect the Android device, and verify that Windows Extend mode renders real application windows on the phone. CI success does not prove physical monitor installation or live playback. Milestone 1 authenticated Windows ↔ Android pairing is complete; iOS and Linux physical-device validation remain deferred.
 
 ## Platforms
 
@@ -17,22 +17,17 @@ Bridge is an open-source, local-first device interoperability project for Window
 - **iOS:** SwiftUI native app.
 - **Shared engine:** Rust workspace with versioned protocol types, device registry, pairing consent state machine, local-network discovery, encrypted-session primitives, and trust persistence.
 
-## Repository layout
+## Current focus: Milestone 2 — Second Screen
 
-- `crates/bridge-protocol` — versioned wire types.
-- `crates/bridge-core` — device registry, pairing lifecycle, and QR invitation validation.
-- `crates/bridge-security` — Noise XX handshake and authenticated encrypted sessions.
-- `crates/bridge-network` — mDNS/DNS-SD discovery, bounded TCP framing, and Noise transport.
-- `crates/bridge-mobile` — C ABI/JNI FFI for native mobile clients.
-- `apps/desktop` — native Rust + egui Windows desktop app.
-- `apps/android` — Android app.
-- `apps/ios` — iOS app.
-- `assets/Bridge — Connect, Share, Beyond.png` — original master brand artwork.
-- `scripts/generate_brand_assets.py` — deterministic platform icon generation from the master artwork.
-- `docs/` — architecture, protocol, security model, and roadmap.
-- `.github/workflows/` — CI and tag-based release automation.
+Bridge Second Screen is intended to make an Android phone or tablet a **real extended Windows monitor**. Windows must enumerate it in Settings → System → Display, allow the user to select Extend, and let application windows move onto the Android display. It is not desktop mirroring or a remote-control preview.
 
-## Milestone 1: authenticated local connectivity
+Current implementation includes the IddCx/UMDF driver project, a separate Windows display service with an authenticated control boundary, Windows H.264 frame sending, Android H.264 access-unit reception and MediaCodec Surface rendering, dynamic display-size handling, and keyframe recovery. BGRA remains a fallback path.
+
+Still requiring real-device validation or further implementation: driver/service installation and monitor arrival on a physical Windows host, Direct3D swap-chain frame acquisition from the virtual display, actual H.264 playback and recovery on the target hardware, orientation/rotation, latency and sustained performance, and the full Windows Extend-mode acceptance test. Android-to-Windows touch input is not yet implemented end to end.
+
+See [docs/roadmap.md](docs/roadmap.md) for task status and [docs/second-screen-architecture.md](docs/second-screen-architecture.md) for architecture and acceptance gates.
+
+## Milestone 1: authenticated local connectivity — complete for Windows + Android
 
 Implemented foundations:
 
@@ -51,21 +46,34 @@ Milestone 1 validation outcome:
 - **Linux:** deferred until a Linux installation is available for testing.
 - **Follow-up hardening:** broader router/AP-isolation and IPv6-only coverage, resource-limit/lifecycle stress testing, and an independent security review remain recommended before a broad public release.
 
-See [docs/roadmap.md](docs/roadmap.md), [docs/protocol.md](docs/protocol.md), [docs/security-model.md](docs/security-model.md), [CONTRIBUTING.md](CONTRIBUTING.md), and [SECURITY.md](SECURITY.md).
+See [docs/protocol.md](docs/protocol.md), [docs/security-model.md](docs/security-model.md), [CONTRIBUTING.md](CONTRIBUTING.md), and [SECURITY.md](SECURITY.md).
+
+## Milestone 3: secure local file transfer — planned / foundations implemented
+
+The shared Rust transfer engine already provides bounded transfer-control messages, 48 KiB chunk framing, file-offer validation, a 2 GiB initial size ceiling, SHA-256 integrity verification, safe filename validation, collision-safe publication, and temporary-file cleanup. Wiring it into the authenticated desktop and Android sessions, approval UI, progress/cancellation, and physical-device transfer tests remain future work. This is not the current active milestone.
+
+## Repository layout
+
+- `crates/bridge-protocol` — versioned wire types.
+- `crates/bridge-core` — device registry, pairing lifecycle, and QR invitation validation.
+- `crates/bridge-security` — Noise XX handshake and authenticated encrypted sessions.
+- `crates/bridge-network` — mDNS/DNS-SD discovery, bounded TCP framing, and Noise transport.
+- `crates/bridge-mobile` — C ABI/JNI FFI for native mobile clients.
+- `apps/desktop` — native Rust + egui Windows desktop app.
+- `apps/android` — Android app.
+- `apps/ios` — iOS app.
+- `assets/Bridge — Connect, Share, Beyond.png` — original master brand artwork.
+- `scripts/generate_brand_assets.py` — deterministic platform icon generation from the master artwork.
+- `docs/` — architecture, protocol, security model, and roadmap.
+- `.github/workflows/` — CI and release automation.
 
 ## CI/CD
 
 All compilation, tests, packaging, and releases run in GitHub Actions. No local build is required.
 
-Every push to `main` and every pull request validates Rust and builds:
-1. Rust formatting, Clippy, and unit tests.
-2. Native Windows desktop executable using egui.
-3. Android debug APK.
-4. iOS Simulator app.
+The workflows validate the Rust workspace, native Windows desktop app, Windows display service, Windows IddCx driver package, Android APK, and iOS Simulator app as configured for each workflow. Development-channel releases publish Windows and Android assets with an update manifest. A successful CI build is not a substitute for physical-device acceptance testing.
 
-Push a version tag such as `v0.2.0` to build release assets and publish a GitHub Release automatically.
-
-**Signing note:** Windows desktop/MSI/service output is currently unsigned. Bridge's zero-cost plan is to own and protect a code-signing certificate, sign the IddCx driver package in trusted GitHub Actions runs, and ship the public certificate with the installer for explicit administrator approval. The private key will never be included in releases. A self-signed certificate is not automatically trusted by Windows, and broad compatibility with Secure Boot/Memory Integrity configurations must be validated before public rollout. Android release signing is configured independently; iOS archive signing is not configured. See [Windows signing and trust plan](docs/windows-code-signing.md).
+**Signing note:** Windows driver and trusted-binary signing runs are part of the trusted GitHub Actions pipeline. Do not treat a build artifact as install-ready until the signed output and trust/install procedure have completed verification. The private signing key must never be included in releases. Android release signing is configured independently; iOS archive signing is not configured. See [Windows signing and trust plan](docs/windows-code-signing.md).
 
 ## Windows desktop technology
 
@@ -82,7 +90,7 @@ The Windows client is a native Rust desktop application rendered by egui. It doe
 - No silent cloud upload or background relay.
 - Never commit secrets or signing keys.
 
-The Windows + Android Milestone 1 target is validated on physical devices. iOS and Linux remain build/platform validation follow-ups, not claims of completed physical-device interoperability. A successful CI build or loopback test alone is not proof of real-device interoperability.
+A successful CI build or loopback test alone is not proof of real-device interoperability. See the roadmap for the current acceptance gates.
 
 ## License
 
