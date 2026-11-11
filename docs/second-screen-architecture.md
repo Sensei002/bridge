@@ -179,3 +179,10 @@ This is a one-sample diagnostic only. The transform is shut down after the probe
 ## BGRA-to-NV12 conversion foundation
 
 The shared Rust transfer crate now provides a bounded CPU conversion from tightly packed BGRA8 display frames to NV12 using BT.709 video-range luma/chroma coefficients. It validates frame metadata, requires even dimensions, averages chroma over each 2×2 pixel block, preserves sequence/timestamp metadata, and caps output at the existing 64 MiB frame limit. Cross-platform unit tests cover black/white levels, chroma subsampling, and malformed/odd-sized inputs. This is a conversion primitive only: the Windows sender still transmits BGRA, and no Media Foundation input samples are submitted yet.
+
+
+## Android MediaCodec Surface renderer foundation
+
+The Android second-screen UI now owns a bounded, single-threaded AVC decode worker and a native SurfaceView. It configures the platform MediaCodec decoder for the dimensions carried by the authenticated H.264 access units, waits for an IDR access unit before submitting compressed input, queues timestamps in microseconds, and releases decoded output buffers to the Surface. The worker queue is bounded to two pending frames so UI/network callbacks cannot create an unbounded decode backlog. Codec and Surface teardown are handled when dimensions change, the Surface is destroyed, or the composable leaves the screen.
+
+The raw BGRA image remains the visible fallback until MediaCodec has actually released decoded output to the Surface. This is an initial integration, not yet a validated playback path: the sender must provide usable SPS/PPS configuration with keyframes, access-unit timestamp ordering and recovery after packet loss still need hardening, and physical Android device tests are required before relying on H.264 instead of BGRA.
