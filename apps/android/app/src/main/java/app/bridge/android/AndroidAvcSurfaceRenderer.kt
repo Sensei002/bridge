@@ -143,6 +143,9 @@ private class AvcSurfaceDecoder(
         val recovery = recoveryState.observe(frame)
         if (recovery.sequenceGap) {
             releaseCodec()
+            // The receiver requests recovery for gaps observed before UI dispatch.
+            // This catches additional frames coalesced after reassembly.
+            if (!frame.sequenceGap) requestKeyframe(frame)
             postStatus("H.264 frame sequence gap detected; decoder reset and waiting for the next IDR keyframe.")
         }
 
