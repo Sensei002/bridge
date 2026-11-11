@@ -511,6 +511,81 @@ pub struct DisplayFrame {
     pub pixels: Vec<u8>,
 }
 
+
+/// A tightly packed NV12 frame ready for a Media Foundation encoder input sample.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Nv12Frame {
+    pub sequence: u64,
+    pub width: u32,
+    pub height: u32,
+    pub timestamp_ns: u64,
+    /// Y plane followed by interleaved U/V chroma plane.
+    pub pixels: Vec<u8>,
+}
+
+/// Convert a tightly packed BGRA8 display frame to 8-bit BT.709 limited-range NV12.
+/// Chroma is averaged over each 2x2 pixel block; NV12 requires even dimensions.
+pub fn bgra_to_nv12(frame: &DisplayFrame) -> Result<Nv12Frame, TransferError> {
+    let total_bytes = u32::try_from(frame.pixels.len())
+        .map_err(|_| TransferError::InvalidChunk("BGRA frame is too large".into()))?;
+    validate_display_frame_metadata(
+        frame.sequence, frame.width, frame.height, frame.stride, total_bytes,
+    )?;
+    if !frame.width.is_multiple_of(2) || !frame.height.is_multiple_of(2) {
+        return Err(TransferError::InvalidChunk("NV12 conversion requires even frame dimensions".into()));
+    }
+    let width = frame.width as usize;
+    let height = frame.height as usize;
+    let y_bytes = width.checked_mul(height)
+        .ok_or_else(|| TransferError::InvalidChunk("NV12 luma size overflow".into()))?;
+    let total_nv12 = y_bytes.checked_add(y_bytes / 2)
+        .ok_or_else(|| TransferError::InvalidChunk("NV12 frame size overflow".into()))?;
+    if total_nv12 > MAX_DISPLAY_FRAME_BYTES {
+        return Err(TransferError::InvalidChunk("NV12 frame exceeds 64 MiB".into()));
+    }
+    let mut pixels = vec![0_u8; total_nv12];
+
+    // BT.709 RGB-to-Y'CbCr coefficients with video-range offsets.
+    let yuv = |pixel: usize| -> (u8, i32, i32) {
+        let b = frame.pixels[pixel] as i32;
+        let g = frame.pixels[pixel + 1] as i32;
+        let r = frame.pixels[pixel + 2] as i32;
+        let y = 16 + ((47 * r + 157 * g + 16 * b + 128) >> 8);
+        let u = 128 + ((-26 * r - 87 * g + 112 * b + 128) >> 8);
+        let v = 128 + ((112 * r - 102 * g - 10 * b + 128) >> 8);
+        (y.clamp(16, 235) as u8, u, v)
+    };
+
+    for row in 0..height {
+        for col in 0..width {
+            let source = row * frame.stride as usize + col * 4;
+            pixels[row * width + col] = yuv(source).0;
+        }
+    }
+    let uv_start = y_bytes;
+    for row in (0..height).step_by(2) {
+        for col in (0..width).step_by(2) {
+            let mut u_sum = 0_i32;
+            let mut v_sum = 0_i32;
+            for dy in 0..2 {
+                for dx in 0..2 {
+                    let source = (row + dy) * frame.stride as usize + (col + dx) * 4;
+                    let (_, u, v) = yuv(source);
+                    u_sum += u;
+                    v_sum += v;
+                }
+            }
+            let destination = uv_start + (row / 2) * width + col;
+            pixels[destination] = ((u_sum + 2) / 4).clamp(16, 240) as u8;
+            pixels[destination + 1] = ((v_sum + 2) / 4).clamp(16, 240) as u8;
+        }
+    }
+    Ok(Nv12Frame {
+        sequence: frame.sequence, width: frame.width, height: frame.height,
+        timestamp_ns: frame.timestamp_ns, pixels,
+    })
+}
+
 /// One bounded fragment of an Annex-B H.264 access unit.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EncodedVideoFrameFragment {
@@ -871,6 +946,40 @@ mod tests {
             transfer_id: Uuid::new_v4(), file_name: name.into(), file_size: data.len() as u64,
             sha256: hex::encode(Sha256::digest(data)),
         }
+    }
+
+    #[test]
+    fn bgra_to_nv12_converts_black_and_white_to_video_range() {
+        let mut pixels = Vec::new();
+        for _ in 0..4 { pixels.extend_from_slice(&[0, 0, 0, 255]); }
+        for _ in 0..4 { pixels.extend_from_slice(&[255, 255, 255, 255]); }
+        let frame = DisplayFrame { sequence: 7, width: 4, height: 2, stride: 16, timestamp_ns: 99, pixels };
+        let converted = bgra_to_nv12(&frame).unwrap();
+        assert_eq!((converted.sequence, converted.width, converted.height, converted.timestamp_ns), (7, 4, 2, 99));
+        assert_eq!(&converted.pixels[..4], &[16, 16, 16, 16]);
+        assert_eq!(&converted.pixels[4..8], &[235, 235, 235, 235]);
+        assert_eq!(converted.pixels.len(), 12);
+        assert_eq!(&converted.pixels[8..], &[128, 128, 128, 128]);
+    }
+
+    #[test]
+    fn bgra_to_nv12_averages_chroma_over_each_2x2_block() {
+        let pixels = vec![
+            0, 0, 255, 255, 0, 0, 255, 255,
+            255, 0, 0, 255, 255, 0, 0, 255,
+        ];
+        let frame = DisplayFrame { sequence: 1, width: 2, height: 2, stride: 8, timestamp_ns: 1, pixels };
+        let converted = bgra_to_nv12(&frame).unwrap();
+        assert_eq!(converted.pixels.len(), 6);
+        assert_eq!(&converted.pixels[4..], &[171, 179]);
+    }
+
+    #[test]
+    fn bgra_to_nv12_rejects_odd_dimensions_and_invalid_source_layout() {
+        let odd = DisplayFrame { sequence: 1, width: 3, height: 2, stride: 12, timestamp_ns: 1, pixels: vec![0; 24] };
+        assert!(bgra_to_nv12(&odd).is_err());
+        let malformed = DisplayFrame { sequence: 1, width: 2, height: 2, stride: 8, timestamp_ns: 1, pixels: vec![0; 15] };
+        assert!(bgra_to_nv12(&malformed).is_err());
     }
 
     #[test]
