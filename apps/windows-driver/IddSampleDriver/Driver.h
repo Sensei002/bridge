@@ -98,6 +98,7 @@ namespace Microsoft
             NTSTATUS ConnectMonitor(UINT ConnectorIndex);
             NTSTATUS DisconnectMonitor();
             void GetDisplayStatus(BRIDGE_DISPLAY_STATUS& Status);
+            NTSTATUS QueryLatestFrameHeader(BRIDGE_DISPLAY_FRAME_HEADER& Header);
             NTSTATUS CopyLatestFrame(PVOID Buffer, size_t BufferLength, size_t* BytesWritten);
             void PublishLatestFrame(ULONG Width, ULONG Height, ULONG Stride, ULONG PixelFormat, const BYTE* Data, size_t DataSize);
             void ClearLatestFrame();
