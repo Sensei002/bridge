@@ -5,17 +5,22 @@
 //! are performed by the next stage.
 
 use std::ptr::{null_mut, read};
+use std::mem::ManuallyDrop;
 
 use windows::Win32::Media::MediaFoundation::{
     IMFActivate, IMFTransform, MFTEnumEx, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG,
     MFT_ENUM_FLAG_ASYNCMFT, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_LOCALMFT,
     MFT_ENUM_FLAG_SORTANDFILTER, MFT_ENUM_FLAG_SYNCMFT, MFT_FRIENDLY_NAME_Attribute,
-    MFT_REGISTER_TYPE_INFO, MFT_SET_TYPE_TEST_ONLY, MFCreateMediaType,
+    MFT_REGISTER_TYPE_INFO, MFT_SET_TYPE_TEST_ONLY, MFT_OUTPUT_DATA_BUFFER,
+    MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES,
+    MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_END_OF_STREAM,
+    MFT_MESSAGE_NOTIFY_END_STREAMING, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
+    MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample,
     MFMediaType_Video, MFVideoFormat_H264, MFVideoFormat_NV12,
     MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE,
     MF_MT_SUBTYPE, MFShutdown, MFStartup, MFSTARTUP_FULL, MF_VERSION,
 };
-use windows::Win32::System::Com::CoTaskMemFree;
+use windows::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_MULTITHREADED};
 
 /// Owns one successful MFStartup call and balances it with MFShutdown.
 pub struct MediaFoundationRuntime {
@@ -143,6 +148,195 @@ unsafe fn configure_nv12_h264_profile(transform: &IMFTransform) -> Result<(), St
         }
     }
     Ok(())
+}
+
+/// Owns COM initialization for the current worker thread.
+pub struct ComApartment;
+
+impl ComApartment {
+    pub fn start() -> Result<Self, String> {
+        let result = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+        if result.is_err() {
+            return Err(format!("COM MTA initialization failed: {result:?}"));
+        }
+        Ok(Self)
+    }
+}
+
+impl Drop for ComApartment {
+    fn drop(&mut self) {
+        unsafe { CoUninitialize() };
+    }
+}
+
+/// Outcome of submitting one NV12 sample to a synchronous H.264 encoder.
+pub enum FirstSampleResult {
+    Encoded { encoder_name: String, bytes: usize },
+    Buffered { encoder_name: String },
+}
+
+/// Submit one bounded NV12 frame to the first compatible synchronous encoder.
+///
+/// This is deliberately a one-sample diagnostic: the transform is drained and
+/// shut down afterward, and the returned bytes are never sent to the peer.
+pub fn submit_first_nv12_sample(frame: &bridge_transfer::Nv12Frame) -> Result<FirstSampleResult, String> {
+    if frame.width != 1080 || frame.height != 2340 {
+        return Err(format!(
+            "first-sample probe expects 1080x2340 NV12; received {}x{}",
+            frame.width, frame.height
+        ));
+    }
+    let expected = (frame.width as usize)
+        .checked_mul(frame.height as usize)
+        .and_then(|y| y.checked_add(y / 2))
+        .ok_or_else(|| "NV12 input size overflow".to_string())?;
+    if frame.pixels.len() != expected || expected > 64 * 1024 * 1024 {
+        return Err("NV12 input buffer has an invalid or oversized layout".into());
+    }
+
+    let flags: MFT_ENUM_FLAG = MFT_ENUM_FLAG_HARDWARE
+        | MFT_ENUM_FLAG_SYNCMFT
+        | MFT_ENUM_FLAG_LOCALMFT
+        | MFT_ENUM_FLAG_SORTANDFILTER;
+    let output_type = MFT_REGISTER_TYPE_INFO {
+        guidMajorType: MFMediaType_Video,
+        guidSubtype: MFVideoFormat_H264,
+    };
+    let mut activations: *mut Option<IMFActivate> = null_mut();
+    let mut count = 0_u32;
+    unsafe {
+        MFTEnumEx(
+            MFT_CATEGORY_VIDEO_ENCODER,
+            flags,
+            None,
+            Some(&output_type),
+            &mut activations,
+            &mut count,
+        )
+    }.map_err(|error| format!("synchronous H.264 encoder enumeration failed: {error}"))?;
+
+    let mut last_error = None;
+    let mut result = None;
+    if !activations.is_null() {
+        for index in 0..count as usize {
+            let activation = unsafe { read(activations.add(index)) };
+            let Some(activation) = activation else { continue };
+            let attempt = (|| -> Result<FirstSampleResult, String> {
+                let name = unsafe {
+                    let length = activation.GetStringLength(&MFT_FRIENDLY_NAME_Attribute)
+                        .map_err(|error| format!("could not read encoder name: {error}"))?;
+                    let mut buffer = vec![0_u16; length as usize + 1];
+                    activation.GetString(&MFT_FRIENDLY_NAME_Attribute, &mut buffer, None)
+                        .map_err(|error| format!("could not read encoder name: {error}"))?;
+                    String::from_utf16_lossy(&buffer[..length as usize])
+                };
+                let transform = unsafe { activation.ActivateObject::<IMFTransform>() }
+                    .map_err(|error| format!("{name}: activation failed: {error}"))?;
+                let configured = unsafe { configure_nv12_h264_profile(&transform) };
+                if let Err(error) = configured {
+                    drop(transform);
+                    let _ = unsafe { activation.ShutdownObject() };
+                    return Err(format!("{name}: {error}"));
+                }
+
+                let outcome = (|| -> Result<FirstSampleResult, String> {
+                    unsafe {
+                        transform.ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)
+                            .map_err(|error| format!("begin-streaming message failed: {error}"))?;
+                        transform.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)
+                            .map_err(|error| format!("start-of-stream message failed: {error}"))?;
+                    }
+
+                    let input_len = u32::try_from(frame.pixels.len())
+                        .map_err(|_| "NV12 input exceeds Media Foundation buffer limits".to_string())?;
+                    let input_buffer = unsafe { MFCreateMemoryBuffer(input_len) }
+                        .map_err(|error| format!("could not allocate NV12 input buffer: {error}"))?;
+                    let mut input_data = null_mut();
+                    unsafe { input_buffer.Lock(&mut input_data, None, None) }
+                        .map_err(|error| format!("could not lock NV12 input buffer: {error}"))?;
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(frame.pixels.as_ptr(), input_data, frame.pixels.len());
+                    }
+                    let unlock_result = unsafe { input_buffer.Unlock() };
+                    unlock_result.map_err(|error| format!("could not unlock NV12 input buffer: {error}"))?;
+                    unsafe { input_buffer.SetCurrentLength(input_len) }
+                        .map_err(|error| format!("could not set NV12 input length: {error}"))?;
+
+                    let input_sample = unsafe { MFCreateSample() }
+                        .map_err(|error| format!("could not create NV12 input sample: {error}"))?;
+                    unsafe {
+                        input_sample.AddBuffer(&input_buffer)
+                            .map_err(|error| format!("could not attach NV12 input buffer: {error}"))?;
+                        input_sample.SetSampleTime((frame.timestamp_ns / 100) as i64)
+                            .map_err(|error| format!("could not set NV12 sample timestamp: {error}"))?;
+                        input_sample.SetSampleDuration(166_667)
+                            .map_err(|error| format!("could not set NV12 sample duration: {error}"))?;
+                        transform.ProcessInput(0, &input_sample, 0)
+                            .map_err(|error| format!("encoder rejected NV12 input sample: {error}"))?;
+                    }
+
+                    let stream_info = unsafe { transform.GetOutputStreamInfo(0) }
+                        .map_err(|error| format!("could not query H.264 output stream: {error}"))?;
+                    let provides_sample = stream_info.dwFlags & (MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32) != 0;
+                    let can_provide_sample = stream_info.dwFlags & (MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES.0 as u32) != 0;
+                    let output_sample = if provides_sample || can_provide_sample {
+                        None
+                    } else {
+                        if stream_info.cbSize == 0 || stream_info.cbSize as usize > 16 * 1024 * 1024 {
+                            return Err("encoder requested an invalid H.264 output buffer size".into());
+                        }
+                        let buffer = unsafe { MFCreateMemoryBuffer(stream_info.cbSize) }
+                            .map_err(|error| format!("could not allocate H.264 output buffer: {error}"))?;
+                        let sample = unsafe { MFCreateSample() }
+                            .map_err(|error| format!("could not create H.264 output sample: {error}"))?;
+                        unsafe { sample.AddBuffer(&buffer) }
+                            .map_err(|error| format!("could not attach H.264 output buffer: {error}"))?;
+                        Some(sample)
+                    };
+                    let mut output = MFT_OUTPUT_DATA_BUFFER {
+                        dwStreamID: 0,
+                        pSample: ManuallyDrop::new(output_sample),
+                        dwStatus: 0,
+                        pEvents: ManuallyDrop::new(None),
+                    };
+                    let mut output_status = 0_u32;
+                    match unsafe { transform.ProcessOutput(0, std::slice::from_mut(&mut output), &mut output_status) } {
+                        Ok(()) => {}
+                        Err(error) if error.code() == windows::Win32::Media::MediaFoundation::MF_E_TRANSFORM_NEED_MORE_INPUT => {
+                            return Ok(FirstSampleResult::Buffered { encoder_name: name.clone() });
+                        }
+                        Err(error) => return Err(format!("encoder ProcessOutput failed: {error}")),
+                    }
+                    let Some(sample) = output.pSample.as_ref() else {
+                        return Ok(FirstSampleResult::Buffered { encoder_name: name.clone() });
+                    };
+                    let output_buffer = unsafe { sample.ConvertToContiguousBuffer() }
+                        .map_err(|error| format!("could not access H.264 output buffer: {error}"))?;
+                    let output_len = unsafe { output_buffer.GetCurrentLength() }
+                        .map_err(|error| format!("could not read H.264 output length: {error}"))?;
+                    if output_len == 0 {
+                        return Ok(FirstSampleResult::Buffered { encoder_name: name.clone() });
+                    }
+                    if output_len as usize > 16 * 1024 * 1024 {
+                        return Err("encoder produced an H.264 output larger than the 16 MiB access-unit limit".into());
+                    }
+                    Ok(FirstSampleResult::Encoded { encoder_name: name.clone(), bytes: output_len as usize })
+                })();
+
+                let _ = unsafe { transform.ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0) };
+                let _ = unsafe { transform.ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0) };
+                drop(transform);
+                let _ = unsafe { activation.ShutdownObject() };
+                outcome
+            })();
+            match attempt {
+                Ok(value) => { result = Some(value); drop(activation); break; }
+                Err(error) => { last_error = Some(error); drop(activation); }
+            }
+        }
+        unsafe { CoTaskMemFree(Some(activations.cast())) };
+    }
+    result.ok_or_else(|| last_error.unwrap_or_else(|| "no synchronous H.264 encoder was available".into()))
 }
 
 /// Enumerate registered video encoder MFTs that advertise H.264 output.
