@@ -37,6 +37,7 @@ internal object BridgeRuntimeState {
     val pairingStatus = mutableStateOf("Starting Bridge background connection…")
     val transferStatus = mutableStateOf("Waiting for a connected trusted device.")
     val latestDisplayFrame = mutableStateOf<BridgeDisplayFrame?>(null)
+    val latestEncodedVideoFrame = mutableStateOf<BridgeEncodedVideoFrame?>(null)
 }
 
 /**
@@ -186,6 +187,15 @@ class BridgeConnectionService : Service() {
                             }
                         }
                     },
+                    onEncodedVideoFrame = { frame ->
+                        mainHandler.post {
+                            if (!stopping) {
+                                BridgeRuntimeState.latestEncodedVideoFrame.value = frame
+                                BridgeRuntimeState.transferStatus.value =
+                                    "H.264 access unit received · ${frame.width}×${frame.height} · #${frame.sequence}${if (frame.keyframe) " · keyframe" else ""}"
+                            }
+                        }
+                    },
                     onClipboardText = { peerId, text ->
                         val enabled = getSharedPreferences("bridge_settings", MODE_PRIVATE)
                             .getBoolean("clipboard_sync_enabled", false)
@@ -215,6 +225,9 @@ class BridgeConnectionService : Service() {
                             pairingController?.onSessionEnded(peerId, handle)
                             if (BridgeRuntimeState.latestDisplayFrame.value?.deviceId == peerId) {
                                 BridgeRuntimeState.latestDisplayFrame.value = null
+                            }
+                            if (BridgeRuntimeState.latestEncodedVideoFrame.value?.deviceId == peerId) {
+                                BridgeRuntimeState.latestEncodedVideoFrame.value = null
                             }
                             if (BridgeRuntimeState.connectedSessionHandles[peerId] == handle) {
                                 BridgeRuntimeState.connectedSessionHandles.remove(peerId)
