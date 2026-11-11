@@ -48,6 +48,8 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.*
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.input.pointer.pointerInteropFilter
@@ -538,6 +540,8 @@ private fun HeaderBar() {
     }
 }
 
+private const val DISPLAY_FRAME_STALE_AFTER_MS = 1_500L
+
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
 private fun SecondScreenView(
@@ -550,6 +554,7 @@ private fun SecondScreenView(
     var imageSize by remember { mutableStateOf(IntSize.Zero) }
     var frameRate by remember { mutableStateOf(0f) }
     var previousFrameAtNs by remember { mutableStateOf(0L) }
+    var frameAgeMs by remember { mutableStateOf<Long?>(null) }
     LaunchedEffect(frame?.sequence) {
         val receivedAt = frame?.receivedAtElapsedRealtimeNs ?: 0L
         if (receivedAt > 0L) {
@@ -567,6 +572,20 @@ private fun SecondScreenView(
             frameRate = 0f
         }
     }
+    LaunchedEffect(frame?.sequence, frame?.receivedAtElapsedRealtimeNs) {
+        val receivedAt = frame?.receivedAtElapsedRealtimeNs ?: 0L
+        if (receivedAt <= 0L) {
+            frameAgeMs = null
+        } else {
+            while (isActive) {
+                frameAgeMs = ((android.os.SystemClock.elapsedRealtimeNanos() - receivedAt) / 1_000_000L)
+                    .coerceAtLeast(0L)
+                delay(250L)
+            }
+        }
+    }
+    val streamStale = frame != null && (frameAgeMs ?: 0L) > DISPLAY_FRAME_STALE_AFTER_MS
+    val staleDurationSeconds = ((frameAgeMs ?: 0L) / 1_000L)
     val activePointers = remember { mutableSetOf<Int>() }
     val bitmap by produceState<androidx.compose.ui.graphics.ImageBitmap?>(
         initialValue = null,
@@ -601,8 +620,16 @@ private fun SecondScreenView(
             ) {
                 Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     Text(
-                        if (frame == null) "WAITING FOR WINDOWS" else "BRIDGE SECOND SCREEN",
-                        color = if (frame == null) Muted else Accent,
+                        when {
+                            frame == null -> "WAITING FOR WINDOWS"
+                            streamStale -> "STREAM STALLED"
+                            else -> "BRIDGE SECOND SCREEN"
+                        },
+                        color = when {
+                            frame == null -> Muted
+                            streamStale -> Amber
+                            else -> Accent
+                        },
                         fontSize = 10.sp,
                         fontWeight = FontWeight.Bold,
                         letterSpacing = 1.sp
@@ -613,8 +640,13 @@ private fun SecondScreenView(
                         fontSize = 11.sp
                     )
                     Text(
-                        if (frame == null || frameRate <= 0f) "— FPS" else "${frameRate.toInt()} FPS · incoming",
-                        color = Muted,
+                        when {
+                            frame == null -> "— FPS"
+                            streamStale -> "No new frame for ${staleDurationSeconds}s"
+                            frameRate <= 0f -> "Measuring incoming FPS…"
+                            else -> "${frameRate.toInt()} FPS · incoming"
+                        },
+                        color = if (streamStale) Amber else Muted,
                         fontSize = 10.sp
                     )
                 }
@@ -715,14 +747,26 @@ private fun SecondScreenView(
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Text(
-                            if (frame == null) "Waiting for Windows frames" else "Live frame received",
+                            when {
+                                frame == null -> "Waiting for Windows frames"
+                                streamStale -> "Frame stream stalled"
+                                else -> "Live frame received"
+                            },
                             color = Color.White,
                             fontWeight = FontWeight.Bold,
                             fontSize = 14.sp
                         )
                         Text(
-                            if (frame == null) "IDLE" else "RECEIVING",
-                            color = if (frame == null) Muted else Good,
+                            when {
+                                frame == null -> "IDLE"
+                                streamStale -> "STALE"
+                                else -> "RECEIVING"
+                            },
+                            color = when {
+                                frame == null -> Muted
+                                streamStale -> Amber
+                                else -> Good
+                            },
                             fontSize = 10.sp,
                             fontWeight = FontWeight.Bold
                         )
@@ -736,8 +780,12 @@ private fun SecondScreenView(
                         )
                         Text("${frame!!.width} × ${frame.height} · Frame ${frame.sequence}", color = Muted, fontSize = 11.sp)
                         Text(
-                            if (frameRate <= 0f) "Measuring incoming frame rate…" else "${frameRate.toInt()} FPS incoming",
-                            color = Muted,
+                            when {
+                                streamStale -> "No new frames for ${staleDurationSeconds}s"
+                                frameRate <= 0f -> "Measuring incoming frame rate…"
+                                else -> "${frameRate.toInt()} FPS incoming"
+                            },
+                            color = if (streamStale) Amber else Muted,
                             fontSize = 10.sp
                         )
                     } else {
