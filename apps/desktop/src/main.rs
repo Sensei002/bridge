@@ -2404,9 +2404,10 @@ fn inject_display_pointer_event(event: DisplayInputEvent) -> Result<(), String> 
 
 #[cfg(windows)]
 fn bridge_monitor_absolute_coordinates(x: u16, y: u16) -> Result<(i32, i32), String> {
+    use windows_sys::Win32::Foundation::RECT;
     use windows_sys::Win32::Graphics::Gdi::{
         EnumDisplayDevicesW, EnumDisplayMonitors, GetMonitorInfoW, DISPLAY_DEVICEW,
-        HDC, HMONITOR, MONITORINFO, MONITORINFOEXW, RECT,
+        HDC, HMONITOR, MONITORINFO, MONITORINFOEXW,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
@@ -2423,8 +2424,8 @@ fn bridge_monitor_absolute_coordinates(x: u16, y: u16) -> Result<(i32, i32), Str
     ) -> i32 {
         let search = &mut *(data as *mut MonitorSearch);
         let mut info: MONITORINFOEXW = std::mem::zeroed();
-        info.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
-        if GetMonitorInfoW(monitor, &mut info as *mut MONITORINFOEXW as *mut MONITORINFO) == 0 {
+        info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+        if GetMonitorInfoW(monitor, &mut info.monitorInfo as *mut MONITORINFO) == 0 {
             return 1;
         }
         let mut device: DISPLAY_DEVICEW = std::mem::zeroed();
@@ -2441,8 +2442,8 @@ fn bridge_monitor_absolute_coordinates(x: u16, y: u16) -> Result<(i32, i32), Str
             || device_id.contains("root\\bridgeindirectdisplay")
         {
             search.rect = Some((
-                info.rcMonitor.left, info.rcMonitor.top,
-                info.rcMonitor.right, info.rcMonitor.bottom,
+                info.monitorInfo.rcMonitor.left, info.monitorInfo.rcMonitor.top,
+                info.monitorInfo.rcMonitor.right, info.monitorInfo.rcMonitor.bottom,
             ));
             return 0;
         }
