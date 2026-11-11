@@ -10,6 +10,7 @@ use windows::Win32::Media::MediaFoundation::{
     IMFActivate, MFTEnumEx, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG,
     MFT_ENUM_FLAG_ASYNCMFT, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_LOCALMFT,
     MFT_ENUM_FLAG_SORTANDFILTER, MFT_ENUM_FLAG_SYNCMFT, MFT_FRIENDLY_NAME_Attribute,
+    MFT_REGISTER_TYPE_INFO, MFMediaType_Video, MFVideoFormat_H264,
     MFShutdown, MFStartup, MFSTARTUP_FULL, MF_VERSION,
 };
 use windows::Win32::System::Com::CoTaskMemFree;
@@ -40,7 +41,6 @@ impl Drop for MediaFoundationRuntime {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct H264EncoderCandidate {
     pub friendly_name: String,
-    pub hardware: bool,
 }
 
 /// Enumerate registered video encoder MFTs that advertise H.264 output.
@@ -54,6 +54,10 @@ pub fn discover_h264_encoders() -> Result<Vec<H264EncoderCandidate>, String> {
         | MFT_ENUM_FLAG_ASYNCMFT
         | MFT_ENUM_FLAG_LOCALMFT
         | MFT_ENUM_FLAG_SORTANDFILTER;
+    let output_type = MFT_REGISTER_TYPE_INFO {
+        guidMajorType: MFMediaType_Video,
+        guidSubtype: MFVideoFormat_H264,
+    };
     let mut activations: *mut Option<IMFActivate> = null_mut();
     let mut count = 0_u32;
     unsafe {
@@ -61,7 +65,7 @@ pub fn discover_h264_encoders() -> Result<Vec<H264EncoderCandidate>, String> {
             MFT_CATEGORY_VIDEO_ENCODER,
             flags,
             None,
-            None,
+            Some(&output_type),
             &mut activations,
             &mut count,
         )
@@ -80,14 +84,7 @@ pub fn discover_h264_encoders() -> Result<Vec<H264EncoderCandidate>, String> {
                         .map_err(|error| format!("could not read encoder name: {error}"))?;
                     String::from_utf16_lossy(&buffer[..length as usize])
                 };
-                // MFTEnumEx was asked to include hardware MFTs. Friendly names
-                // alone cannot reliably identify which activation is hardware;
-                // preserve an explicit unknown-safe false value until adapter
-                // metadata is queried from the activated transform.
-                candidates.push(H264EncoderCandidate {
-                    friendly_name,
-                    hardware: false,
-                });
+                candidates.push(H264EncoderCandidate { friendly_name });
                 drop(activation);
             }
         }
