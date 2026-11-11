@@ -45,6 +45,7 @@ internal data class BridgeDisplayFrame(
 
 internal data class BridgeEncodedVideoFrame(
     val deviceId: String,
+    val sessionHandle: Long = 0L,
     val sequence: Long,
     val width: Int,
     val height: Int,
@@ -328,7 +329,7 @@ internal class BridgeTransferReceiver(
                                     runCatching { requestVideoKeyframe(handle, frame.sequence) }
                                         .onFailure { postStatus("Could not request an H.264 recovery keyframe: ${it.message}") }
                                 }
-                                encodedVideoDispatcher.offer(frame.copy(deviceId = deviceId))
+                                encodedVideoDispatcher.offer(frame.copy(deviceId = deviceId, sessionHandle = handle))
                             }
                         } catch (error: Exception) {
                             postStatus("Dropped invalid H.264 access unit: ${error.message}")
