@@ -136,6 +136,7 @@ class MainActivity : ComponentActivity() {
                 incomingOffers = incomingOffers,
                 transferStatus = transferStatus,
                 latestDisplayFrame = latestDisplayFrame,
+                onImmersiveModeChange = { setSecondScreenImmersive(it) },
                 receivedFiles = receivedFiles,
                 clipboardReceivedText = clipboardReceivedText,
                 clipboardReceivedFrom = clipboardReceivedFrom,
@@ -183,9 +184,40 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun setSecondScreenImmersive(enabled: Boolean) {
+        if (android.os.Build.VERSION.SDK_INT >= 30) {
+            window.insetsController?.let { controller ->
+                if (enabled) {
+                    controller.systemBarsBehavior =
+                        android.view.WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                    controller.hide(android.view.WindowInsets.Type.systemBars())
+                } else {
+                    controller.show(android.view.WindowInsets.Type.systemBars())
+                }
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            window.decorView.systemUiVisibility = if (enabled) {
+                (android.view.View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                    or android.view.View.SYSTEM_UI_FLAG_FULLSCREEN
+                    or android.view.View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                    or android.view.View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                    or android.view.View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                    or android.view.View.SYSTEM_UI_FLAG_LAYOUT_STABLE)
+            } else {
+                android.view.View.SYSTEM_UI_FLAG_VISIBLE
+            }
+        }
+    }
+
     override fun onResume() {
         super.onResume()
         BridgeConnectionService.instance?.refreshReceivedFiles()
+    }
+
+    override fun onDestroy() {
+        setSecondScreenImmersive(false)
+        super.onDestroy()
     }
 
     // Deliberately do not stop networking here. Android may destroy this Activity
@@ -258,6 +290,7 @@ private fun BridgeApp(
     incomingOffers: List<BridgeIncomingOffer>,
     transferStatus: String,
     latestDisplayFrame: BridgeDisplayFrame?,
+    onImmersiveModeChange: (Boolean) -> Unit,
     receivedFiles: List<File>,
     clipboardReceivedText: String?,
     clipboardReceivedFrom: String,
@@ -281,6 +314,7 @@ private fun BridgeApp(
         mutableStateOf(updatePreferences.getString("update_channel", "development") ?: "development")
     }
     var selected by remember { mutableStateOf(BridgeTab.Home) }
+    var immersiveSecondScreen by remember { mutableStateOf(false) }
     var showPairDialog by remember { mutableStateOf(false) }
     var clipboardSync by remember { mutableStateOf(updatePreferences.getBoolean("clipboard_sync_enabled", false)) }
     var notifications by remember { mutableStateOf(true) }
@@ -296,7 +330,7 @@ private fun BridgeApp(
     )) {
         Surface(modifier = Modifier.fillMaxSize(), color = Background) {
             Column {
-                HeaderBar()
+                if (!immersiveSecondScreen) HeaderBar()
                 Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                     when (selected) {
                         BridgeTab.Home -> HomeScreen(
@@ -337,7 +371,15 @@ private fun BridgeApp(
                             status = clipboardStatus,
                             onSend = onSendClipboard
                         )
-                        BridgeTab.SecondScreen -> SecondScreenView(frame = latestDisplayFrame, connectedDevices = connectedSessionHandles.size)
+                        BridgeTab.SecondScreen -> SecondScreenView(
+                            frame = latestDisplayFrame,
+                            connectedDevices = connectedSessionHandles.size,
+                            immersive = immersiveSecondScreen,
+                            onImmersiveChange = { enabled ->
+                                immersiveSecondScreen = enabled
+                                onImmersiveModeChange(enabled)
+                            }
+                        )
                         BridgeTab.Tools -> ToolsScreen()
                         BridgeTab.Settings -> SettingsScreen(
                             notifications = notifications,
@@ -354,7 +396,15 @@ private fun BridgeApp(
                         )
                     }
                 }
-                BottomNavigation(selected = selected, onSelect = { selected = it })
+                if (!immersiveSecondScreen) {
+                    BottomNavigation(selected = selected, onSelect = {
+                        if (immersiveSecondScreen) {
+                            immersiveSecondScreen = false
+                            onImmersiveModeChange(false)
+                        }
+                        selected = it
+                    })
+                }
             }
         }
     }
@@ -477,36 +527,136 @@ private fun HeaderBar() {
 }
 
 @Composable
-private fun SecondScreenView(frame: BridgeDisplayFrame?, connectedDevices: Int) {
-    ScreenContent {
-        Eyebrow("WIRELESS DISPLAY")
-        ScreenHeading("SECOND SCREEN", "Your phone as a monitor", "Windows sends captured display frames over your trusted encrypted connection.")
-        Surface(color = Panel, shape = RoundedCornerShape(14.dp), modifier = Modifier.fillMaxWidth()) {
-            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
-                    Text(if (frame == null) "Waiting for Windows frames" else "Live frame received", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                    Text(if (frame == null) "IDLE" else "RECEIVING", color = if (frame == null) Muted else Good, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+private fun SecondScreenView(
+    frame: BridgeDisplayFrame?,
+    connectedDevices: Int,
+    immersive: Boolean,
+    onImmersiveChange: (Boolean) -> Unit
+) {
+    val bitmap = remember(frame?.sequence, frame?.width, frame?.height) {
+        frame?.let {
+            Bitmap.createBitmap(it.width, it.height, Bitmap.Config.ARGB_8888).also { image ->
+                image.copyPixelsFromBuffer(ByteBuffer.wrap(it.pixels))
+            }.asImageBitmap()
+        }
+    }
+
+    if (immersive) {
+        Column(
+            modifier = Modifier.fillMaxSize().background(Color.Black).padding(8.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(
+                        if (frame == null) "WAITING FOR WINDOWS" else "BRIDGE SECOND SCREEN",
+                        color = if (frame == null) Muted else Accent,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 1.sp
+                    )
+                    Text(
+                        if (frame == null) "No display frame yet" else "${frame.width} × ${frame.height} · Frame ${frame.sequence}",
+                        color = Color.White,
+                        fontSize = 11.sp
+                    )
                 }
-                if (frame != null) {
-                    val bitmap = remember(frame.sequence, frame.width, frame.height) {
-                        Bitmap.createBitmap(frame.width, frame.height, Bitmap.Config.ARGB_8888).also {
-                            it.copyPixelsFromBuffer(ByteBuffer.wrap(frame.pixels))
-                        }.asImageBitmap()
-                    }
-                    Image(bitmap = bitmap, contentDescription = "Windows secondary display", contentScale = ContentScale.Fit,
-                        modifier = Modifier.fillMaxWidth().background(Color.Black, RoundedCornerShape(8.dp)))
-                    Text("${frame.width} × ${frame.height} · Frame ${frame.sequence}", color = Muted, fontSize = 11.sp)
+                Button(
+                    onClick = { onImmersiveChange(false) },
+                    colors = ButtonDefaults.buttonColors(containerColor = PanelAlt, contentColor = Color.White),
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
+                ) { Text("Exit", fontSize = 12.sp) }
+            }
+            Box(
+                modifier = Modifier.weight(1f).fillMaxWidth().background(Color.Black),
+                contentAlignment = Alignment.Center
+            ) {
+                if (bitmap != null) {
+                    Image(
+                        bitmap = bitmap,
+                        contentDescription = "Windows secondary display",
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier.fillMaxSize()
+                    )
                 } else {
-                    Box(Modifier.fillMaxWidth().height(190.dp).background(Color.Black, RoundedCornerShape(8.dp)), contentAlignment = Alignment.Center) {
-                        Text(if (connectedDevices == 0) "Connect a trusted Windows PC first." else "Waiting for the Windows display stream…", color = Muted, fontSize = 12.sp)
-                    }
+                    Text(
+                        if (connectedDevices == 0) "Connect a trusted Windows PC first."
+                        else "Waiting for the Windows display stream…",
+                        color = Muted,
+                        fontSize = 12.sp
+                    )
                 }
-                Text("Frame preview only. Touch input and full-screen extended-display controls are not enabled yet.", color = Muted, fontSize = 11.sp, lineHeight = 16.sp)
+            }
+        }
+    } else {
+        ScreenContent {
+            Eyebrow("WIRELESS DISPLAY")
+            ScreenHeading(
+                "SECOND SCREEN",
+                "Your phone as a monitor",
+                "Windows sends captured display frames over your trusted encrypted connection."
+            )
+            Surface(color = Panel, shape = RoundedCornerShape(14.dp), modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            if (frame == null) "Waiting for Windows frames" else "Live frame received",
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 14.sp
+                        )
+                        Text(
+                            if (frame == null) "IDLE" else "RECEIVING",
+                            color = if (frame == null) Muted else Good,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    if (bitmap != null) {
+                        Image(
+                            bitmap = bitmap,
+                            contentDescription = "Windows secondary display",
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier.fillMaxWidth().background(Color.Black, RoundedCornerShape(8.dp))
+                        )
+                        Text("${frame!!.width} × ${frame.height} · Frame ${frame.sequence}", color = Muted, fontSize = 11.sp)
+                    } else {
+                        Box(
+                            Modifier.fillMaxWidth().height(190.dp).background(Color.Black, RoundedCornerShape(8.dp)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                if (connectedDevices == 0) "Connect a trusted Windows PC first."
+                                else "Waiting for the Windows display stream…",
+                                color = Muted,
+                                fontSize = 12.sp
+                            )
+                        }
+                    }
+                    Button(
+                        onClick = { onImmersiveChange(true) },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Ink)
+                    ) { Text("Open full-screen display", fontWeight = FontWeight.Bold) }
+                    Text(
+                        "Full-screen preview hides Bridge navigation and Android system bars. Touch input is not enabled yet.",
+                        color = Muted,
+                        fontSize = 11.sp,
+                        lineHeight = 16.sp
+                    )
+                }
             }
         }
     }
 }
-
 @Composable
 private fun BottomNavigation(selected: BridgeTab, onSelect: (BridgeTab) -> Unit) {
     Row(
