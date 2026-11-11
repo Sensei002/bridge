@@ -29,3 +29,4 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphic
 keyring = { version = "3.6.3", default-features = false, features = ["windows-native"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 sha2 = "0.10"
+windows = { version = "0.61", features = ["Win32_Media_MediaFoundation"] }
