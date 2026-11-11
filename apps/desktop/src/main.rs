@@ -2384,10 +2384,11 @@ fn inject_display_pointer_event(event: DisplayInputEvent) -> Result<(), String> 
         DisplayInputAction::Up => flags |= MOUSEEVENTF_MOVE | MOUSEEVENTF_LEFTUP,
         DisplayInputAction::Cancel => flags |= MOUSEEVENTF_LEFTUP,
     }
+    let (absolute_x, absolute_y) = bridge_monitor_absolute_coordinates(event.x, event.y)?;
     let input = INPUT {
         r#type: INPUT_MOUSE,
         Anonymous: INPUT_0 { mi: MOUSEINPUT {
-            dx: i32::from(event.x), dy: i32::from(event.y), mouseData: 0,
+            dx: absolute_x, dy: absolute_y, mouseData: 0,
             dwFlags: flags, time: 0, dwExtraInfo: 0,
         }},
     };
@@ -2398,6 +2399,142 @@ fn inject_display_pointer_event(event: DisplayInputEvent) -> Result<(), String> 
         }));
     }
     Ok(())
+}
+
+
+#[cfg(windows)]
+fn bridge_monitor_absolute_coordinates(x: u16, y: u16) -> Result<(i32, i32), String> {
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::Graphics::Gdi::{
+        EnumDisplayDevicesW, EnumDisplayMonitors, GetMonitorInfoW, DISPLAY_DEVICEW,
+        HDC, HMONITOR, MONITORINFO, MONITORINFOEXW,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+        SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    };
+
+    struct MonitorSearch { rect: Option<(i32, i32, i32, i32)> }
+
+    unsafe extern "system" fn find_bridge_monitor(
+        monitor: HMONITOR,
+        _dc: HDC,
+        _clip: *mut RECT,
+        data: isize,
+    ) -> i32 {
+        let search = &mut *(data as *mut MonitorSearch);
+        let mut info: MONITORINFOEXW = std::mem::zeroed();
+        info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+        if GetMonitorInfoW(monitor, &mut info.monitorInfo as *mut MONITORINFO) == 0 {
+            return 1;
+        }
+        let mut device: DISPLAY_DEVICEW = std::mem::zeroed();
+        device.cb = std::mem::size_of::<DISPLAY_DEVICEW>() as u32;
+        if EnumDisplayDevicesW(info.szDevice.as_ptr(), 0, &mut device, 0) == 0 {
+            return 1;
+        }
+        let description = String::from_utf16_lossy(&device.DeviceString)
+            .trim_end_matches('\0').to_ascii_lowercase();
+        let device_id = String::from_utf16_lossy(&device.DeviceID)
+            .trim_end_matches('\0').to_ascii_lowercase();
+        if description.contains("bridge virtual display")
+            || description.contains("bridge second screen")
+            || device_id.contains("root\\bridgeindirectdisplay")
+        {
+            search.rect = Some((
+                info.monitorInfo.rcMonitor.left, info.monitorInfo.rcMonitor.top,
+                info.monitorInfo.rcMonitor.right, info.monitorInfo.rcMonitor.bottom,
+            ));
+            return 0;
+        }
+        1
+    }
+
+    let mut search = MonitorSearch { rect: None };
+    let enumerated = unsafe {
+        EnumDisplayMonitors(
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            Some(find_bridge_monitor),
+            &mut search as *mut MonitorSearch as isize,
+        )
+    };
+    if enumerated == 0 {
+        return Err("Windows could not enumerate active displays".into());
+    }
+    let monitor = search.rect.ok_or_else(|| {
+        "Bridge virtual monitor is not active; refusing to inject pointer input onto another display".to_string()
+    })?;
+
+    let virtual_left = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
+    let virtual_top = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
+    let virtual_width = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) };
+    let virtual_height = unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) };
+    map_monitor_point_to_virtual_desktop(
+        x, y, monitor,
+        (virtual_left, virtual_top, virtual_left + virtual_width, virtual_top + virtual_height),
+    )
+}
+
+#[cfg(windows)]
+fn map_monitor_point_to_virtual_desktop(
+    x: u16,
+    y: u16,
+    monitor: (i32, i32, i32, i32),
+    virtual_desktop: (i32, i32, i32, i32),
+) -> Result<(i32, i32), String> {
+    let (left, top, right, bottom) = monitor;
+    let (virtual_left, virtual_top, virtual_right, virtual_bottom) = virtual_desktop;
+    let monitor_width = i64::from(right) - i64::from(left);
+    let monitor_height = i64::from(bottom) - i64::from(top);
+    let virtual_width = i64::from(virtual_right) - i64::from(virtual_left);
+    let virtual_height = i64::from(virtual_bottom) - i64::from(virtual_top);
+    if monitor_width <= 0 || monitor_height <= 0 || virtual_width <= 1 || virtual_height <= 1
+        || left < virtual_left || top < virtual_top
+        || right > virtual_right || bottom > virtual_bottom
+    {
+        return Err("Windows returned invalid Bridge or virtual-desktop bounds".into());
+    }
+
+    let monitor_x = i64::from(left)
+        + (i64::from(x) * (monitor_width - 1) + 32_767) / 65_535;
+    let monitor_y = i64::from(top)
+        + (i64::from(y) * (monitor_height - 1) + 32_767) / 65_535;
+    let absolute_x = ((monitor_x - i64::from(virtual_left)) * 65_535
+        + (virtual_width - 1) / 2) / (virtual_width - 1);
+    let absolute_y = ((monitor_y - i64::from(virtual_top)) * 65_535
+        + (virtual_height - 1) / 2) / (virtual_height - 1);
+    Ok((
+        absolute_x.clamp(0, 65_535) as i32,
+        absolute_y.clamp(0, 65_535) as i32,
+    ))
+}
+
+#[cfg(all(test, windows))]
+mod display_pointer_mapping_tests {
+    use super::map_monitor_point_to_virtual_desktop;
+
+    #[test]
+    fn maps_bridge_monitor_to_its_position_on_the_virtual_desktop() {
+        let bounds = (1920, 0, 3000, 2340);
+        let desktop = (0, 0, 3000, 2340);
+        assert_eq!(map_monitor_point_to_virtual_desktop(0, 0, bounds, desktop).unwrap(), (41_956, 0));
+        assert_eq!(map_monitor_point_to_virtual_desktop(u16::MAX, u16::MAX, bounds, desktop).unwrap(), (65_535, 65_535));
+    }
+
+    #[test]
+    fn supports_monitors_left_of_the_primary_display() {
+        let bounds = (-1080, 0, 0, 2340);
+        let desktop = (-1080, 0, 1920, 2340);
+        assert_eq!(map_monitor_point_to_virtual_desktop(0, 0, bounds, desktop).unwrap(), (0, 0));
+        assert!(map_monitor_point_to_virtual_desktop(u16::MAX, 0, bounds, desktop).unwrap().0 < 65_535);
+    }
+
+    #[test]
+    fn rejects_invalid_or_outside_monitor_bounds() {
+        assert!(map_monitor_point_to_virtual_desktop(0, 0, (0, 0, 0, 100), (0, 0, 100, 100)).is_err());
+        assert!(map_monitor_point_to_virtual_desktop(0, 0, (100, 0, 200, 100), (0, 0, 100, 100)).is_err());
+    }
 }
 
 #[cfg(windows)]
