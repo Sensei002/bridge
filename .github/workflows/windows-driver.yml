@@ -150,10 +150,14 @@ jobs:
           $rootThumbprint = $null
 
           try {
+            Write-Host "SIGNING CHECKPOINT: starting PFX decode and file write"
             $pfxBytes = [Convert]::FromBase64String($env:BRIDGE_DRIVER_SIGNING_PFX_BASE64)
             [IO.File]::WriteAllBytes($pfxPath, $pfxBytes)
+            Write-Host "SIGNING CHECKPOINT: PFX file written; preparing password"
             $securePassword = ConvertTo-SecureString $env:BRIDGE_DRIVER_SIGNING_PFX_PASSWORD -AsPlainText -Force
+            Write-Host "SIGNING CHECKPOINT: importing PFX into CurrentUser\\My"
             $imported = Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation "Cert:\CurrentUser\My" -Password $securePassword
+            Write-Host "SIGNING CHECKPOINT: PFX import returned"
             if (-not $imported) { throw "The signing PFX did not import a certificate." }
 
             $signingCert = @($imported) | Where-Object { $_.HasPrivateKey } | Select-Object -First 1
@@ -163,10 +167,14 @@ jobs:
               throw "Imported certificate thumbprint does not match BRIDGE_DRIVER_CERT_THUMBPRINT."
             }
 
+            Write-Host "SIGNING CHECKPOINT: certificate identity and thumbprint validated"
             Export-Certificate -Cert $signingCert -FilePath $cerPath -Type CERT | Out-Null
+            Write-Host "SIGNING CHECKPOINT: public certificate exported; importing temporary root trust"
             Import-Certificate -FilePath $cerPath -CertStoreLocation "Cert:\CurrentUser\Root" | Out-Null
+            Write-Host "SIGNING CHECKPOINT: temporary root trust import returned"
             $rootThumbprint = $signingCert.Thumbprint
 
+            Write-Host "SIGNING CHECKPOINT: locating Windows SDK SignTool"
             $kitRoots = @(
               "${env:ProgramFiles(x86)}\Windows Kits\10\bin",
               "${env:ProgramFiles}\Windows Kits\10\bin"
@@ -184,10 +192,12 @@ jobs:
             $signtool = Get-Item -LiteralPath $signtoolPath
             Write-Host "Using Windows SDK SignTool: $($signtool.FullName)"
 
+            Write-Host "SIGNING CHECKPOINT: SignTool located; starting catalog signing"
             Write-Host "Signing catalog with Bridge certificate $actualThumbprint"
             & $signtool.FullName sign /v /fd SHA256 /f $pfxPath /p $env:BRIDGE_DRIVER_SIGNING_PFX_PASSWORD /d "Bridge Indirect Display Driver" $catPath
             if ($LASTEXITCODE -ne 0) { throw "SignTool catalog signing failed (exit $LASTEXITCODE)." }
 
+            Write-Host "SIGNING CHECKPOINT: catalog signing returned; starting signature verification"
             & $signtool.FullName verify /pa /v $catPath
             if ($LASTEXITCODE -ne 0) { throw "SignTool could not verify the signed catalog." }
 
