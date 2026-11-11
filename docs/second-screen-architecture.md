@@ -118,3 +118,8 @@ The first physical test target is the currently paired Redmi Note 7 Pro. Start w
 - Microsoft, [Indirect Display Driver Model Overview](https://learn.microsoft.com/en-us/windows-hardware/drivers/display/indirect-display-driver-model-overview)
 - Microsoft, [Windows Driver Samples — Indirect Display Driver](https://github.com/microsoft/Windows-driver-samples/tree/main/video/IndirectDisplay)
 - Microsoft sample README notes that the sample only enumerates a monitor and that its INF and swap-chain processing need production work.
+
+
+## Android stalled-frame detection
+
+The Android second-screen UI tracks the age of the most recently completed frame using Android's monotonic elapsed-realtime clock. If no newer frame arrives for 1.5 seconds, both the compact preview and immersive view report a stalled stream and show the elapsed time since the last frame. The last rendered image remains visible for diagnosis; the warning does not claim that the authenticated device session has disconnected. A new frame immediately clears the warning. This is an arrival watchdog, not a decoder-health or end-to-end latency measurement.
