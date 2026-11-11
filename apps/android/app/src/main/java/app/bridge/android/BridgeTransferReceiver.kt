@@ -35,7 +35,8 @@ internal data class BridgeDisplayFrame(
     val height: Int,
     val stride: Int,
     val timestampNs: Long,
-    val pixels: ByteArray
+    val pixels: ByteArray,
+    val receivedAtElapsedRealtimeNs: Long = android.os.SystemClock.elapsedRealtimeNanos()
 )
 
 /** Reassembles one ordered BGRA8 frame and caps its allocation at 64 MiB. */
