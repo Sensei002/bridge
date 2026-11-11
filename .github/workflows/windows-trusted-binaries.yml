@@ -56,6 +56,7 @@ jobs:
 
   sign:
     name: Sign and verify Bridge Windows binaries
+    timeout-minutes: 12
     needs: build
     if: (github.event_name == 'push' && (github.ref == 'refs/heads/development' || github.ref == 'refs/heads/stable')) || (github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/development' || github.ref == 'refs/heads/stable'))
     runs-on: windows-latest
@@ -67,6 +68,7 @@ jobs:
           name: bridge-windows-unsigned-binaries
           path: signed-binaries
       - name: Sign, verify, and export publisher identity
+        timeout-minutes: 8
         shell: pwsh
         env:
           BRIDGE_DRIVER_SIGNING_PFX_BASE64: ${{ secrets.BRIDGE_DRIVER_SIGNING_PFX_BASE64 }}
@@ -104,9 +106,18 @@ jobs:
             $rootThumbprint = $certificate.Thumbprint
 
             $kitRoots = @("${env:ProgramFiles(x86)}\Windows Kits\10\bin", "${env:ProgramFiles}\Windows Kits\10\bin") | Where-Object { $_ -and (Test-Path $_) }
-            $signtool = Get-ChildItem -Path $kitRoots -Recurse -File -Filter "signtool.exe" -ErrorAction SilentlyContinue |
-              Where-Object { $_.FullName -match "\\x64\\signtool\.exe$" } | Sort-Object FullName -Descending | Select-Object -First 1
-            if (-not $signtool) { throw "Windows SDK SignTool was not found." }
+            $signtoolCandidates = foreach ($kitRoot in $kitRoots) {
+              Get-ChildItem -LiteralPath $kitRoot -Directory -ErrorAction SilentlyContinue |
+                Sort-Object Name -Descending |
+                ForEach-Object { Join-Path $_.FullName "x64\\signtool.exe" }
+              Join-Path $kitRoot "x64\\signtool.exe"
+            }
+            $signtoolPath = $signtoolCandidates |
+              Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
+              Select-Object -First 1
+            if (-not $signtoolPath) { throw "Windows SDK SignTool was not found in the expected SDK version directories." }
+            $signtool = Get-Item -LiteralPath $signtoolPath
+            Write-Host "Using Windows SDK SignTool: $($signtool.FullName)"
 
             foreach ($name in @("bridge-desktop.exe", "bridge-display-service.exe")) {
               $path = Join-Path "signed-binaries" $name
