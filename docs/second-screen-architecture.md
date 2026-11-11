@@ -61,6 +61,10 @@ This is a wire-format foundation only. It does not yet inject input into Windows
 
 The Android receiver reassembles bounded BGRA8 frame fragments on the authenticated session reader. Completed frames are coalesced before dispatch to the main thread: at most one UI callback is pending per session, and a newer complete frame replaces an older pending frame. Completed frame sequence numbers must increase monotonically. This prevents a slow UI from accumulating stale frame callbacks, but the current renderer still converts BGRA8 frames into Compose bitmaps on the UI side. A dedicated MediaCodec/SurfaceView renderer and hardware video codec pipeline remain future work.
 
+## Android frame-rate diagnostics
+
+The Android second-screen view estimates incoming frame rate from completed-frame arrival times on the device's monotonic clock. The displayed value uses a smoothed estimate to make short-term Wi-Fi jitter easier to interpret. It measures frame arrivals, not decoder presentation cadence or end-to-end latency; those require timestamp synchronization and the future encoded media pipeline.
+
 ## Android bitmap conversion
 
 The Compose second-screen view performs bitmap allocation and BGRA8 pixel upload on a cancellable coroutine using `Dispatchers.Default`, rather than doing the CPU work on the main thread. A new frame key cancels the previous conversion coroutine so obsolete conversion results are not applied to the UI. This reduces main-thread work but is still a CPU bitmap path; it is not a hardware-decoded video renderer and does not eliminate frame copies.
