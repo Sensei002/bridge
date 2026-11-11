@@ -37,7 +37,7 @@ internal fun inspectAvcDecoders(): List<AvcDecoderCapability> {
                     hardwareAccelerated = if (Build.VERSION.SDK_INT >= 29) info.isHardwareAccelerated else null,
                     maxWidth = video.supportedWidths.upper,
                     maxHeight = video.supportedHeights.upper,
-                    maxFrameRate = video.supportedFrameRates.upper,
+                    maxFrameRate = video.supportedFrameRates.upper.toDouble(),
                     maxBitrate = video.bitrateRange.upper,
                     supportsRedmiTargetMode = targetModeSupported
                 )
