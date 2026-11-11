@@ -112,6 +112,7 @@ jobs:
 
   sign-iddcx:
     name: Approve, sign, and verify driver package
+    timeout-minutes: 12
     needs: build-iddcx
     if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/development' || github.ref == 'refs/heads/stable'))
     runs-on: windows-2025-vs2026
@@ -125,6 +126,7 @@ jobs:
           path: bridge-iddcx-package
 
       - name: Sign and verify driver catalog with Bridge certificate
+        timeout-minutes: 8
         shell: pwsh
         env:
           BRIDGE_DRIVER_SIGNING_PFX_BASE64: ${{ secrets.BRIDGE_DRIVER_SIGNING_PFX_BASE64 }}
@@ -169,11 +171,18 @@ jobs:
               "${env:ProgramFiles(x86)}\Windows Kits\10\bin",
               "${env:ProgramFiles}\Windows Kits\10\bin"
             ) | Where-Object { $_ -and (Test-Path $_) }
-            $signtool = Get-ChildItem -Path $kitRoots -Recurse -File -Filter "signtool.exe" -ErrorAction SilentlyContinue |
-              Where-Object { $_.FullName -match "\\x64\\signtool\.exe$" } |
-              Sort-Object FullName -Descending |
+            $signtoolCandidates = foreach ($kitRoot in $kitRoots) {
+              Get-ChildItem -LiteralPath $kitRoot -Directory -ErrorAction SilentlyContinue |
+                Sort-Object Name -Descending |
+                ForEach-Object { Join-Path $_.FullName "x64\\signtool.exe" }
+              Join-Path $kitRoot "x64\\signtool.exe"
+            }
+            $signtoolPath = $signtoolCandidates |
+              Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
               Select-Object -First 1
-            if (-not $signtool) { throw "The x64 Windows SDK SignTool was not found on the runner." }
+            if (-not $signtoolPath) { throw "The x64 Windows SDK SignTool was not found in the expected SDK version directories." }
+            $signtool = Get-Item -LiteralPath $signtoolPath
+            Write-Host "Using Windows SDK SignTool: $($signtool.FullName)"
 
             Write-Host "Signing catalog with Bridge certificate $actualThumbprint"
             & $signtool.FullName sign /v /fd SHA256 /f $pfxPath /p $env:BRIDGE_DRIVER_SIGNING_PFX_PASSWORD /d "Bridge Indirect Display Driver" $catPath
