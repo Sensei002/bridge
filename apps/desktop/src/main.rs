@@ -600,20 +600,29 @@ fn start_display_frame_stream(
                     });
                 }
             }
-            runtime
+            Some(runtime)
         }
         Err(error) => {
             let _ = events.send(DisplayLeaseEvent::Status {
                 session_key: session_key.clone(),
                 message: format!("{error}. Continuing with BGRA fallback."),
             });
-            return Err(error);
+            None
         }
     };
     thread::Builder::new()
         .name("bridge-display-frame-stream".into())
         .spawn(move || {
             let _media_foundation = media_foundation;
+            let com_apartment = media_foundation::ComApartment::start();
+            let mut first_sample_probe_done = com_apartment.is_err();
+            if let Err(error) = &com_apartment {
+                let _ = events.send(DisplayLeaseEvent::Status {
+                    session_key: session_key.clone(),
+                    message: format!("{error}. H.264 sample probe skipped; BGRA remains active."),
+                });
+            }
+            let _com_apartment = com_apartment;
             let mut last_sequence = 0_u64;
             let mut announced = false;
             let mut stats_window_started = Instant::now();
@@ -634,6 +643,45 @@ fn start_display_frame_stream(
                             timestamp_ns: frame.timestamp_ns,
                             pixels: frame.pixels,
                         };
+                        if !first_sample_probe_done {
+                            first_sample_probe_done = true;
+                            match bridge_transfer::bgra_to_nv12(&display_frame) {
+                                Ok(nv12) => match media_foundation::submit_first_nv12_sample(&nv12) {
+                                    Ok(media_foundation::FirstSampleResult::Encoded { encoder_name, bytes }) => {
+                                        let _ = events.send(DisplayLeaseEvent::Status {
+                                            session_key: session_key.clone(),
+                                            message: format!(
+                                                "H.264 first-sample probe succeeded: {encoder_name} produced {bytes} bytes. Output is diagnostic only; BGRA remains the active stream."
+                                            ),
+                                        });
+                                    }
+                                    Ok(media_foundation::FirstSampleResult::Buffered { encoder_name }) => {
+                                        let _ = events.send(DisplayLeaseEvent::Status {
+                                            session_key: session_key.clone(),
+                                            message: format!(
+                                                "{encoder_name} accepted the first NV12 sample but buffered output; BGRA remains the active stream."
+                                            ),
+                                        });
+                                    }
+                                    Err(error) => {
+                                        let _ = events.send(DisplayLeaseEvent::Status {
+                                            session_key: session_key.clone(),
+                                            message: format!(
+                                                "H.264 first-sample probe unavailable: {error}. BGRA remains the active stream."
+                                            ),
+                                        });
+                                    }
+                                },
+                                Err(error) => {
+                                    let _ = events.send(DisplayLeaseEvent::Status {
+                                        session_key: session_key.clone(),
+                                        message: format!(
+                                            "Could not prepare NV12 input sample: {error}. BGRA remains the active stream."
+                                        ),
+                                    });
+                                }
+                            }
+                        }
                         let frame_bytes = display_frame.pixels.len() as u64;
                         let send_started = Instant::now();
                         match fragment_display_frame(&display_frame) {
