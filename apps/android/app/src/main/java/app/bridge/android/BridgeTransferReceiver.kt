@@ -84,21 +84,18 @@ internal class EncodedVideoFrameAssembler {
             }
             val buffer = ByteBuffer.wrap(packet).order(java.nio.ByteOrder.BIG_ENDIAN)
             buffer.get()
-            val header = Header(
-                sequence = buffer.long,
-                width = buffer.int,
-                height = buffer.int,
-                timestampNs = buffer.long,
-                totalBytes = buffer.int,
-                keyframe = false
-            )
+            val sequence = buffer.long
+            val width = buffer.int
+            val height = buffer.int
+            val timestampNs = buffer.long
+            val totalBytes = buffer.int
             val offset = buffer.int
             val keyframe = when (buffer.get().toInt() and 0xff) {
                 0 -> false
                 1 -> true
                 else -> error("Invalid encoded-video keyframe flag.")
             }
-            val validatedHeader = header.copy(keyframe = keyframe)
+            val header = Header(sequence, width, height, timestampNs, totalBytes, keyframe)
             val count = packet.size - ENCODED_VIDEO_HEADER_BYTES
             require(header.sequence > 0 && header.width in 1..4096 && header.height in 1..4096 &&
                 header.timestampNs > 0 && header.totalBytes in 1..MAX_ENCODED_VIDEO_BYTES) {
@@ -116,7 +113,7 @@ internal class EncodedVideoFrameAssembler {
                 bitstream = ByteArray(header.totalBytes)
                 received = 0
             }
-            require(active == validatedHeader && offset == received) {
+            require(active == header && offset == received) {
                 "Encoded-video fragments are out of order or inconsistent."
             }
             System.arraycopy(packet, ENCODED_VIDEO_HEADER_BYTES, requireNotNull(bitstream), received, count)
