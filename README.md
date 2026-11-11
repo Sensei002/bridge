@@ -8,7 +8,7 @@
 
 Bridge is an open-source, local-first device interoperability project for Windows, Android, and iOS. The goal is to make nearby devices work together through one secure, permission-based ecosystem.
 
-> **Status: Milestone 1 complete for the validated Windows + Android pairing target.** Both platforms have passed real-device discovery, bidirectional pairing, receiver approval, trusted reconnection, app restart/reconnection, and local-network reconnect checks. Windows firewall and Android network permissions have been tested successfully. iOS builds in CI but has not been physically tested; Linux desktop validation is deferred until a Linux test environment is available. See the validation scope and remaining follow-up items below.
+> **Current status — Milestone 2: Android as a real extended Windows display (Second Screen) is in progress.** The development code includes the Windows IddCx driver and display service, authenticated Windows-to-Android H.264 streaming, Android MediaCodec rendering, dynamic sizing, and keyframe recovery. The next gate is physical validation: install and activate the virtual display on Windows, confirm it appears in Display Settings, connect the Android device, and verify that Windows Extend mode renders real application windows on the phone. CI success does not prove physical monitor installation or live playback. Milestone 1 authenticated Windows ↔ Android pairing is complete; iOS and Linux physical-device validation remain deferred.
 
 ## Platforms
 
@@ -16,6 +16,18 @@ Bridge is an open-source, local-first device interoperability project for Window
 - **Android:** Kotlin + Jetpack Compose.
 - **iOS:** SwiftUI native app.
 - **Shared engine:** Rust workspace with versioned protocol types, device registry, pairing consent state machine, local-network discovery, encrypted-session primitives, and trust persistence.
+
+## Current focus: Milestone 2 — Second Screen
+
+Bridge Second Screen is intended to make an Android phone or tablet a **real extended Windows monitor**. Windows must enumerate it in Settings → System → Display, allow the user to select **Extend**, and let application windows move onto the Android display. It is not desktop mirroring or a remote-control preview.
+
+The development implementation includes the IddCx/UMDF virtual-display driver project, a separate Windows display service, Windows H.264 frame sending over the authenticated Bridge session, Android H.264 reception and MediaCodec Surface rendering, dynamic display sizing, and keyframe recovery. BGRA remains a fallback path.
+
+Still requiring physical validation or further implementation: driver/service installation and monitor arrival on a Windows host, real virtual-display swap-chain frame acquisition, sustained H.264 playback and recovery on the target hardware, rotation, latency and sustained performance, touch/pen input, and the full Windows Extend-mode acceptance test.
+
+See [docs/roadmap.md](docs/roadmap.md) for the current task status. A successful CI build or published development release is not proof that the second monitor works on physical hardware.
+
+## Milestone 1: authenticated local connectivity — complete for Windows + Android
 
 ## Repository layout
 
@@ -52,6 +64,10 @@ Milestone 1 validation outcome:
 - **Follow-up hardening:** broader router/AP-isolation and IPv6-only coverage, resource-limit/lifecycle stress testing, and an independent security review remain recommended before a broad public release.
 
 See [docs/roadmap.md](docs/roadmap.md), [docs/protocol.md](docs/protocol.md), [docs/security-model.md](docs/security-model.md), [CONTRIBUTING.md](CONTRIBUTING.md), and [SECURITY.md](SECURITY.md).
+
+## Milestone 3: secure local file transfer — planned
+
+The shared Rust transfer engine has foundational framing, validation, and integrity-checking components. Wiring these into the authenticated desktop and Android sessions, approval UI, progress/cancellation, and physical-device tests is future work; file transfer is not the current active milestone.
 
 ## CI/CD
 
