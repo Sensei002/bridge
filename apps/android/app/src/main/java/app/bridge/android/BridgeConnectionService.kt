@@ -381,6 +381,17 @@ class BridgeConnectionService : Service() {
         transferReceiver?.sendFile(uri, sessionHandle)
     }
 
+    internal fun sendDisplayInput(deviceId: String, action: Int, pointerId: Int, x: Int, y: Int) {
+        // Route input only to the authenticated peer that supplied the displayed frame.
+        val handle = BridgeRuntimeState.connectedSessionHandles[deviceId] ?: return
+        try {
+            transferReceiver?.sendDisplayInput(handle, action, pointerId, x, y)
+        } catch (error: Exception) {
+            BridgeRuntimeState.transferStatus.value =
+                "Could not forward second-screen input: ${error.message ?: error.javaClass.simpleName}"
+        }
+    }
+
     internal fun sendClipboard(text: String) {
         val enabled = getSharedPreferences("bridge_settings", MODE_PRIVATE)
             .getBoolean("clipboard_sync_enabled", false)
