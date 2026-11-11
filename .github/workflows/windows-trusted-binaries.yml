@@ -126,7 +126,7 @@ jobs:
             Write-Host "SIGNING CHECKPOINT: certificate identity and EKU validated"
             Export-Certificate -Cert $certificate -FilePath $cerPath -Type CERT | Out-Null
             Write-Host "SIGNING CHECKPOINT: public certificate exported; importing temporary root trust"
-            Invoke-BoundedCertUtil -Arguments @("-user", "-addstore", "-f", "Root", $cerPath) -Operation "temporary root trust import"
+            Invoke-BoundedCertUtil -Arguments @("-silent", "-user", "-addstore", "-f", "Root", $cerPath) -Operation "temporary root trust import"
             Write-Host "SIGNING CHECKPOINT: temporary root trust import returned"
             $rootThumbprint = $certificate.Thumbprint
 
