@@ -665,6 +665,7 @@ fn start_display_frame_stream(
             // Create the encoder only after the first real frame reveals the active
             // virtual-display dimensions. Recreate it on rotation or recovery requests.
             let mut persistent_encoder: Option<media_foundation::PersistentH264Encoder> = None;
+            let mut encoder_dimensions: Option<(u32, u32)> = None;
             let mut encoder_unavailable = false;
             let mut encoder_frames_reported = 0_u64;
             let mut h264_sequence = 0_u64;
@@ -690,9 +691,8 @@ fn start_display_frame_stream(
                             pixels: frame.pixels,
                         };
                         let keyframe_requested = session.take_video_keyframe_request();
-                        let dimensions_changed = persistent_encoder.as_ref().is_some_and(|encoder| {
-                            encoder.dimensions() != (display_frame.width, display_frame.height)
-                        });
+                        let dimensions_changed = encoder_dimensions
+                            .is_some_and(|dimensions| dimensions != (display_frame.width, display_frame.height));
                         if keyframe_requested || dimensions_changed {
                             persistent_encoder = None;
                             encoder_unavailable = false;
@@ -710,6 +710,7 @@ fn start_display_frame_stream(
                         {
                             match media_foundation::PersistentH264Encoder::start(display_frame.width, display_frame.height) {
                                 Ok(encoder) => {
+                                    encoder_dimensions = Some((display_frame.width, display_frame.height));
                                     let name = encoder.encoder_name().to_string();
                                     let _ = events.send(DisplayLeaseEvent::Status {
                                         session_key: session_key.clone(),
@@ -718,6 +719,7 @@ fn start_display_frame_stream(
                                     persistent_encoder = Some(encoder);
                                 }
                                 Err(error) => {
+                                    encoder_dimensions = Some((display_frame.width, display_frame.height));
                                     encoder_unavailable = true;
                                     let _ = events.send(DisplayLeaseEvent::Status {
                                         session_key: session_key.clone(),
@@ -764,8 +766,8 @@ fn start_display_frame_stream(
                             }
                         }
                         // Send Annex-B access units over the existing authenticated Noise
-                        // session. BGRA remains the active Android rendering path until
-                        // MediaCodec playback and recovery are implemented and validated.
+                        // session. Android MediaCodec renders H.264 while BGRA remains the
+                        // fallback if decoder configuration or playback is unavailable.
                         for access_unit in encoded_access_units {
                             let Some(keyframe) = h264_annex_b_keyframe(&access_unit.bytes) else {
                                 let _ = events.send(DisplayLeaseEvent::Status {
