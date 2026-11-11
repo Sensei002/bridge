@@ -17,6 +17,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.nio.ByteBuffer
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
@@ -58,6 +59,50 @@ internal fun AvcSurfaceRenderer(
     DisposableEffect(decoder) {
         onDispose { decoder.close() }
     }
+}
+
+
+private data class AvcParameterSets(val sps: ByteArray, val pps: ByteArray)
+
+/** Extracts the first SPS and PPS NAL units from an Annex-B access unit. */
+private fun extractAvcParameterSets(accessUnit: ByteArray): AvcParameterSets? {
+    data class StartCode(val offset: Int, val length: Int)
+
+    fun findStartCode(from: Int): StartCode? {
+        var index = from
+        while (index + 3 <= accessUnit.size) {
+            if (accessUnit[index] == 0.toByte() && accessUnit[index + 1] == 0.toByte()) {
+                if (accessUnit[index + 2] == 1.toByte()) return StartCode(index, 3)
+                if (index + 4 <= accessUnit.size &&
+                    accessUnit[index + 2] == 0.toByte() &&
+                    accessUnit[index + 3] == 1.toByte()
+                ) return StartCode(index, 4)
+            }
+            index++
+        }
+        return null
+    }
+
+    var start = findStartCode(0) ?: return null
+    var sps: ByteArray? = null
+    var pps: ByteArray? = null
+    while (true) {
+        val nalStart = start.offset + start.length
+        val next = findStartCode(nalStart)
+        var nalEnd = next?.offset ?: accessUnit.size
+        while (nalEnd > nalStart && accessUnit[nalEnd - 1] == 0.toByte()) nalEnd--
+        if (nalEnd > nalStart) {
+            when (accessUnit[nalStart].toInt() and 0x1f) {
+                7 -> if (sps == null) sps = accessUnit.copyOfRange(start.offset, nalEnd)
+                8 -> if (pps == null) pps = accessUnit.copyOfRange(start.offset, nalEnd)
+            }
+        }
+        if (next == null) break
+        start = next
+    }
+    val sequence = sps ?: return null
+    val picture = pps ?: return null
+    return AvcParameterSets(sequence, picture)
 }
 
 private class AvcSurfaceDecoder(
@@ -115,12 +160,23 @@ private class AvcSurfaceDecoder(
         val outputSurface = surface
         if (outputSurface == null || !outputSurface.isValid) return
 
-        if (codec == null || configuredWidth != frame.width || configuredHeight != frame.height) {
+        if (codec != null && (configuredWidth != frame.width || configuredHeight != frame.height)) {
             releaseCodec()
+        }
+
+        if (codec == null) {
+            if (!frame.keyframe) return
+            val parameterSets = extractAvcParameterSets(frame.bitstream)
+            if (parameterSets == null) {
+                postStatus("Received an H.264 IDR frame without Annex-B SPS/PPS; waiting for a configured keyframe.")
+                return
+            }
             try {
                 val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, frame.width, frame.height).apply {
                     setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, frame.bitstream.size.coerceAtLeast(64 * 1024))
                     setInteger(MediaFormat.KEY_FRAME_RATE, 60)
+                    setByteBuffer("csd-0", ByteBuffer.wrap(parameterSets.sps))
+                    setByteBuffer("csd-1", ByteBuffer.wrap(parameterSets.pps))
                 }
                 codec = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC).also {
                     it.configure(format, outputSurface, null, 0)
@@ -129,7 +185,7 @@ private class AvcSurfaceDecoder(
                 configuredWidth = frame.width
                 configuredHeight = frame.height
                 waitingForKeyframe = true
-                postStatus("MediaCodec initialized for ${frame.width}×${frame.height}; waiting for an IDR keyframe.")
+                postStatus("MediaCodec configured with SPS/PPS for ${frame.width}×${frame.height}; starting at IDR.")
             } catch (error: Exception) {
                 releaseCodec()
                 postRendered(false)
