@@ -19,7 +19,7 @@ use bridge_core::trust::{SasConfirmation, TrustStore};
 #[cfg(windows)]
 use bridge_protocol::{DeviceDescriptor, DeviceId, Platform, PROTOCOL_VERSION};
 #[cfg(windows)]
-use bridge_transfer::{decode_packet, encode_packet, fragment_display_frame, offer_for_file, DisplayFrame, DisplayInputAction, DisplayInputEvent, FileOffer, IncomingFile, OutgoingFile, TransferControl, TransferPacket};
+use bridge_transfer::{decode_packet, encode_packet, fragment_display_frame, fragment_encoded_video_frame, offer_for_file, DisplayFrame, EncodedVideoFrame, DisplayInputAction, DisplayInputEvent, FileOffer, IncomingFile, OutgoingFile, TransferControl, TransferPacket};
 #[cfg(windows)]
 use std::net::TcpListener;
 #[cfg(windows)]
@@ -545,6 +545,43 @@ fn start_display_lease_lifecycle(
 }
 
 #[cfg(windows)]
+/// Return whether an Annex-B H.264 access unit contains an IDR slice.
+/// None means the encoder output did not contain a recognizable Annex-B NAL unit.
+fn h264_annex_b_keyframe(bitstream: &[u8]) -> Option<bool> {
+    fn start_code_len(bytes: &[u8], index: usize) -> Option<usize> {
+        if bytes.get(index..index + 4) == Some(&[0, 0, 0, 1]) {
+            Some(4)
+        } else if bytes.get(index..index + 3) == Some(&[0, 0, 1]) {
+            Some(3)
+        } else {
+            None
+        }
+    }
+
+    let mut index = 0;
+    let mut found_nal = false;
+    let mut keyframe = false;
+    while index < bitstream.len() {
+        let Some(prefix_len) = start_code_len(bitstream, index) else {
+            index += 1;
+            continue;
+        };
+        let nal_start = index + prefix_len;
+        if nal_start >= bitstream.len() {
+            return None;
+        }
+        let nal_type = bitstream[nal_start] & 0x1f;
+        if nal_type == 0 || nal_type > 23 {
+            return None;
+        }
+        found_nal = true;
+        keyframe |= nal_type == 5;
+        index = nal_start + 1;
+    }
+    found_nal.then_some(keyframe)
+}
+
+#[cfg(windows)]
 fn start_display_frame_stream(
     session: Arc<DesktopSession>,
     session_key: String,
@@ -598,6 +635,8 @@ fn start_display_frame_stream(
                 None
             };
             let mut encoder_frames_reported = 0_u64;
+            let mut h264_sequence = 0_u64;
+            let mut h264_samples_sent = 0_u64;
             let mut last_sequence = 0_u64;
             let mut announced = false;
             let mut stats_window_started = Instant::now();
@@ -618,19 +657,20 @@ fn start_display_frame_stream(
                             timestamp_ns: frame.timestamp_ns,
                             pixels: frame.pixels,
                         };
+                        let mut encoded_access_units = Vec::new();
                         if let Some(encoder) = persistent_encoder.as_mut() {
                             match bridge_transfer::bgra_to_nv12(&display_frame) {
                                 Ok(nv12) => match encoder.encode(&nv12) {
                                     Ok(encoded) => {
                                         encoder_frames_reported = encoder_frames_reported.saturating_add(1);
+                                        encoded_access_units = encoded.access_units;
                                         if encoder_frames_reported == 1 || encoder_frames_reported % 120 == 0 {
-                                            let bytes: usize = encoded.access_units.iter().map(Vec::len).sum();
                                             let _ = events.send(DisplayLeaseEvent::Status {
                                                 session_key: session_key.clone(),
                                                 message: if encoded.buffered {
-                                                    format!("Persistent H.264 encoder accepted {} frame(s); output is currently buffered. Encoded data remains diagnostic only; BGRA is still streaming.", encoder_frames_reported)
+                                                    format!("Persistent H.264 encoder accepted {} frame(s); output is currently buffered. BGRA remains the active stream.", encoder_frames_reported)
                                                 } else {
-                                                    format!("Persistent H.264 encoder processed {} frame(s), emitted {} output sample(s) / {bytes} bytes. Encoded data remains diagnostic only; BGRA is still streaming.", encoder_frames_reported, encoded.access_units.len())
+                                                    format!("Persistent H.264 encoder processed {} frame(s) and emitted {} output sample(s). H.264 transport diagnostics are active; BGRA remains the display path.", encoder_frames_reported, encoded_access_units.len())
                                                 },
                                             });
                                         }
@@ -652,6 +692,63 @@ fn start_display_frame_stream(
                                 }
                             }
                         }
+                        // Send Annex-B access units over the existing authenticated Noise
+                        // session. BGRA remains the active Android rendering path until
+                        // MediaCodec playback and recovery are implemented and validated.
+                        for access_unit in encoded_access_units {
+                            let Some(keyframe) = h264_annex_b_keyframe(&access_unit) else {
+                                let _ = events.send(DisplayLeaseEvent::Status {
+                                    session_key: session_key.clone(),
+                                    message: "H.264 encoder output was not recognizable Annex-B; skipped encoded sample and kept BGRA active.".into(),
+                                });
+                                continue;
+                            };
+                            h264_sequence = h264_sequence.saturating_add(1);
+                            let encoded_frame = EncodedVideoFrame {
+                                sequence: h264_sequence,
+                                width: display_frame.width,
+                                height: display_frame.height,
+                                timestamp_ns: display_frame.timestamp_ns.max(1),
+                                keyframe,
+                                bitstream: access_unit,
+                            };
+                            match fragment_encoded_video_frame(&encoded_frame) {
+                                Ok(packets) => {
+                                    let mut sent_access_unit = true;
+                                    for packet in packets {
+                                        if stop.load(Ordering::Acquire) || !session.is_alive() {
+                                            sent_access_unit = false;
+                                            break;
+                                        }
+                                        if let Err(error) = session.send(&packet) {
+                                            let _ = events.send(DisplayLeaseEvent::Status {
+                                                session_key: session_key.clone(),
+                                                message: format!("Authenticated H.264 transport stopped: {error}."),
+                                            });
+                                            stop.store(true, Ordering::Release);
+                                            sent_access_unit = false;
+                                            break;
+                                        }
+                                    }
+                                    if sent_access_unit {
+                                        h264_samples_sent = h264_samples_sent.saturating_add(1);
+                                        if h264_samples_sent == 1 || h264_samples_sent % 120 == 0 {
+                                            let _ = events.send(DisplayLeaseEvent::Status {
+                                                session_key: session_key.clone(),
+                                                message: format!("Windows sent {h264_samples_sent} bounded H.264 access unit(s) to Android over the authenticated session. BGRA remains the active display path; Android decoding is not enabled yet."),
+                                            });
+                                        }
+                                    }
+                                }
+                                Err(error) => {
+                                    let _ = events.send(DisplayLeaseEvent::Status {
+                                        session_key: session_key.clone(),
+                                        message: format!("Skipped H.264 access unit that failed wire-protocol validation: {error}. BGRA remains active."),
+                                    });
+                                }
+                            }
+                        }
+
                         let frame_bytes = display_frame.pixels.len() as u64;
                         let send_started = Instant::now();
                         match fragment_display_frame(&display_frame) {
