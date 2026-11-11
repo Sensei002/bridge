@@ -297,22 +297,46 @@ HRESULT Direct3DDevice::Init()
 #pragma region SwapChainProcessor
 
 SwapChainProcessor::SwapChainProcessor(IDDCX_SWAPCHAIN hSwapChain, shared_ptr<Direct3DDevice> Device, HANDLE NewFrameEvent)
-    : m_hSwapChain(hSwapChain), m_Device(Device), m_hAvailableBufferEvent(NewFrameEvent)
+    : m_hSwapChain(hSwapChain), m_Device(std::move(Device)), m_hAvailableBufferEvent(NewFrameEvent)
 {
-    m_hTerminateEvent.Attach(CreateEvent(nullptr, FALSE, FALSE, nullptr));
+}
 
-    // Immediately create and run the swap-chain processing thread, passing 'this' as the thread parameter
+NTSTATUS SwapChainProcessor::Start()
+{
+    // The frame event is owned by IddCx; it must be valid for the entire worker lifetime.
+    if (m_hSwapChain == nullptr || m_hAvailableBufferEvent == nullptr || !m_Device)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    m_hTerminateEvent.Attach(CreateEvent(nullptr, FALSE, FALSE, nullptr));
+    if (!m_hTerminateEvent.Get())
+    {
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    // Start only after all resources are ready so callbacks never report a live worker
+    // whose thread failed to start.
     m_hThread.Attach(CreateThread(nullptr, 0, RunThread, this, 0, nullptr));
+    if (!m_hThread.Get())
+    {
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    return STATUS_SUCCESS;
 }
 
 SwapChainProcessor::~SwapChainProcessor()
 {
-    // Alert the swap-chain processing thread to terminate
-    SetEvent(m_hTerminateEvent.Get());
-
+    // A successfully started worker always has a termination event and thread.
     if (m_hThread.Get())
     {
-        // Wait for the thread to terminate
+        if (m_hTerminateEvent.Get())
+        {
+            SetEvent(m_hTerminateEvent.Get());
+        }
+
+        // Wait until Run() has released the swap-chain before destroying this object.
         WaitForSingleObject(m_hThread.Get(), INFINITE);
     }
 }
@@ -337,7 +361,10 @@ void SwapChainProcessor::Run()
     WdfObjectDelete((WDFOBJECT)m_hSwapChain);
     m_hSwapChain = nullptr;
 
-    AvRevertMmThreadCharacteristics(AvTaskHandle);
+    if (AvTaskHandle)
+    {
+        AvRevertMmThreadCharacteristics(AvTaskHandle);
+    }
 }
 
 void SwapChainProcessor::RunCore()
@@ -390,8 +417,11 @@ void SwapChainProcessor::RunCore()
             }
             else
             {
-                // The wait was cancelled or something unexpected happened
-                hr = HRESULT_FROM_WIN32(WaitResult);
+                // Preserve the actual Win32 failure instead of treating WAIT_FAILED
+                // (0xFFFFFFFF) as a Win32 error code.
+                hr = (WaitResult == WAIT_FAILED)
+                    ? HRESULT_FROM_WIN32(GetLastError())
+                    : E_UNEXPECTED;
                 break;
             }
         }
@@ -591,22 +621,32 @@ IndirectMonitorContext::~IndirectMonitorContext()
     m_ProcessingThread.reset();
 }
 
-void IndirectMonitorContext::AssignSwapChain(IDDCX_SWAPCHAIN SwapChain, LUID RenderAdapter, HANDLE NewFrameEvent)
+NTSTATUS IndirectMonitorContext::AssignSwapChain(IDDCX_SWAPCHAIN SwapChain, LUID RenderAdapter, HANDLE NewFrameEvent)
 {
+    // Stop the previous worker before replacing its swap-chain.
     m_ProcessingThread.reset();
 
     auto Device = make_shared<Direct3DDevice>(RenderAdapter);
-    if (FAILED(Device->Init()))
+    HRESULT Hr = Device->Init();
+    if (FAILED(Hr))
     {
-        // It's important to delete the swap-chain if D3D initialization fails, so that the OS knows to generate a new
-        // swap-chain and try again.
+        // Delete the failed swap-chain so IddCx can provide a fresh one after
+        // the transient adapter/device failure is resolved.
         WdfObjectDelete(SwapChain);
+        return STATUS_DEVICE_NOT_READY;
     }
-    else
+
+    auto Processor = make_unique<SwapChainProcessor>(SwapChain, Device, NewFrameEvent);
+    NTSTATUS Status = Processor->Start();
+    if (!NT_SUCCESS(Status))
     {
-        // Create a new swap-chain processing thread
-        m_ProcessingThread.reset(new SwapChainProcessor(SwapChain, Device, NewFrameEvent));
+        // Start() guarantees that no worker owns the swap-chain on failure.
+        WdfObjectDelete(SwapChain);
+        return Status;
     }
+
+    m_ProcessingThread = std::move(Processor);
+    return STATUS_SUCCESS;
 }
 
 void IndirectMonitorContext::UnassignSwapChain()
@@ -765,8 +805,17 @@ _Use_decl_annotations_
 NTSTATUS IddSampleMonitorAssignSwapChain(IDDCX_MONITOR MonitorObject, const IDARG_IN_SETSWAPCHAIN* pInArgs)
 {
     auto* pMonitorContextWrapper = WdfObjectGet_IndirectMonitorContextWrapper(MonitorObject);
-    pMonitorContextWrapper->pContext->AssignSwapChain(pInArgs->hSwapChain, pInArgs->RenderAdapterLuid, pInArgs->hNextSurfaceAvailable);
-    return STATUS_SUCCESS;
+    if (pMonitorContextWrapper == nullptr || pMonitorContextWrapper->pContext == nullptr)
+    {
+        WdfObjectDelete(pInArgs->hSwapChain);
+        return STATUS_DEVICE_NOT_READY;
+    }
+
+    return pMonitorContextWrapper->pContext->AssignSwapChain(
+        pInArgs->hSwapChain,
+        pInArgs->RenderAdapterLuid,
+        pInArgs->hNextSurfaceAvailable
+    );
 }
 
 _Use_decl_annotations_
