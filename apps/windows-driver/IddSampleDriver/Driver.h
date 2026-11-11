@@ -63,6 +63,7 @@ namespace Microsoft
         {
         public:
             SwapChainProcessor(IDDCX_SWAPCHAIN hSwapChain, std::shared_ptr<Direct3DDevice> Device, HANDLE NewFrameEvent);
+            NTSTATUS Start();
             ~SwapChainProcessor();
 
         private:
@@ -107,7 +108,7 @@ namespace Microsoft
             IndirectMonitorContext(_In_ IDDCX_MONITOR Monitor);
             virtual ~IndirectMonitorContext();
 
-            void AssignSwapChain(IDDCX_SWAPCHAIN SwapChain, LUID RenderAdapter, HANDLE NewFrameEvent);
+            NTSTATUS AssignSwapChain(IDDCX_SWAPCHAIN SwapChain, LUID RenderAdapter, HANDLE NewFrameEvent);
             void UnassignSwapChain();
 
         private:
