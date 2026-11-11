@@ -23,23 +23,23 @@ class EncodedVideoFrameAssemblerTest {
     @Test
     fun firstAccessUnitDoesNotReportGap() {
         val assembler = EncodedVideoFrameAssembler()
-        val frame = requireNotNull(assembler.push(packet(1)))
+        val frame = requireNotNull(assembler.push(packet(1), receivedAtElapsedRealtimeNs = 0L))
         assertFalse(frame.sequenceGap)
     }
 
     @Test
     fun contiguousAccessUnitsDoNotReportGap() {
         val assembler = EncodedVideoFrameAssembler()
-        assembler.push(packet(1))
-        val frame = requireNotNull(assembler.push(packet(2)))
+        assembler.push(packet(1), receivedAtElapsedRealtimeNs = 0L)
+        val frame = requireNotNull(assembler.push(packet(2), receivedAtElapsedRealtimeNs = 0L))
         assertFalse(frame.sequenceGap)
     }
 
     @Test
     fun skippedAccessUnitRequestsRecoveryThroughGapFlag() {
         val assembler = EncodedVideoFrameAssembler()
-        assembler.push(packet(1))
-        val frame = requireNotNull(assembler.push(packet(3)))
+        assembler.push(packet(1), receivedAtElapsedRealtimeNs = 0L)
+        val frame = requireNotNull(assembler.push(packet(3), receivedAtElapsedRealtimeNs = 0L))
         assertTrue(frame.sequenceGap)
     }
 }
