@@ -17,6 +17,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.nio.ByteBuffer
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
@@ -59,6 +60,7 @@ internal fun AvcSurfaceRenderer(
         onDispose { decoder.close() }
     }
 }
+
 
 private class AvcSurfaceDecoder(
     private val onStatus: (String) -> Unit,
@@ -115,12 +117,23 @@ private class AvcSurfaceDecoder(
         val outputSurface = surface
         if (outputSurface == null || !outputSurface.isValid) return
 
-        if (codec == null || configuredWidth != frame.width || configuredHeight != frame.height) {
+        if (codec != null && (configuredWidth != frame.width || configuredHeight != frame.height)) {
             releaseCodec()
+        }
+
+        if (codec == null) {
+            if (!frame.keyframe) return
+            val parameterSets = AvcAnnexBParser.extract(frame.bitstream)
+            if (parameterSets == null) {
+                postStatus("Received an H.264 IDR frame without Annex-B SPS/PPS; waiting for a configured keyframe.")
+                return
+            }
             try {
                 val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, frame.width, frame.height).apply {
                     setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, frame.bitstream.size.coerceAtLeast(64 * 1024))
                     setInteger(MediaFormat.KEY_FRAME_RATE, 60)
+                    setByteBuffer("csd-0", ByteBuffer.wrap(parameterSets.sps))
+                    setByteBuffer("csd-1", ByteBuffer.wrap(parameterSets.pps))
                 }
                 codec = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC).also {
                     it.configure(format, outputSurface, null, 0)
@@ -129,7 +142,7 @@ private class AvcSurfaceDecoder(
                 configuredWidth = frame.width
                 configuredHeight = frame.height
                 waitingForKeyframe = true
-                postStatus("MediaCodec initialized for ${frame.width}×${frame.height}; waiting for an IDR keyframe.")
+                postStatus("MediaCodec configured with SPS/PPS for ${frame.width}×${frame.height}; starting at IDR.")
             } catch (error: Exception) {
                 releaseCodec()
                 postRendered(false)
