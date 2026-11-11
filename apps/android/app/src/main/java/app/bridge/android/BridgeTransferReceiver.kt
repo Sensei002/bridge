@@ -15,6 +15,8 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
@@ -45,6 +47,7 @@ private class DisplayFrameAssembler {
     private var active: Header? = null
     private var pixels: ByteArray? = null
     private var received = 0
+    private var lastCompletedSequence = 0L
 
     fun reset() {
         active = null
@@ -75,6 +78,7 @@ private class DisplayFrameAssembler {
             }
             if (offset == 0) {
                 require(active == null) { "A new frame arrived before the previous frame completed." }
+                require(header.sequence > lastCompletedSequence) { "Display-frame sequence is stale or duplicated." }
                 active = header
                 pixels = ByteArray(header.totalBytes)
                 received = 0
@@ -84,6 +88,7 @@ private class DisplayFrameAssembler {
             received += count
             if (received == header.totalBytes) {
                 val completed = requireNotNull(pixels)
+                lastCompletedSequence = header.sequence
                 reset()
                 return BridgeDisplayFrame(
                     deviceId = "", sequence = header.sequence, width = header.width,
@@ -96,6 +101,51 @@ private class DisplayFrameAssembler {
             reset()
             throw error
         }
+    }
+}
+
+
+/**
+ * Keeps at most one pending UI update per authenticated session. If rendering
+ * falls behind the network reader, newer complete frames replace older ones
+ * instead of building an unbounded main-thread callback backlog.
+ */
+internal class LatestDisplayFrameDispatcher(
+    private val handler: Handler,
+    private val onFrame: (BridgeDisplayFrame) -> Unit
+) {
+    private val latest = AtomicReference<BridgeDisplayFrame?>(null)
+    private val scheduled = AtomicBoolean(false)
+    @Volatile private var closed = false
+
+    private val drain = object : Runnable {
+        override fun run() {
+            try {
+                if (closed) {
+                    latest.set(null)
+                } else {
+                    latest.getAndSet(null)?.let(onFrame)
+                }
+            } finally {
+                scheduled.set(false)
+                if (!closed && latest.get() != null && scheduled.compareAndSet(false, true)) {
+                    if (!handler.post(this)) scheduled.set(false)
+                }
+            }
+        }
+    }
+
+    fun offer(frame: BridgeDisplayFrame) {
+        if (closed) return
+        latest.set(frame)
+        if (scheduled.compareAndSet(false, true) && !handler.post(drain)) {
+            scheduled.set(false)
+        }
+    }
+
+    fun close() {
+        closed = true
+        latest.set(null)
     }
 }
 
@@ -129,11 +179,14 @@ internal class BridgeTransferReceiver(
     private val transferLocks = ConcurrentHashMap<Long, ReentrantLock>()
     private val cancellations = ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicBoolean>()
     private val displayInputSequence = java.util.concurrent.atomic.AtomicLong(0)
+    private val displayDispatchers = ConcurrentHashMap<Long, LatestDisplayFrameDispatcher>()
 
     fun attach(deviceId: String, handle: Long, allowDisplayAttestation: Boolean = false) {
         if (readers.containsKey(handle)) return
         val queue = LinkedBlockingQueue<ByteArray>(8)
         val displayAssembler = DisplayFrameAssembler()
+        val displayDispatcher = LatestDisplayFrameDispatcher(main, onDisplayFrame)
+        displayDispatchers.put(handle, displayDispatcher)?.close()
         queues[handle] = queue
         val thread = Thread({
             try {
@@ -147,9 +200,7 @@ internal class BridgeTransferReceiver(
                     if ((packet[0].toInt() and 0xff) == DISPLAY_FRAME_TAG) {
                         try {
                             displayAssembler.push(packet)?.let { frame ->
-                                main.post {
-                                    onDisplayFrame(frame.copy(deviceId = deviceId))
-                                }
+                                displayDispatcher.offer(frame.copy(deviceId = deviceId))
                             }
                         } catch (error: Exception) {
                             postStatus("Dropped invalid second-screen frame: ${error.message}")
@@ -234,6 +285,8 @@ internal class BridgeTransferReceiver(
             } catch (error: Exception) {
                 if (!Thread.currentThread().isInterrupted) postStatus("Transfer connection ended: ${error.message}")
             } finally {
+                displayDispatcher.close()
+                displayDispatchers.remove(handle, displayDispatcher)
                 queues.remove(handle, queue)
                 readers.remove(handle, Thread.currentThread())
                 onSessionEnded(deviceId, handle)
@@ -516,6 +569,8 @@ internal class BridgeTransferReceiver(
     }
 
     fun stop() {
+        displayDispatchers.values.forEach { it.close() }
+        displayDispatchers.clear()
         readers.values.forEach { it.interrupt() }
         readers.clear()
         queues.clear()
