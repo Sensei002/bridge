@@ -655,6 +655,14 @@ NTSTATUS IndirectDeviceContext::DisconnectMonitor()
     return Status;
 }
 
+NTSTATUS IndirectDeviceContext::QueryLatestFrameHeader(BRIDGE_DISPLAY_FRAME_HEADER& Header)
+{
+    std::lock_guard<std::mutex> lock(m_FrameLock);
+    if (m_LatestFrame.empty()) return STATUS_NO_MORE_ENTRIES;
+    Header = m_LatestFrameHeader;
+    return STATUS_SUCCESS;
+}
+
 NTSTATUS IndirectDeviceContext::CopyLatestFrame(PVOID Buffer, size_t BufferLength, size_t* BytesWritten)
 {
     if (BytesWritten == nullptr) return STATUS_INVALID_PARAMETER;
@@ -794,6 +802,17 @@ VOID IddSampleDeviceIoControl(WDFDEVICE Device, WDFREQUEST Request, size_t Outpu
         break;
     case IOCTL_BRIDGE_DISPLAY_DISCONNECT:
         Status = (InputBufferLength == 0 && OutputBufferLength == 0) ? DeviceContext->DisconnectMonitor() : STATUS_INVALID_BUFFER_SIZE;
+        break;
+    case IOCTL_BRIDGE_DISPLAY_QUERY_FRAME:
+        if (InputBufferLength != 0 || OutputBufferLength < sizeof(BRIDGE_DISPLAY_FRAME_HEADER)) { Status = STATUS_BUFFER_TOO_SMALL; break; }
+        else {
+            PBRIDGE_DISPLAY_FRAME_HEADER pHeader = nullptr;
+            Status = WdfRequestRetrieveOutputBuffer(Request, sizeof(BRIDGE_DISPLAY_FRAME_HEADER), reinterpret_cast<PVOID*>(&pHeader), nullptr);
+            if (NT_SUCCESS(Status)) {
+                Status = DeviceContext->QueryLatestFrameHeader(*pHeader);
+                if (NT_SUCCESS(Status)) { WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, sizeof(BRIDGE_DISPLAY_FRAME_HEADER)); return; }
+            }
+        }
         break;
     case IOCTL_BRIDGE_DISPLAY_READ_FRAME:
         if (InputBufferLength != 0) { Status = STATUS_INVALID_BUFFER_SIZE; break; }
