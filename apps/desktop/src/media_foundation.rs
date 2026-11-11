@@ -398,7 +398,6 @@ impl PersistentH264Encoder {
                         .map_err(|error| format!("{name}: activation failed: {error}"))?;
                     if let Err(error) = unsafe { configure_nv12_h264_profile(&transform) } {
                         drop(transform);
-                        let _ = unsafe { activation.ShutdownObject() };
                         return Err(format!("{name}: {error}"));
                     }
                     unsafe {
@@ -416,6 +415,7 @@ impl PersistentH264Encoder {
                     }
                     Err(error) => {
                         last_error = Some(error);
+                        let _ = unsafe { activation.ShutdownObject() };
                         drop(activation);
                     }
                 }
