@@ -256,7 +256,7 @@ pub fn read_latest_frame() -> io::Result<CapturedFrame> {
                 }
                 return Err(error);
             }
-            if returned as usize < FRAME_HEADER_SIZE || returned as usize > packet.len() {
+            if (returned as usize) < FRAME_HEADER_SIZE || (returned as usize) > packet.len() {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "driver returned an invalid frame packet length"));
             }
             packet.truncate(returned as usize);
