@@ -30,7 +30,7 @@ class LatestFrameDispatcherTest {
     fun replacesQueuedFramesWithTheLatestFrame() {
         val queue = TestQueue()
         val received = mutableListOf<Int>()
-        val dispatcher = LatestFrameDispatcher<Int>(queue::post, received::add)
+        val dispatcher = LatestFrameDispatcher<Int>(queue::post) { frame -> received.add(frame) }
 
         dispatcher.offer(1)
         dispatcher.offer(2)
