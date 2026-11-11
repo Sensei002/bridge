@@ -17,6 +17,7 @@
 #include <mutex>
 #include <atomic>
 #include <cstdint>
+#include <cstring>
 
 #include "BridgeDisplayControl.h"
 
@@ -121,7 +122,6 @@ namespace Microsoft
 
             NTSTATUS AssignSwapChain(IDDCX_SWAPCHAIN SwapChain, LUID RenderAdapter, HANDLE NewFrameEvent);
             void UnassignSwapChain();
-            void SetFrameSink(IndirectDeviceContext* FrameSink);
 
         private:
             IDDCX_MONITOR m_Monitor;
