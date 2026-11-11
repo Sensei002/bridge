@@ -89,3 +89,53 @@ class AvcDecoderRecoveryStateTest {
         assertNull(decision.parameterSets)
     }
 }
+
+
+class AvcKeyframeRequestGateTest {
+    @Test
+    fun allowsTheFirstRecoveryRequest() {
+        val gate = AvcKeyframeRequestGate()
+
+        assertTrue(gate.shouldRequest(10_000L))
+    }
+
+    @Test
+    fun suppressesRepeatedRequestsInsideTheCooldown() {
+        val gate = AvcKeyframeRequestGate(minimumIntervalMs = 1_000L)
+
+        assertTrue(gate.shouldRequest(5_000L))
+        assertFalse(gate.shouldRequest(5_001L))
+        assertFalse(gate.shouldRequest(5_999L))
+    }
+
+    @Test
+    fun allowsAnotherRequestAtTheCooldownBoundary() {
+        val gate = AvcKeyframeRequestGate(minimumIntervalMs = 1_000L)
+
+        assertTrue(gate.shouldRequest(5_000L))
+        assertTrue(gate.shouldRequest(6_000L))
+    }
+
+    @Test
+    fun resetAllowsAnImmediateNewRequest() {
+        val gate = AvcKeyframeRequestGate(minimumIntervalMs = 1_000L)
+        assertTrue(gate.shouldRequest(5_000L))
+
+        gate.reset()
+
+        assertTrue(gate.shouldRequest(5_001L))
+    }
+
+    @Test
+    fun monotonicClockRegressionDoesNotLockOutRecovery() {
+        val gate = AvcKeyframeRequestGate(minimumIntervalMs = 1_000L)
+        assertTrue(gate.shouldRequest(5_000L))
+
+        assertTrue(gate.shouldRequest(4_000L))
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun rejectsNonPositiveCooldown() {
+        AvcKeyframeRequestGate(minimumIntervalMs = 0L)
+    }
+}
