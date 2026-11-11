@@ -1,6 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 #[cfg(windows)]
+mod media_foundation;
+#[cfg(windows)]
 mod display_service;
 #[cfg(windows)]
 mod identity_store;
@@ -550,9 +552,29 @@ fn start_display_frame_stream(
     stop: Arc<std::sync::atomic::AtomicBool>,
     events: Sender<DisplayLeaseEvent>,
 ) -> Result<(), String> {
+    // Initialize Media Foundation on the caller thread, before the stream
+    // worker starts. The runtime guard is moved into that worker and shut down
+    // after the stream exits. BGRA streaming remains the active fallback path.
+    let media_foundation = match media_foundation::MediaFoundationRuntime::start() {
+        Ok(runtime) => {
+            let _ = events.send(DisplayLeaseEvent::Status {
+                session_key: session_key.clone(),
+                message: "Media Foundation runtime ready; H.264 encoder discovery is pending. Using BGRA fallback.".into(),
+            });
+            runtime
+        }
+        Err(error) => {
+            let _ = events.send(DisplayLeaseEvent::Status {
+                session_key: session_key.clone(),
+                message: format!("{error}. Continuing with BGRA fallback."),
+            });
+            return Err(error);
+        }
+    };
     thread::Builder::new()
         .name("bridge-display-frame-stream".into())
         .spawn(move || {
+            let _media_foundation = media_foundation;
             let mut last_sequence = 0_u64;
             let mut announced = false;
             let mut stats_window_started = Instant::now();
