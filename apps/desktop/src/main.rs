@@ -17,7 +17,7 @@ use bridge_core::trust::{SasConfirmation, TrustStore};
 #[cfg(windows)]
 use bridge_protocol::{DeviceDescriptor, DeviceId, Platform, PROTOCOL_VERSION};
 #[cfg(windows)]
-use bridge_transfer::{decode_packet, encode_packet, offer_for_file, FileOffer, IncomingFile, OutgoingFile, TransferControl, TransferPacket};
+use bridge_transfer::{decode_packet, encode_packet, fragment_display_frame, offer_for_file, DisplayFrame, FileOffer, IncomingFile, OutgoingFile, TransferControl, TransferPacket};
 #[cfg(windows)]
 use std::net::TcpListener;
 #[cfg(windows)]
@@ -527,6 +527,88 @@ fn start_display_lease_lifecycle(
 }
 
 #[cfg(windows)]
+fn start_display_frame_stream(
+    session: Arc<DesktopSession>,
+    session_key: String,
+    lease: display_service::ServiceLease,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    events: Sender<DisplayLeaseEvent>,
+) -> Result<(), String> {
+    thread::Builder::new()
+        .name("bridge-display-frame-stream".into())
+        .spawn(move || {
+            let mut last_sequence = 0_u64;
+            let mut announced = false;
+            while !stop.load(Ordering::Acquire) && session.is_alive() {
+                let started = Instant::now();
+                match display_service::read_frame_with_lease(&lease, &session.remote_fingerprint) {
+                    Ok(frame) if frame.sequence > last_sequence => {
+                        let display_frame = DisplayFrame {
+                            sequence: frame.sequence,
+                            width: frame.width,
+                            height: frame.height,
+                            stride: frame.stride,
+                            timestamp_ns: frame.timestamp_ns,
+                            pixels: frame.pixels,
+                        };
+                        match fragment_display_frame(&display_frame) {
+                            Ok(packets) => {
+                                let mut sent_all = true;
+                                for packet in packets {
+                                    if stop.load(Ordering::Acquire) || !session.is_alive() {
+                                        sent_all = false;
+                                        break;
+                                    }
+                                    if let Err(error) = session.send(&packet) {
+                                        let _ = events.send(DisplayLeaseEvent::Status {
+                                            session_key: session_key.clone(),
+                                            message: format!("Second screen stream stopped: {error}"),
+                                        });
+                                        stop.store(true, Ordering::Release);
+                                        sent_all = false;
+                                        break;
+                                    }
+                                }
+                                if sent_all {
+                                    last_sequence = display_frame.sequence;
+                                    if !announced {
+                                        announced = true;
+                                        let _ = events.send(DisplayLeaseEvent::Status {
+                                            session_key: session_key.clone(),
+                                            message: format!(
+                                                "Second screen streaming frames to Android ({}×{}).",
+                                                display_frame.width, display_frame.height
+                                            ),
+                                        });
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                let _ = events.send(DisplayLeaseEvent::Status {
+                                    session_key: session_key.clone(),
+                                    message: format!("Could not encode second-screen frame: {error}"),
+                                });
+                                stop.store(true, Ordering::Release);
+                            }
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(_) => {
+                        // The capture callback can briefly have no complete frame while
+                        // the indirect display is starting or changing modes. Retry.
+                    }
+                }
+                let elapsed = started.elapsed();
+                if elapsed < Duration::from_millis(33) {
+                    thread::sleep(Duration::from_millis(33) - elapsed);
+                }
+            }
+        })
+        .map(|_| ())
+        .map_err(|error| format!("could not start second-screen frame stream: {error}"))
+}
+
+#[cfg(windows)]
 fn start_display_driver_operation(
     session: Arc<DesktopSession>,
     session_key: String,
@@ -548,7 +630,22 @@ fn start_display_driver_operation(
             };
 
             let message = match result {
-                Ok(()) if connect => "Windows display driver accepted the lease-authorized CONNECT request.".to_string(),
+                Ok(()) if connect => {
+                    let message = "Windows display driver accepted the lease-authorized CONNECT request.".to_string();
+                    if let Err(error) = start_display_frame_stream(
+                        Arc::clone(&session),
+                        session_key.clone(),
+                        lease.clone(),
+                        Arc::clone(&stop),
+                        events.clone(),
+                    ) {
+                        let _ = events.send(DisplayLeaseEvent::OperationStatus {
+                            session_key: session_key.clone(),
+                            message: format!("Display connected, but frame streaming could not start: {error}"),
+                        });
+                    }
+                    message
+                },
                 Ok(()) => {
                     stop.store(true, Ordering::Release);
                     if let Ok(mut active) = lease_state.lock() {
