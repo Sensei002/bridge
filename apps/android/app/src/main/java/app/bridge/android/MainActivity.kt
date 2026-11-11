@@ -477,7 +477,6 @@ private fun HeaderBar() {
 }
 
 @Composable
-@Composable
 private fun SecondScreenView(frame: BridgeDisplayFrame?, connectedDevices: Int) {
     ScreenContent {
         Eyebrow("WIRELESS DISPLAY")
@@ -508,6 +507,7 @@ private fun SecondScreenView(frame: BridgeDisplayFrame?, connectedDevices: Int) 
     }
 }
 
+@Composable
 private fun BottomNavigation(selected: BridgeTab, onSelect: (BridgeTab) -> Unit) {
     Row(
         modifier = Modifier.fillMaxWidth().background(Sidebar).padding(horizontal = 4.dp, vertical = 7.dp),
