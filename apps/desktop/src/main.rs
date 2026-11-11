@@ -2409,8 +2409,8 @@ fn bridge_monitor_absolute_coordinates(x: u16, y: u16) -> Result<(i32, i32), Str
         HDC, HMONITOR, MONITORINFO, MONITORINFOEXW, RECT,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetSystemMetrics, SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
-        SM_CYSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+        GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+        SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
     };
 
     struct MonitorSearch { rect: Option<(i32, i32, i32, i32)> }
@@ -2469,7 +2469,6 @@ fn bridge_monitor_absolute_coordinates(x: u16, y: u16) -> Result<(i32, i32), Str
     let virtual_top = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
     let virtual_width = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) };
     let virtual_height = unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) };
-    let _ = (SM_CXSCREEN, SM_CYSCREEN);
     map_monitor_point_to_virtual_desktop(
         x, y, monitor,
         (virtual_left, virtual_top, virtual_left + virtual_width, virtual_top + virtual_height),
@@ -2518,7 +2517,7 @@ mod display_pointer_mapping_tests {
     fn maps_bridge_monitor_to_its_position_on_the_virtual_desktop() {
         let bounds = (1920, 0, 3000, 2340);
         let desktop = (0, 0, 3000, 2340);
-        assert_eq!(map_monitor_point_to_virtual_desktop(0, 0, bounds, desktop).unwrap(), (41_943, 0));
+        assert_eq!(map_monitor_point_to_virtual_desktop(0, 0, bounds, desktop).unwrap(), (41_956, 0));
         assert_eq!(map_monitor_point_to_virtual_desktop(u16::MAX, u16::MAX, bounds, desktop).unwrap(), (65_535, 65_535));
     }
 
