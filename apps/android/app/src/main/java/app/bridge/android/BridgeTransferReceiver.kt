@@ -209,14 +209,17 @@ private class DisplayFrameAssembler {
 
 /**
  * Keeps at most one pending UI update per authenticated session. If rendering
- * falls behind the network reader, newer complete frames replace older ones
- * instead of building an unbounded main-thread callback backlog.
+ * falls behind the main thread, newer complete frames replace older ones
+ * instead of building an unbounded callback backlog.
+ *
+ * The posting function is injected so the coalescing behavior can be tested
+ * without Android's Looper in local JVM tests.
  */
-internal class LatestDisplayFrameDispatcher(
-    private val handler: Handler,
-    private val onFrame: (BridgeDisplayFrame) -> Unit
+internal class LatestFrameDispatcher<T>(
+    private val post: (Runnable) -> Boolean,
+    private val onFrame: (T) -> Unit
 ) {
-    private val latest = AtomicReference<BridgeDisplayFrame?>(null)
+    private val latest = AtomicReference<T?>(null)
     private val scheduled = AtomicBoolean(false)
     @Volatile private var closed = false
 
@@ -231,16 +234,16 @@ internal class LatestDisplayFrameDispatcher(
             } finally {
                 scheduled.set(false)
                 if (!closed && latest.get() != null && scheduled.compareAndSet(false, true)) {
-                    if (!handler.post(this)) scheduled.set(false)
+                    if (!post(this)) scheduled.set(false)
                 }
             }
         }
     }
 
-    fun offer(frame: BridgeDisplayFrame) {
+    fun offer(frame: T) {
         if (closed) return
         latest.set(frame)
-        if (scheduled.compareAndSet(false, true) && !handler.post(drain)) {
+        if (scheduled.compareAndSet(false, true) && !post(drain)) {
             scheduled.set(false)
         }
     }
@@ -282,15 +285,18 @@ internal class BridgeTransferReceiver(
     private val transferLocks = ConcurrentHashMap<Long, ReentrantLock>()
     private val cancellations = ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicBoolean>()
     private val displayInputSequence = java.util.concurrent.atomic.AtomicLong(0)
-    private val displayDispatchers = ConcurrentHashMap<Long, LatestDisplayFrameDispatcher>()
+    private val displayDispatchers = ConcurrentHashMap<Long, LatestFrameDispatcher<BridgeDisplayFrame>>()
+    private val encodedVideoDispatchers = ConcurrentHashMap<Long, LatestFrameDispatcher<BridgeEncodedVideoFrame>>()
 
     fun attach(deviceId: String, handle: Long, allowDisplayAttestation: Boolean = false) {
         if (readers.containsKey(handle)) return
         val queue = LinkedBlockingQueue<ByteArray>(8)
         val displayAssembler = DisplayFrameAssembler()
         val encodedVideoAssembler = EncodedVideoFrameAssembler()
-        val displayDispatcher = LatestDisplayFrameDispatcher(main, onDisplayFrame)
+        val displayDispatcher = LatestFrameDispatcher<BridgeDisplayFrame>(main::post, onDisplayFrame)
+        val encodedVideoDispatcher = LatestFrameDispatcher<BridgeEncodedVideoFrame>(main::post, onEncodedVideoFrame)
         displayDispatchers.put(handle, displayDispatcher)?.close()
+        encodedVideoDispatchers.put(handle, encodedVideoDispatcher)?.close()
         queues[handle] = queue
         val thread = Thread({
             try {
@@ -314,7 +320,7 @@ internal class BridgeTransferReceiver(
                     if ((packet[0].toInt() and 0xff) == ENCODED_VIDEO_TAG) {
                         try {
                             encodedVideoAssembler.push(packet)?.let { frame ->
-                                main.post { onEncodedVideoFrame(frame.copy(deviceId = deviceId)) }
+                                encodedVideoDispatcher.offer(frame.copy(deviceId = deviceId))
                             }
                         } catch (error: Exception) {
                             postStatus("Dropped invalid H.264 access unit: ${error.message}")
@@ -400,7 +406,9 @@ internal class BridgeTransferReceiver(
                 if (!Thread.currentThread().isInterrupted) postStatus("Transfer connection ended: ${error.message}")
             } finally {
                 displayDispatcher.close()
+                encodedVideoDispatcher.close()
                 displayDispatchers.remove(handle, displayDispatcher)
+                encodedVideoDispatchers.remove(handle, encodedVideoDispatcher)
                 queues.remove(handle, queue)
                 readers.remove(handle, Thread.currentThread())
                 onSessionEnded(deviceId, handle)
