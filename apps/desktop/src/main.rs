@@ -555,10 +555,16 @@ fn start_display_frame_stream(
         .spawn(move || {
             let mut last_sequence = 0_u64;
             let mut announced = false;
+            let mut stats_window_started = Instant::now();
+            let mut frames_sent_window = 0_u64;
+            let mut bytes_sent_window = 0_u64;
+            let mut superseded_frames_window = 0_u64;
+            let mut send_duration_window = Duration::ZERO;
             while !stop.load(Ordering::Acquire) && session.is_alive() {
                 let started = Instant::now();
                 match display_service::read_frame_with_lease(&lease, &session.remote_fingerprint) {
                     Ok(frame) if frame.sequence > last_sequence => {
+                        let superseded_frames = frame.sequence.saturating_sub(last_sequence).saturating_sub(1);
                         let display_frame = DisplayFrame {
                             sequence: frame.sequence,
                             width: frame.width,
@@ -567,6 +573,8 @@ fn start_display_frame_stream(
                             timestamp_ns: frame.timestamp_ns,
                             pixels: frame.pixels,
                         };
+                        let frame_bytes = display_frame.pixels.len() as u64;
+                        let send_started = Instant::now();
                         match fragment_display_frame(&display_frame) {
                             Ok(packets) => {
                                 let mut sent_all = true;
@@ -587,6 +595,10 @@ fn start_display_frame_stream(
                                 }
                                 if sent_all {
                                     last_sequence = display_frame.sequence;
+                                    frames_sent_window += 1;
+                                    bytes_sent_window = bytes_sent_window.saturating_add(frame_bytes);
+                                    superseded_frames_window = superseded_frames_window.saturating_add(superseded_frames);
+                                    send_duration_window += send_started.elapsed();
                                     if !announced {
                                         announced = true;
                                         let _ = events.send(DisplayLeaseEvent::Status {
@@ -613,6 +625,27 @@ fn start_display_frame_stream(
                         // The capture callback can briefly have no complete frame while
                         // the indirect display is starting or changing modes. Retry.
                     }
+                }
+                let stats_elapsed = stats_window_started.elapsed();
+                if stats_elapsed >= Duration::from_secs(1) {
+                    if frames_sent_window > 0 {
+                        let seconds = stats_elapsed.as_secs_f64().max(0.001);
+                        let fps = frames_sent_window as f64 / seconds;
+                        let mbps = bytes_sent_window as f64 * 8.0 / seconds / 1_000_000.0;
+                        let average_send_ms = send_duration_window.as_secs_f64() * 1000.0
+                            / frames_sent_window as f64;
+                        let _ = events.send(DisplayLeaseEvent::Status {
+                            session_key: session_key.clone(),
+                            message: format!(
+                                "Windows sender: {fps:.1} FPS · {mbps:.1} Mbps raw · {superseded_frames_window} capture frames superseded · {average_send_ms:.1} ms/frame send time."
+                            ),
+                        });
+                    }
+                    stats_window_started = Instant::now();
+                    frames_sent_window = 0;
+                    bytes_sent_window = 0;
+                    superseded_frames_window = 0;
+                    send_duration_window = Duration::ZERO;
                 }
                 let elapsed = started.elapsed();
                 if elapsed < Duration::from_millis(33) {
