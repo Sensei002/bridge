@@ -123,3 +123,8 @@ The first physical test target is the currently paired Redmi Note 7 Pro. Start w
 ## Android stalled-frame detection
 
 The Android second-screen UI tracks the age of the most recently completed frame using Android's monotonic elapsed-realtime clock. If no newer frame arrives for 1.5 seconds, both the compact preview and immersive view report a stalled stream and show the elapsed time since the last frame. The last rendered image remains visible for diagnosis; the warning does not claim that the authenticated device session has disconnected. A new frame immediately clears the warning. This is an arrival watchdog, not a decoder-health or end-to-end latency measurement.
+
+
+## Windows frame-sender diagnostics
+
+The Windows desktop sender reports a rolling one-second source-side estimate while frames are successfully delivered through the authenticated session: sent FPS, raw BGRA payload bitrate, the number of capture sequence values superseded before the sender could read them, and average time spent sending each complete frame. The bitrate is raw pixel payload before Noise/TCP framing and is not a measured Wi-Fi wire rate. Superseded sequence values indicate latest-frame replacement between sender polls; they are not evidence of network packet loss. Compare this source estimate with Android's incoming-frame estimate to localize capture, sender, network, and receiver bottlenecks.
