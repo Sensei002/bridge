@@ -41,3 +41,11 @@ The mobile trust stores migrate legacy records where possible and fail closed on
 ## Build model
 
 GitHub Actions owns all compile, test, package, and release jobs. The iOS workflow builds a platform-aware XCFramework with iOS device ARM64 plus universal ARM64/x86_64 Simulator slices. Windows desktop is built directly with Cargo and does not require a browser runtime.
+
+## Windows second-screen video pipeline
+
+The Windows display-frame worker reads lease-authorized BGRA frames from the Bridge Display Service. The authenticated transport currently sends bounded BGRA frame fragments to Android; this remains the production data path in this milestone.
+
+For H.264 preparation, the worker initializes Media Foundation and a COM multithreaded apartment, then creates one synchronous H.264 encoder transform for the lifetime of the stream worker. The transform is configured for 1080×2340 NV12 input and 1080×2340 H.264 output at 60 fps. Each captured BGRA frame is converted to NV12 and submitted to the same transform with monotonically increasing 100 ns timestamps. The worker drains available output before and after each input, limits each drain pass to eight samples, and caps accumulated output to 16 MiB. Input frames are bounded to 64 MiB.
+
+The encoder transform and activation object are released when the stream worker exits. If Media Foundation startup, COM initialization, encoder activation, NV12 conversion, input submission, or output draining fails, the H.264 path is disabled for that stream and authenticated BGRA streaming continues. Encoded access units are currently diagnostic-only: they are not packetized or sent to Android. This milestone validates persistent multi-frame encoder operation at the API/build level, not physical-device playback, bitrate adaptation, keyframe recovery, or end-to-end H.264 delivery. Asynchronous MFTs remain out of scope.
