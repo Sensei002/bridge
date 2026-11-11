@@ -27,6 +27,8 @@ import java.io.File
 import androidx.compose.foundation.Image
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -533,8 +535,6 @@ private fun HeaderBar() {
     }
 }
 
-private val secondScreenActivePointers = mutableSetOf<Int>()
-
 @Composable
 private fun SecondScreenView(
     frame: BridgeDisplayFrame?,
@@ -543,6 +543,8 @@ private fun SecondScreenView(
     onImmersiveChange: (Boolean) -> Unit,
     onDisplayInput: (String, Int, Int, Int, Int) -> Unit
 ) {
+    var imageSize by remember { mutableStateOf(IntSize.Zero) }
+    val activePointers = remember { mutableSetOf<Int>() }
     val bitmap = remember(frame?.sequence, frame?.width, frame?.height) {
         frame?.let {
             Bitmap.createBitmap(it.width, it.height, Bitmap.Config.ARGB_8888).also { image ->
@@ -590,18 +592,17 @@ private fun SecondScreenView(
                         bitmap = bitmap,
                         contentDescription = "Windows secondary display",
                         contentScale = ContentScale.Fit,
-                        modifier = Modifier.fillMaxSize().pointerInteropFilter { event ->
+                        modifier = Modifier.fillMaxSize().onSizeChanged { imageSize = it }.pointerInteropFilter { event ->
                             val currentFrame = frame ?: return@pointerInteropFilter true
                             val imageWidth = currentFrame.width.toFloat()
                             val imageHeight = currentFrame.height.toFloat()
-                            val viewWidth = it.width.toFloat().coerceAtLeast(1f)
-                            val viewHeight = it.height.toFloat().coerceAtLeast(1f)
+                            val viewWidth = imageSize.width.toFloat().coerceAtLeast(1f)
+                            val viewHeight = imageSize.height.toFloat().coerceAtLeast(1f)
                             val scale = minOf(viewWidth / imageWidth, viewHeight / imageHeight)
                             val drawnWidth = imageWidth * scale
                             val drawnHeight = imageHeight * scale
                             val left = (viewWidth - drawnWidth) / 2f
                             val top = (viewHeight - drawnHeight) / 2f
-                            val activePointers = secondScreenActivePointers
                             fun send(index: Int, action: Int) {
                                 val pointerId = event.getPointerId(index)
                                 if (pointerId !in 0..9) return
