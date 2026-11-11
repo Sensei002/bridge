@@ -90,6 +90,25 @@ jobs:
           [IO.File]::WriteAllBytes($pfxPath, $pfxBytes)
           $imported = $null
           $rootThumbprint = $null
+          function Invoke-BoundedCertUtil {
+            param(
+              [Parameter(Mandatory = $true)][string[]]$Arguments,
+              [Parameter(Mandatory = $true)][string]$Operation
+            )
+
+            $certutilPath = Join-Path $env:WINDIR "System32\\certutil.exe"
+            Write-Host "SIGNING CHECKPOINT: starting certutil for $Operation (30-second limit)"
+            $process = Start-Process -FilePath $certutilPath -ArgumentList $Arguments -NoNewWindow -PassThru
+            if (-not $process.WaitForExit(30000)) {
+              Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+              throw "certutil timed out during $Operation after 30 seconds."
+            }
+            if ($process.ExitCode -ne 0) {
+              throw "certutil failed during $Operation (exit $($process.ExitCode))."
+            }
+            Write-Host "SIGNING CHECKPOINT: certutil completed $Operation"
+          }
+
           try {
             Write-Host "SIGNING CHECKPOINT: importing PFX into CurrentUser\\My"
             $imported = Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation "Cert:\CurrentUser\My" -Password $password
@@ -107,7 +126,7 @@ jobs:
             Write-Host "SIGNING CHECKPOINT: certificate identity and EKU validated"
             Export-Certificate -Cert $certificate -FilePath $cerPath -Type CERT | Out-Null
             Write-Host "SIGNING CHECKPOINT: public certificate exported; importing temporary root trust"
-            Import-Certificate -FilePath $cerPath -CertStoreLocation "Cert:\CurrentUser\Root" | Out-Null
+            Invoke-BoundedCertUtil -Arguments @("-user", "-addstore", "-f", "Root", $cerPath) -Operation "temporary root trust import"
             Write-Host "SIGNING CHECKPOINT: temporary root trust import returned"
             $rootThumbprint = $certificate.Thumbprint
 
@@ -145,7 +164,13 @@ jobs:
             Write-Host "Verified Bridge publisher SHA-256: $publisherSha256"
           }
           finally {
-            if ($rootThumbprint) { Remove-Item -Path "Cert:\CurrentUser\Root\$rootThumbprint" -ErrorAction SilentlyContinue }
+            if ($rootThumbprint) {
+              try {
+                Invoke-BoundedCertUtil -Arguments @("-user", "-delstore", "Root", $rootThumbprint) -Operation "temporary root trust cleanup"
+              } catch {
+                Write-Warning "Could not remove temporary root trust: $($_.Exception.Message)"
+              }
+            }
             if ($imported) { foreach ($cert in @($imported)) { Remove-Item -Path "Cert:\CurrentUser\My\$($cert.Thumbprint)" -ErrorAction SilentlyContinue } }
             if (Test-Path $pfxPath) { Remove-Item $pfxPath -Force }
             Remove-Variable pfxBytes -ErrorAction SilentlyContinue
