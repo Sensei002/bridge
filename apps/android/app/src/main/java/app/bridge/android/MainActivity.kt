@@ -5,6 +5,7 @@ import android.view.MotionEvent
 import android.graphics.Bitmap
 import java.nio.ByteBuffer
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.ExperimentalComposeUiApi
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
@@ -535,6 +536,7 @@ private fun HeaderBar() {
     }
 }
 
+@OptIn(ExperimentalComposeUiApi::class)
 @Composable
 private fun SecondScreenView(
     frame: BridgeDisplayFrame?,
