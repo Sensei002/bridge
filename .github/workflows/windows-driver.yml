@@ -149,6 +149,25 @@ jobs:
           $imported = $null
           $rootThumbprint = $null
 
+          function Invoke-BoundedCertUtil {
+            param(
+              [Parameter(Mandatory = $true)][string[]]$Arguments,
+              [Parameter(Mandatory = $true)][string]$Operation
+            )
+
+            $certutilPath = Join-Path $env:WINDIR "System32\\certutil.exe"
+            Write-Host "SIGNING CHECKPOINT: starting certutil for $Operation (30-second limit)"
+            $process = Start-Process -FilePath $certutilPath -ArgumentList $Arguments -NoNewWindow -PassThru
+            if (-not $process.WaitForExit(30000)) {
+              Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+              throw "certutil timed out during $Operation after 30 seconds."
+            }
+            if ($process.ExitCode -ne 0) {
+              throw "certutil failed during $Operation (exit $($process.ExitCode))."
+            }
+            Write-Host "SIGNING CHECKPOINT: certutil completed $Operation"
+          }
+
           try {
             Write-Host "SIGNING CHECKPOINT: starting PFX decode and file write"
             $pfxBytes = [Convert]::FromBase64String($env:BRIDGE_DRIVER_SIGNING_PFX_BASE64)
@@ -170,7 +189,7 @@ jobs:
             Write-Host "SIGNING CHECKPOINT: certificate identity and thumbprint validated"
             Export-Certificate -Cert $signingCert -FilePath $cerPath -Type CERT | Out-Null
             Write-Host "SIGNING CHECKPOINT: public certificate exported; importing temporary root trust"
-            Import-Certificate -FilePath $cerPath -CertStoreLocation "Cert:\CurrentUser\Root" | Out-Null
+            Invoke-BoundedCertUtil -Arguments @("-user", "-addstore", "-f", "Root", $cerPath) -Operation "temporary root trust import"
             Write-Host "SIGNING CHECKPOINT: temporary root trust import returned"
             $rootThumbprint = $signingCert.Thumbprint
 
@@ -221,7 +240,11 @@ jobs:
           }
           finally {
             if ($rootThumbprint) {
-              Remove-Item -Path "Cert:\CurrentUser\Root\$rootThumbprint" -ErrorAction SilentlyContinue
+              try {
+                Invoke-BoundedCertUtil -Arguments @("-user", "-delstore", "Root", $rootThumbprint) -Operation "temporary root trust cleanup"
+              } catch {
+                Write-Warning "Could not remove temporary root trust: $($_.Exception.Message)"
+              }
             }
             if ($imported) {
               foreach ($cert in @($imported)) {
