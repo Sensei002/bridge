@@ -563,10 +563,14 @@ fn start_display_frame_stream(
                         .filter(|encoder| encoder.activation_succeeded).count();
                     let profile_matches = encoders.iter()
                         .filter(|encoder| encoder.supports_nv12_h264_1080x2340_60).count();
+                    let configured = encoders.iter()
+                        .filter(|encoder| encoder.profile_configured).count();
                     let names = encoders.iter().take(3)
                         .map(|encoder| {
-                            if encoder.supports_nv12_h264_1080x2340_60 {
-                                format!("{} (NV12 -> H.264 1080x2340@60 supported)", encoder.friendly_name)
+                            if encoder.profile_configured {
+                                format!("{} (1080x2340@60 NV12 -> H.264 configured)", encoder.friendly_name)
+                            } else if encoder.supports_nv12_h264_1080x2340_60 {
+                                format!("{} (profile accepted; commit failed)", encoder.friendly_name)
                             } else if encoder.activation_succeeded {
                                 format!("{} (activated; target profile unsupported)", encoder.friendly_name)
                             } else {
@@ -578,8 +582,8 @@ fn start_display_frame_stream(
                     let _ = events.send(DisplayLeaseEvent::Status {
                         session_key: session_key.clone(),
                         message: format!(
-                            "Media Foundation: {} H.264 candidate(s), {} activated, {} accept NV12 -> H.264 at 1080x2340@60: {}. BGRA fallback remains active.",
-                            encoders.len(), activated, profile_matches, names
+                            "Media Foundation: {} H.264 candidate(s), {} activated, {} accept and {} configure NV12 -> H.264 at 1080x2340@60: {}. Encoder is shut down after this probe; BGRA remains active.",
+                            encoders.len(), activated, profile_matches, configured, names
                         ),
                     });
                 }
