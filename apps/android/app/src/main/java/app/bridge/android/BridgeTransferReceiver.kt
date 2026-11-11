@@ -90,13 +90,15 @@ internal class EncodedVideoFrameAssembler {
                 height = buffer.int,
                 timestampNs = buffer.long,
                 totalBytes = buffer.int,
-                keyframe = when (buffer.get().toInt() and 0xff) {
-                    0 -> false
-                    1 -> true
-                    else -> error("Invalid encoded-video keyframe flag.")
-                }
+                keyframe = false
             )
             val offset = buffer.int
+            val keyframe = when (buffer.get().toInt() and 0xff) {
+                0 -> false
+                1 -> true
+                else -> error("Invalid encoded-video keyframe flag.")
+            }
+            val validatedHeader = header.copy(keyframe = keyframe)
             val count = packet.size - ENCODED_VIDEO_HEADER_BYTES
             require(header.sequence > 0 && header.width in 1..4096 && header.height in 1..4096 &&
                 header.timestampNs > 0 && header.totalBytes in 1..MAX_ENCODED_VIDEO_BYTES) {
@@ -114,7 +116,7 @@ internal class EncodedVideoFrameAssembler {
                 bitstream = ByteArray(header.totalBytes)
                 received = 0
             }
-            require(active == header && offset == received) {
+            require(active == validatedHeader && offset == received) {
                 "Encoded-video fragments are out of order or inconsistent."
             }
             System.arraycopy(packet, ENCODED_VIDEO_HEADER_BYTES, requireNotNull(bitstream), received, count)
