@@ -727,7 +727,7 @@ fn start_display_frame_stream(
                         // session. BGRA remains the active Android rendering path until
                         // MediaCodec playback and recovery are implemented and validated.
                         for access_unit in encoded_access_units {
-                            let Some(keyframe) = h264_annex_b_keyframe(&access_unit) else {
+                            let Some(keyframe) = h264_annex_b_keyframe(&access_unit.bytes) else {
                                 let _ = events.send(DisplayLeaseEvent::Status {
                                     session_key: session_key.clone(),
                                     message: "H.264 encoder output was not recognizable Annex-B; skipped encoded sample and kept BGRA active.".into(),
@@ -739,9 +739,9 @@ fn start_display_frame_stream(
                                 sequence: h264_sequence,
                                 width: display_frame.width,
                                 height: display_frame.height,
-                                timestamp_ns: display_frame.timestamp_ns.max(1),
+                                timestamp_ns: access_unit.timestamp_100ns.saturating_mul(100).max(1) as u64,
                                 keyframe,
-                                bitstream: access_unit,
+                                bitstream: access_unit.bytes,
                             };
                             match fragment_encoded_video_frame(&encoded_frame) {
                                 Ok(packets) => {
