@@ -158,3 +158,8 @@ The desktop stream startup now enumerates registered Media Foundation video-enco
 ## Windows H.264 encoder activation probe
 
 The encoder diagnostic now attempts to activate each registered H.264-output MFT as an IMFTransform and query its input/output stream counts. Activation failures are retained per candidate rather than aborting discovery of other encoders. Successful transform objects are released and shut down immediately; no frame types are negotiated and no samples are submitted. This confirms activation only, not NV12 input support, hardware acceleration, or successful H.264 bitstream production. BGRA remains the active sender.
+
+
+## Windows NV12-to-H.264 profile negotiation probe
+
+For each successfully activated H.264-output transform, the desktop now constructs test-only Media Foundation media types for NV12 input and H.264 output at 1080×2340, 60 fps, and an 8 Mbps target bitrate. It calls the transform's output/input type setters with MFT_SET_TYPE_TEST_ONLY, so no active type is committed and no frames are processed. Diagnostics distinguish activation from acceptance of this exact target profile. Hardware acceleration is still not inferred from registration or friendly names; actual encoding and bitstream output remain future steps.
