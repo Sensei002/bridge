@@ -20,11 +20,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
       - uses: Swatinem/rust-cache@v2
       - name: Build native Windows desktop app
         env:
           BRIDGE_BUILD_VERSION: 0.2.${{ github.run_number }}
         run: cargo build --release --manifest-path apps/desktop/Cargo.toml
+      - name: Test and build Windows Display Service
+        run: |
+          cargo test -p bridge-display-service
+          cargo build --release --manifest-path apps/windows-service/Cargo.toml --features service-bin --target x86_64-pc-windows-msvc
       - name: Install WiX Toolset
         shell: pwsh
         run: dotnet tool install --global wix --version 6.0.2
@@ -36,7 +42,7 @@ jobs:
             throw "Could not read workspace version from Cargo.toml"
           }
           $version = "$($Matches[1]).${{ github.run_number }}"
-          wix build installer/windows/Package.wxs -d ProductVersion=$version -d PublishDir="$PWD\target\release" -o "Bridge-$version-x64.msi"
+          wix build installer/windows/Package.wxs -d ProductVersion=$version -d PublishDir="$PWD\target\release" -d ServicePublishDir="$PWD\target\x86_64-pc-windows-msvc\release" -d ScriptsDir="$PWD\scripts\windows" -o "Bridge-$version-x64.msi"
       - uses: actions/upload-artifact@v4
         with:
           name: bridge-windows-msi
