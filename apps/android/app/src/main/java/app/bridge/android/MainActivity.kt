@@ -106,6 +106,18 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        BridgeDiagnostics.initialize(this)
+        BridgeDiagnostics.record("app", "Bridge Android starting · ${BuildConfig.VERSION_NAME}")
+        val previousHandler = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, error ->
+            BridgeDiagnostics.record("crash", "Uncaught exception on ${thread.name}: ${error.stackTraceToString()}")
+            if (previousHandler != null) {
+                previousHandler.uncaughtException(thread, error)
+            } else {
+                android.os.Process.killProcess(android.os.Process.myPid())
+                kotlin.system.exitProcess(10)
+            }
+        }
 
         // The foreground service owns discovery, trusted sessions and transfers.
         // Starting it while the Activity is visible is allowed on modern Android.
@@ -148,6 +160,11 @@ class MainActivity : ComponentActivity() {
                 latestDisplayFrame = latestDisplayFrame,
                 latestEncodedVideoFrame = latestEncodedVideoFrame,
                 onImmersiveModeChange = { setSecondScreenImmersive(it) },
+                onCopyLogs = {
+                    val clipboard = getSystemService(android.content.ClipboardManager::class.java)
+                    clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Bridge Android diagnostics", BridgeDiagnostics.snapshot()))
+                    BridgeDiagnostics.record("diagnostics", "Diagnostic log copied to clipboard")
+                },
                 onDisplayInput = { deviceId, action, pointerId, x, y ->
                     BridgeConnectionService.instance?.sendDisplayInput(deviceId, action, pointerId, x, y)
                 },
@@ -306,6 +323,7 @@ private fun BridgeApp(
     latestDisplayFrame: BridgeDisplayFrame?,
     latestEncodedVideoFrame: BridgeEncodedVideoFrame?,
     onImmersiveModeChange: (Boolean) -> Unit,
+    onCopyLogs: () -> Unit,
     onDisplayInput: (String, Int, Int, Int, Int) -> Unit,
     receivedFiles: List<File>,
     clipboardReceivedText: String?,
@@ -410,7 +428,8 @@ private fun BridgeApp(
                                 updatePreferences.edit().putString("update_channel", it).apply()
                             },
                             updateStatus = updateStatus,
-                            onCheckUpdates = { onCheckUpdates(updateChannel) }
+                            onCheckUpdates = { onCheckUpdates(updateChannel) },
+                            onCopyLogs = onCopyLogs
                         )
                     }
                 }
@@ -1279,7 +1298,8 @@ private fun SettingsScreen(
     updateChannel: String,
     onUpdateChannelChange: (String) -> Unit,
     updateStatus: String,
-    onCheckUpdates: () -> Unit
+    onCheckUpdates: () -> Unit,
+    onCopyLogs: () -> Unit
 ) {
     ScreenContent {
         ScreenHeading("MAKE IT YOURS", "Settings", "Privacy and preferences for your Bridge workspace.")
@@ -1324,6 +1344,13 @@ private fun SettingsScreen(
             FeatureLine("⌑", "Per-device permissions", "Choose what each device can access.", "PLANNED")
             DividerLine()
             FeatureLine("⚿", "Encrypted connections", "Secure transport foundation in shared core.", "FOUNDATION")
+        }
+        Panel {
+            Eyebrow("SHOW LOGS")
+            Text("Diagnostics", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+            Text("Recent Bridge events and errors from this Android device. Logs stay on this phone.", color = Muted, fontSize = 10.sp, lineHeight = 15.sp)
+            PrimaryAction("Copy Logs", onCopyLogs, Modifier.fillMaxWidth())
+            Text("Copies the latest diagnostic history, including startup and connection errors.", color = Muted, fontSize = 10.sp, lineHeight = 15.sp)
         }
         Panel {
             Eyebrow("ABOUT BRIDGE")

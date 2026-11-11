@@ -85,6 +85,8 @@ class BridgeConnectionService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        BridgeDiagnostics.initialize(this)
+        BridgeDiagnostics.record("service", "Bridge connection service created")
         instance = this
         createNotificationChannel()
         val notification = buildNotification()
@@ -134,6 +136,7 @@ class BridgeConnectionService : Service() {
     }
 
     private fun postStatus(message: String) {
+        BridgeDiagnostics.record("connection", message)
         mainHandler.post {
             if (!stopping) BridgeRuntimeState.pairingStatus.value = message
         }
@@ -179,6 +182,9 @@ class BridgeConnectionService : Service() {
                         }
                     },
                     onDisplayFrame = { frame ->
+                        if (frame.sequence == 1L || frame.sequence % 120L == 0L) {
+                            BridgeDiagnostics.record("video-bgra", "Frame ${frame.sequence} · ${frame.width}x${frame.height}")
+                        }
                         mainHandler.post {
                             if (!stopping) {
                                 BridgeRuntimeState.latestDisplayFrame.value = frame
@@ -188,6 +194,9 @@ class BridgeConnectionService : Service() {
                         }
                     },
                     onEncodedVideoFrame = { frame ->
+                        if (frame.keyframe || frame.sequence == 1L || frame.sequence % 120L == 0L) {
+                            BridgeDiagnostics.record("video-h264", "Access unit ${frame.sequence} · ${frame.width}x${frame.height} · keyframe=${frame.keyframe}")
+                        }
                         mainHandler.post {
                             if (!stopping) {
                                 BridgeRuntimeState.latestEncodedVideoFrame.value = frame
@@ -212,6 +221,7 @@ class BridgeConnectionService : Service() {
                         }
                     },
                     onStatus = { message ->
+                        BridgeDiagnostics.record("transfer", message)
                         mainHandler.post {
                             if (!stopping) {
                                 BridgeRuntimeState.transferStatus.value = message
@@ -220,6 +230,7 @@ class BridgeConnectionService : Service() {
                         }
                     },
                     onSessionEnded = { peerId, handle ->
+                        BridgeDiagnostics.record("connection", "Session ended for peer ${peerId.take(12)}")
                         mainHandler.post {
                             if (stopping) return@post
                             pairingController?.onSessionEnded(peerId, handle)
