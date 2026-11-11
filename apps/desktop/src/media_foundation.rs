@@ -78,9 +78,9 @@ unsafe fn test_nv12_h264_profile(transform: &IMFTransform) -> Result<(), String>
             .map_err(|error| format!("could not set H.264 frame rate: {error}"))?;
         output.SetUINT32(&MF_MT_AVG_BITRATE, 8_000_000)
             .map_err(|error| format!("could not set H.264 target bitrate: {error}"))?;
-        transform.SetOutputType(0, &output, MFT_SET_TYPE_TEST_ONLY.0)
+        transform.SetOutputType(0, &output, MFT_SET_TYPE_TEST_ONLY.0 as u32)
             .map_err(|error| format!("encoder rejected H.264 output profile: {error}"))?;
-        transform.SetInputType(0, &input, MFT_SET_TYPE_TEST_ONLY)
+        transform.SetInputType(0, &input, MFT_SET_TYPE_TEST_ONLY.0 as u32)
             .map_err(|error| format!("encoder rejected NV12 input profile: {error}"))?;
     }
     Ok(())
