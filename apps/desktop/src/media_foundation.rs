@@ -5,6 +5,7 @@
 //! are performed by the next stage.
 
 use std::ptr::{null_mut, read};
+use std::mem::ManuallyDrop;
 
 use windows::Win32::Media::MediaFoundation::{
     IMFActivate, IMFTransform, MFTEnumEx, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG,
@@ -154,8 +155,10 @@ pub struct ComApartment;
 
 impl ComApartment {
     pub fn start() -> Result<Self, String> {
-        unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }
-            .map_err(|error| format!("COM MTA initialization failed: {error}"))?;
+        let result = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+        if result.is_err() {
+            return Err(format!("COM MTA initialization failed: {result:?}"));
+        }
         Ok(Self)
     }
 }
@@ -274,8 +277,8 @@ pub fn submit_first_nv12_sample(frame: &bridge_transfer::Nv12Frame) -> Result<Fi
 
                     let stream_info = unsafe { transform.GetOutputStreamInfo(0) }
                         .map_err(|error| format!("could not query H.264 output stream: {error}"))?;
-                    let provides_sample = stream_info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES != 0;
-                    let can_provide_sample = stream_info.dwFlags & MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES != 0;
+                    let provides_sample = stream_info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 != 0;
+                    let can_provide_sample = stream_info.dwFlags & MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES.0 != 0;
                     let output_sample = if provides_sample || can_provide_sample {
                         None
                     } else {
@@ -292,9 +295,9 @@ pub fn submit_first_nv12_sample(frame: &bridge_transfer::Nv12Frame) -> Result<Fi
                     };
                     let mut output = MFT_OUTPUT_DATA_BUFFER {
                         dwStreamID: 0,
-                        pSample: output_sample,
+                        pSample: ManuallyDrop::new(output_sample),
                         dwStatus: 0,
-                        pEvents: None,
+                        pEvents: ManuallyDrop::new(None),
                     };
                     let mut output_status = 0_u32;
                     match unsafe { transform.ProcessOutput(0, std::slice::from_mut(&mut output), &mut output_status) } {
@@ -304,7 +307,7 @@ pub fn submit_first_nv12_sample(frame: &bridge_transfer::Nv12Frame) -> Result<Fi
                         }
                         Err(error) => return Err(format!("encoder ProcessOutput failed: {error}")),
                     }
-                    let Some(sample) = output.pSample else {
+                    let Some(sample) = output.pSample.as_ref() else {
                         return Ok(FirstSampleResult::Buffered { encoder_name: name.clone() });
                     };
                     let output_buffer = unsafe { sample.ConvertToContiguousBuffer() }
