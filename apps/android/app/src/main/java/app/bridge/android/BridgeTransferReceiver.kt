@@ -24,6 +24,7 @@ private const val DISPLAY_FRAME_HEADER_BYTES = 37
 private const val DISPLAY_FRAME_FRAGMENT_BYTES = 48 * 1024
 private const val MAX_DISPLAY_FRAME_BYTES = 64 * 1024 * 1024
 private const val MAX_CLIPBOARD_TEXT_BYTES = 16 * 1024
+private const val DISPLAY_INPUT_TAG = 0x05
 
 internal data class BridgeDisplayFrame(
     val deviceId: String,
@@ -127,6 +128,7 @@ internal class BridgeTransferReceiver(
     private val pending = ConcurrentHashMap<String, BridgeIncomingOffer>()
     private val transferLocks = ConcurrentHashMap<Long, ReentrantLock>()
     private val cancellations = ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicBoolean>()
+    private val displayInputSequence = java.util.concurrent.atomic.AtomicLong(0)
 
     fun attach(deviceId: String, handle: Long, allowDisplayAttestation: Boolean = false) {
         if (readers.containsKey(handle)) return
@@ -468,6 +470,25 @@ internal class BridgeTransferReceiver(
         }
         // The sender may have disconnected; discard residual chunks before reuse.
         queue.clear()
+    }
+
+    fun sendDisplayInput(handle: Long, action: Int, pointerId: Int, x: Int, y: Int) {
+        require(action in 1..4) { "Invalid display input action." }
+        require(pointerId in 0..9) { "Invalid display pointer ID." }
+        require(x in 0..65535 && y in 0..65535) { "Display coordinates must be normalized to 16-bit values." }
+        val sequence = displayInputSequence.incrementAndGet()
+        require(sequence > 0) { "Display input sequence exhausted." }
+        val timestampNs = System.nanoTime()
+        val packet = ByteBuffer.allocate(23).order(java.nio.ByteOrder.BIG_ENDIAN)
+            .put(DISPLAY_INPUT_TAG.toByte())
+            .putLong(sequence)
+            .putLong(timestampNs)
+            .put(pointerId.toByte())
+            .put(action.toByte())
+            .putShort(x.toShort())
+            .putShort(y.toShort())
+            .array()
+        sendBytes(handle, packet)
     }
 
     fun sendClipboard(handle: Long, text: String) {
