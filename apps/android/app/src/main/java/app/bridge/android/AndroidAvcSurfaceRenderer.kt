@@ -80,23 +80,25 @@ private class AvcSurfaceDecoder(
 
     override fun surfaceCreated(holder: SurfaceHolder) {
         val newSurface = holder.surface
-        executor.execute {
+        if (closed) return
+        runCatching { executor.execute {
             if (!closed && newSurface.isValid) {
                 surface = newSurface
                 releaseCodec()
                 postStatus("H.264 output Surface is ready; waiting for an IDR keyframe.")
             }
-        }
+        } }
     }
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) = Unit
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
-        executor.execute {
+        if (closed) return
+        runCatching { executor.execute {
             surface = null
             releaseCodec()
             postStatus("H.264 output Surface was destroyed; BGRA fallback remains available.")
-        }
+        } }
     }
 
     fun submit(frame: BridgeEncodedVideoFrame) {
@@ -203,11 +205,13 @@ private class AvcSurfaceDecoder(
     override fun close() {
         if (closed) return
         closed = true
-        executor.execute {
-            releaseCodec()
-            surface = null
+        executor.queue.clear()
+        runCatching {
+            executor.execute {
+                releaseCodec()
+                surface = null
+            }
         }
         executor.shutdown()
-        if (!executor.awaitTermination(2, TimeUnit.SECONDS)) executor.shutdownNow()
     }
 }
