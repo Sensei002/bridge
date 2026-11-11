@@ -16,7 +16,8 @@ class AvcDecoderRecoveryStateTest {
             height = 1080,
             timestampNs = sequence * 16_666_667L,
             keyframe = keyframe,
-            bitstream = bitstream
+            bitstream = bitstream,
+            receivedAtElapsedRealtimeNs = 0L
         )
 
     private val configuredIdr = byteArrayOf(
