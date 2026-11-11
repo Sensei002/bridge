@@ -42,3 +42,27 @@ The service responds with a versioned status or error line. Unknown versions, ma
 ## Authentication proof requirement before lease IPC
 
 The current challenge relay is not, by itself, a proof the privileged service can independently verify: the service sees a response from its signed desktop client, but it cannot distinguish a nonce actually echoed by Android over Noise from a desktop client that simply resubmits the nonce. The next protocol stage must add a peer-authenticated proof that the service can verify against a pairing-bound Android public key (or an equivalently strong independently verifiable mechanism). Do not expose lease issuance/renewal over the pipe or enable driver IOCTLs until that proof, process-handle binding, and disconnect/expiry revocation are implemented and tested.
+
+## Development service installation
+
+For a local Windows test machine, build the service executable with:
+
+```powershell
+cargo build --release --manifest-path apps/windows-service/Cargo.toml --features service-bin --target x86_64-pc-windows-msvc
+```
+
+From an elevated PowerShell window, install or update the service:
+
+```powershell
+.\scripts\windows\Install-BridgeDisplayService.ps1 -ServiceExecutable .\target\x86_64-pc-windows-msvc\release\bridge-display-service.exe -AllowUnsignedDevelopmentBuild
+```
+
+The explicit switch is required for the current unsigned development executable. Only use it with a binary built from trusted Bridge source. A future signed service build should omit the switch and pass Authenticode validation.
+
+To remove the service registration:
+
+```powershell
+.\scripts\windows\Uninstall-BridgeDisplayService.ps1
+```
+
+Disconnect the virtual display in Bridge before uninstalling. The uninstall script removes only the Windows service registration; it deliberately does not remove the IddCx driver package. Driver installation, signing/trust provisioning, MSI integration, and full rollback remain separate work. Do not install the development driver on a daily-use machine.
