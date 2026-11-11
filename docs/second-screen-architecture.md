@@ -163,3 +163,8 @@ The encoder diagnostic now attempts to activate each registered H.264-output MFT
 ## Windows NV12-to-H.264 profile negotiation probe
 
 For each successfully activated H.264-output transform, the desktop now constructs test-only Media Foundation media types for NV12 input and H.264 output at 1080×2340, 60 fps, and an 8 Mbps target bitrate. It calls the transform's output/input type setters with MFT_SET_TYPE_TEST_ONLY, so no active type is committed and no frames are processed. Diagnostics distinguish activation from acceptance of this exact target profile. Hardware acceleration is still not inferred from registration or friendly names; actual encoding and bitstream output remain future steps.
+
+
+## Windows committed H.264 encoder profile probe
+
+The Windows diagnostic now goes beyond test-only negotiation: for transforms accepting the target profile, it commits H.264 output first and NV12 input second, then reads back the current input/output frame dimensions. Per-candidate results distinguish profile acceptance from successful committed configuration. The temporary transform is still shut down after the probe and no samples are submitted, so this does not yet produce encoded video or switch the sender away from BGRA.
