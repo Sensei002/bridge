@@ -15,3 +15,12 @@ typedef struct _BRIDGE_DISPLAY_STATUS {
     ULONG IsConnected;
     ULONG SupportedModeCount;
 } BRIDGE_DISPLAY_STATUS, *PBRIDGE_DISPLAY_STATUS;
+
+// Bounded latest-frame readback through the secured service-only device interface.
+#define IOCTL_BRIDGE_DISPLAY_READ_FRAME CTL_CODE(FILE_DEVICE_UNKNOWN, 0x803, METHOD_OUT_DIRECT, FILE_READ_ACCESS)
+#define BRIDGE_DISPLAY_FRAME_PIXEL_FORMAT_BGRA8 1
+#define BRIDGE_DISPLAY_FRAME_MAX_BYTES (64u * 1024u * 1024u)
+typedef struct _BRIDGE_DISPLAY_FRAME_HEADER {
+    ULONG Size; ULONG Version; ULONG Width; ULONG Height; ULONG Stride; ULONG PixelFormat;
+    ULONGLONG Sequence; ULONGLONG TimestampNs; ULONG DataSize; ULONG Reserved;
+} BRIDGE_DISPLAY_FRAME_HEADER, *PBRIDGE_DISPLAY_FRAME_HEADER;

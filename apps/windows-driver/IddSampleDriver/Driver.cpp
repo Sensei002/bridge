@@ -296,8 +296,8 @@ HRESULT Direct3DDevice::Init()
 
 #pragma region SwapChainProcessor
 
-SwapChainProcessor::SwapChainProcessor(IDDCX_SWAPCHAIN hSwapChain, shared_ptr<Direct3DDevice> Device, HANDLE NewFrameEvent)
-    : m_hSwapChain(hSwapChain), m_Device(std::move(Device)), m_hAvailableBufferEvent(NewFrameEvent)
+SwapChainProcessor::SwapChainProcessor(IDDCX_SWAPCHAIN hSwapChain, shared_ptr<Direct3DDevice> Device, HANDLE NewFrameEvent, IndirectDeviceContext* FrameSink)
+    : m_hSwapChain(hSwapChain), m_Device(std::move(Device)), m_hAvailableBufferEvent(NewFrameEvent), m_FrameSink(FrameSink)
 {
 }
 
@@ -430,16 +430,70 @@ void SwapChainProcessor::RunCore()
             // We have new frame to process, the surface has a reference on it that the driver has to release
             AcquiredBuffer.Attach(Buffer.MetaData.pSurface);
 
-            // ==============================
-            // TODO: Process the frame here
-            //
-            // This is the most performance-critical section of code in an IddCx driver. It's important that whatever
-            // is done with the acquired surface be finished as quickly as possible. This operation could be:
-            //  * a GPU copy to another buffer surface for later processing (such as a staging surface for mapping to CPU memory)
-            //  * a GPU encode operation
-            //  * a GPU VPBlt to another surface
-            //  * a GPU custom compute shader encode operation
-            // ==============================
+            // Read back the current surface through a staging texture. Only the
+            // latest complete frame is retained; no unbounded frame queue is created.
+            ComPtr<ID3D11Texture2D> SourceTexture;
+            hr = AcquiredBuffer.As(&SourceTexture);
+            if (SUCCEEDED(hr))
+            {
+                D3D11_TEXTURE2D_DESC SourceDesc = {};
+                SourceTexture->GetDesc(&SourceDesc);
+                const bool SupportedFormat =
+                    SourceDesc.Format == DXGI_FORMAT_B8G8R8A8_UNORM ||
+                    SourceDesc.Format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+                const ULONGLONG RequiredBytes =
+                    static_cast<ULONGLONG>(SourceDesc.Width) * SourceDesc.Height * 4ull;
+                if (!SupportedFormat || SourceDesc.Width == 0 || SourceDesc.Height == 0 ||
+                    SourceDesc.Width > 4096 || SourceDesc.Height > 4096 ||
+                    RequiredBytes > BRIDGE_DISPLAY_FRAME_MAX_BYTES)
+                {
+                    hr = E_INVALIDARG;
+                }
+                else
+                {
+                    D3D11_TEXTURE2D_DESC StagingDesc = SourceDesc;
+                    StagingDesc.MipLevels = 1;
+                    StagingDesc.ArraySize = 1;
+                    StagingDesc.SampleDesc.Count = 1;
+                    StagingDesc.SampleDesc.Quality = 0;
+                    StagingDesc.Usage = D3D11_USAGE_STAGING;
+                    StagingDesc.BindFlags = 0;
+                    StagingDesc.MiscFlags = 0;
+                    StagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+                    ComPtr<ID3D11Texture2D> StagingTexture;
+                    hr = m_Device->Device->CreateTexture2D(&StagingDesc, nullptr, &StagingTexture);
+                    if (SUCCEEDED(hr))
+                    {
+                        m_Device->DeviceContext->CopyResource(StagingTexture.Get(), SourceTexture.Get());
+                        D3D11_MAPPED_SUBRESOURCE Mapped = {};
+                        hr = m_Device->DeviceContext->Map(StagingTexture.Get(), 0, D3D11_MAP_READ, 0, &Mapped);
+                        if (SUCCEEDED(hr))
+                        {
+                            const ULONG TightStride = SourceDesc.Width * 4u;
+                            const size_t FrameBytes = static_cast<size_t>(TightStride) * SourceDesc.Height;
+                            std::vector<BYTE> Pixels;
+                            try { Pixels.resize(FrameBytes); }
+                            catch (...) { Pixels.clear(); }
+                            if (!Pixels.empty())
+                            {
+                                for (UINT Row = 0; Row < SourceDesc.Height; ++Row)
+                                {
+                                    memcpy(Pixels.data() + static_cast<size_t>(Row) * TightStride,
+                                        static_cast<const BYTE*>(Mapped.pData) + static_cast<size_t>(Row) * Mapped.RowPitch,
+                                        TightStride);
+                                }
+                            }
+                            m_Device->DeviceContext->Unmap(StagingTexture.Get(), 0);
+                            if (m_FrameSink && !Pixels.empty()) m_FrameSink->PublishLatestFrame(
+                                SourceDesc.Width, SourceDesc.Height, TightStride,
+                                BRIDGE_DISPLAY_FRAME_PIXEL_FORMAT_BGRA8, Pixels.data(), Pixels.size());
+                        }
+                    }
+                }
+            }
+            // Frame readback is best-effort: always release the IddCx surface and
+            // finish processing so a transient capture error cannot stall the display.
+            hr = S_OK;
 
             // We have finished processing this frame hence we release the reference on it.
             // If the driver forgets to release the reference to the surface, it will be leaked which results in the
@@ -584,7 +638,7 @@ NTSTATUS IndirectDeviceContext::ConnectMonitor(UINT ConnectorIndex)
     NTSTATUS Status = IddCxMonitorCreate(m_Adapter, &MonitorCreate, &MonitorCreateOut);
     if (!NT_SUCCESS(Status)) return Status;
     auto* pMonitorContextWrapper = WdfObjectGet_IndirectMonitorContextWrapper(MonitorCreateOut.MonitorObject);
-    pMonitorContextWrapper->pContext = new IndirectMonitorContext(MonitorCreateOut.MonitorObject);
+    pMonitorContextWrapper->pContext = new IndirectMonitorContext(MonitorCreateOut.MonitorObject, this);
     IDARG_OUT_MONITORARRIVAL ArrivalOut = {};
     Status = IddCxMonitorArrival(MonitorCreateOut.MonitorObject, &ArrivalOut);
     if (!NT_SUCCESS(Status)) { WdfObjectDelete((WDFOBJECT)MonitorCreateOut.MonitorObject); return Status; }
@@ -597,8 +651,51 @@ NTSTATUS IndirectDeviceContext::DisconnectMonitor()
     std::lock_guard<std::mutex> lock(m_MonitorLock);
     if (m_Monitor == nullptr) return STATUS_SUCCESS;
     NTSTATUS Status = IddCxMonitorDeparture(m_Monitor);
-    if (NT_SUCCESS(Status)) m_Monitor = nullptr;
+    if (NT_SUCCESS(Status)) { m_Monitor = nullptr; ClearLatestFrame(); }
     return Status;
+}
+
+NTSTATUS IndirectDeviceContext::CopyLatestFrame(PVOID Buffer, size_t BufferLength, size_t* BytesWritten)
+{
+    if (BytesWritten == nullptr) return STATUS_INVALID_PARAMETER;
+    *BytesWritten = 0;
+    std::lock_guard<std::mutex> lock(m_FrameLock);
+    if (m_LatestFrame.empty()) return STATUS_NO_MORE_ENTRIES;
+    const size_t Required = sizeof(BRIDGE_DISPLAY_FRAME_HEADER) + m_LatestFrame.size();
+    if (Buffer == nullptr || BufferLength < Required) return STATUS_BUFFER_TOO_SMALL;
+    memcpy(Buffer, &m_LatestFrameHeader, sizeof(m_LatestFrameHeader));
+    memcpy(static_cast<BYTE*>(Buffer) + sizeof(m_LatestFrameHeader), m_LatestFrame.data(), m_LatestFrame.size());
+    *BytesWritten = Required;
+    return STATUS_SUCCESS;
+}
+
+void IndirectDeviceContext::PublishLatestFrame(ULONG Width, ULONG Height, ULONG Stride, ULONG PixelFormat, const BYTE* Data, size_t DataSize)
+{
+    if (Data == nullptr || DataSize == 0 || DataSize > BRIDGE_DISPLAY_FRAME_MAX_BYTES ||
+        Width == 0 || Height == 0 || Width > 4096 || Height > 4096 ||
+        static_cast<ULONGLONG>(Stride) * Height != DataSize) return;
+    std::vector<BYTE> Frame;
+    try { Frame.assign(Data, Data + DataSize); }
+    catch (...) { return; }
+    std::lock_guard<std::mutex> lock(m_FrameLock);
+    m_LatestFrame.swap(Frame);
+    m_LatestFrameHeader = {};
+    m_LatestFrameHeader.Size = sizeof(BRIDGE_DISPLAY_FRAME_HEADER);
+    m_LatestFrameHeader.Version = BRIDGE_DISPLAY_CONTROL_VERSION;
+    m_LatestFrameHeader.Width = Width;
+    m_LatestFrameHeader.Height = Height;
+    m_LatestFrameHeader.Stride = Stride;
+    m_LatestFrameHeader.PixelFormat = PixelFormat;
+    m_LatestFrameHeader.Sequence = ++m_FrameSequence;
+    m_LatestFrameHeader.TimestampNs = GetTickCount64() * 1000000ull;
+    m_LatestFrameHeader.DataSize = static_cast<ULONG>(DataSize);
+}
+
+void IndirectDeviceContext::ClearLatestFrame()
+{
+    std::lock_guard<std::mutex> lock(m_FrameLock);
+    m_LatestFrame.clear();
+    m_LatestFrameHeader = {};
 }
 
 void IndirectDeviceContext::GetDisplayStatus(BRIDGE_DISPLAY_STATUS& Status)
@@ -611,8 +708,9 @@ void IndirectDeviceContext::GetDisplayStatus(BRIDGE_DISPLAY_STATUS& Status)
     Status.SupportedModeCount = ARRAYSIZE(s_BridgeMonitorModes);
 }
 
-IndirectMonitorContext::IndirectMonitorContext(_In_ IDDCX_MONITOR Monitor) :
-    m_Monitor(Monitor)
+IndirectMonitorContext::IndirectMonitorContext(_In_ IDDCX_MONITOR Monitor, IndirectDeviceContext* FrameSink) :
+    m_Monitor(Monitor),
+    m_FrameSink(FrameSink)
 {
 }
 
@@ -636,7 +734,7 @@ NTSTATUS IndirectMonitorContext::AssignSwapChain(IDDCX_SWAPCHAIN SwapChain, LUID
         return STATUS_DEVICE_NOT_READY;
     }
 
-    auto Processor = make_unique<SwapChainProcessor>(SwapChain, Device, NewFrameEvent);
+    auto Processor = make_unique<SwapChainProcessor>(SwapChain, Device, NewFrameEvent, m_FrameSink);
     NTSTATUS Status = Processor->Start();
     if (!NT_SUCCESS(Status))
     {
@@ -696,6 +794,18 @@ VOID IddSampleDeviceIoControl(WDFDEVICE Device, WDFREQUEST Request, size_t Outpu
         break;
     case IOCTL_BRIDGE_DISPLAY_DISCONNECT:
         Status = (InputBufferLength == 0 && OutputBufferLength == 0) ? DeviceContext->DisconnectMonitor() : STATUS_INVALID_BUFFER_SIZE;
+        break;
+    case IOCTL_BRIDGE_DISPLAY_READ_FRAME:
+        if (InputBufferLength != 0) { Status = STATUS_INVALID_BUFFER_SIZE; break; }
+        else {
+            PVOID pFrameBuffer = nullptr;
+            Status = WdfRequestRetrieveOutputBuffer(Request, OutputBufferLength, &pFrameBuffer, nullptr);
+            if (NT_SUCCESS(Status)) {
+                size_t BytesWritten = 0;
+                Status = DeviceContext->CopyLatestFrame(pFrameBuffer, OutputBufferLength, &BytesWritten);
+                if (NT_SUCCESS(Status)) { WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, BytesWritten); return; }
+            }
+        }
         break;
     case IOCTL_BRIDGE_DISPLAY_QUERY:
         if (InputBufferLength != 0 || OutputBufferLength < sizeof(BRIDGE_DISPLAY_STATUS)) { Status = STATUS_BUFFER_TOO_SMALL; break; }
