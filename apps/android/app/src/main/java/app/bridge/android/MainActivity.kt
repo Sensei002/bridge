@@ -1,6 +1,7 @@
 package app.bridge.android
 
 import android.os.Bundle
+import android.view.MotionEvent
 import android.graphics.Bitmap
 import java.nio.ByteBuffer
 import androidx.compose.ui.graphics.asImageBitmap
@@ -44,6 +45,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.*
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.input.pointer.pointerInteropFilter
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -137,6 +139,9 @@ class MainActivity : ComponentActivity() {
                 transferStatus = transferStatus,
                 latestDisplayFrame = latestDisplayFrame,
                 onImmersiveModeChange = { setSecondScreenImmersive(it) },
+                onDisplayInput = { deviceId, action, pointerId, x, y ->
+                    BridgeConnectionService.instance?.sendDisplayInput(deviceId, action, pointerId, x, y)
+                },
                 receivedFiles = receivedFiles,
                 clipboardReceivedText = clipboardReceivedText,
                 clipboardReceivedFrom = clipboardReceivedFrom,
@@ -291,6 +296,7 @@ private fun BridgeApp(
     transferStatus: String,
     latestDisplayFrame: BridgeDisplayFrame?,
     onImmersiveModeChange: (Boolean) -> Unit,
+    onDisplayInput: (String, Int, Int, Int, Int) -> Unit,
     receivedFiles: List<File>,
     clipboardReceivedText: String?,
     clipboardReceivedFrom: String,
@@ -378,7 +384,8 @@ private fun BridgeApp(
                             onImmersiveChange = { enabled ->
                                 immersiveSecondScreen = enabled
                                 onImmersiveModeChange(enabled)
-                            }
+                            },
+                            onDisplayInput = onDisplayInput
                         )
                         BridgeTab.Tools -> ToolsScreen()
                         BridgeTab.Settings -> SettingsScreen(
@@ -526,12 +533,15 @@ private fun HeaderBar() {
     }
 }
 
+private val secondScreenActivePointers = mutableSetOf<Int>()
+
 @Composable
 private fun SecondScreenView(
     frame: BridgeDisplayFrame?,
     connectedDevices: Int,
     immersive: Boolean,
-    onImmersiveChange: (Boolean) -> Unit
+    onImmersiveChange: (Boolean) -> Unit,
+    onDisplayInput: (String, Int, Int, Int, Int) -> Unit
 ) {
     val bitmap = remember(frame?.sequence, frame?.width, frame?.height) {
         frame?.let {
@@ -580,7 +590,62 @@ private fun SecondScreenView(
                         bitmap = bitmap,
                         contentDescription = "Windows secondary display",
                         contentScale = ContentScale.Fit,
-                        modifier = Modifier.fillMaxSize()
+                        modifier = Modifier.fillMaxSize().pointerInteropFilter { event ->
+                            val currentFrame = frame ?: return@pointerInteropFilter true
+                            val imageWidth = currentFrame.width.toFloat()
+                            val imageHeight = currentFrame.height.toFloat()
+                            val viewWidth = it.width.toFloat().coerceAtLeast(1f)
+                            val viewHeight = it.height.toFloat().coerceAtLeast(1f)
+                            val scale = minOf(viewWidth / imageWidth, viewHeight / imageHeight)
+                            val drawnWidth = imageWidth * scale
+                            val drawnHeight = imageHeight * scale
+                            val left = (viewWidth - drawnWidth) / 2f
+                            val top = (viewHeight - drawnHeight) / 2f
+                            val activePointers = secondScreenActivePointers
+                            fun send(index: Int, action: Int) {
+                                val pointerId = event.getPointerId(index)
+                                if (pointerId !in 0..9) return
+                                val rawX = event.getX(index)
+                                val rawY = event.getY(index)
+                                if (action == 1 && (rawX < left || rawX > left + drawnWidth ||
+                                    rawY < top || rawY > top + drawnHeight)) return
+                                val x = (((rawX - left) / drawnWidth).coerceIn(0f, 1f) * 65535f).toInt()
+                                val y = (((rawY - top) / drawnHeight).coerceIn(0f, 1f) * 65535f).toInt()
+                                onDisplayInput(currentFrame.deviceId, action, pointerId, x, y)
+                            }
+                            when (event.actionMasked) {
+                                MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
+                                    val index = event.actionIndex
+                                    val id = event.getPointerId(index)
+                                    val before = activePointers.contains(id)
+                                    send(index, 1)
+                                    if (!before && id in 0..9) {
+                                        val x = event.getX(index)
+                                        val y = event.getY(index)
+                                        if (x >= left && x <= left + drawnWidth && y >= top && y <= top + drawnHeight) {
+                                            activePointers.add(id)
+                                        }
+                                    }
+                                }
+                                MotionEvent.ACTION_MOVE -> {
+                                    for (index in 0 until event.pointerCount) {
+                                        if (activePointers.contains(event.getPointerId(index))) send(index, 2)
+                                    }
+                                }
+                                MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> {
+                                    val index = event.actionIndex
+                                    val id = event.getPointerId(index)
+                                    if (activePointers.remove(id)) send(index, 3)
+                                }
+                                MotionEvent.ACTION_CANCEL -> {
+                                    activePointers.toList().forEach { id ->
+                                        if (id in 0..9) onDisplayInput(currentFrame.deviceId, 4, id, 0, 0)
+                                    }
+                                    activePointers.clear()
+                                }
+                            }
+                            true
+                        }
                     )
                 } else {
                     Text(
@@ -647,7 +712,7 @@ private fun SecondScreenView(
                         colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Ink)
                     ) { Text("Open full-screen display", fontWeight = FontWeight.Bold) }
                     Text(
-                        "Full-screen preview hides Bridge navigation and Android system bars. Touch input is not enabled yet.",
+                        "Touch and multi-pointer events are forwarded over the trusted encrypted session. Windows-side input handling is not available yet.",
                         color = Muted,
                         fontSize = 11.sp,
                         lineHeight = 16.sp
