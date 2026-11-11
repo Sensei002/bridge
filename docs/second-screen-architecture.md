@@ -30,11 +30,13 @@ Introduce separate components:
 
 Driver installation and device configuration require elevation. Normal use of the desktop UI should not require running the whole app as administrator. Package the driver and service with the Windows installer only after installation, upgrade, rollback, and uninstall behaviour are defined.
 
-### Display service control boundary (development slice)
+### Display service control boundary (implemented development path)
 
-The first Rust service implementation lives in `apps/windows-service` as a separate Windows service executable. It exposes a versioned local named-pipe protocol (`\\.\pipe\BridgeDisplayService`) and uses the Bridge device-interface GUID to send the driver's QUERY, CONNECT, and DISCONNECT IOCTLs. The protocol parser is portable and unit-tested; a dedicated Windows GitHub Actions workflow builds the x64 service executable.
+The Rust service in `apps/windows-service` exposes a versioned local named-pipe protocol (`\\.\pipe\BridgeDisplayService`). The unprivileged desktop client uses that pipe for Android attestation, short-lived lease renewal, driver connect/disconnect, frame reads, and read-only driver status queries. The service attributes each pipe client to a live process image, verifies the configured desktop publisher, verifies the Android signature against the pairing-pinned key, and binds the resulting 15-second lease to that process and Android fingerprint. Driver mutations and frame reads require the exact active lease. The pipe is local-only and ACL-protected; the driver interface remains restricted to LocalSystem and local administrators.
 
-For each accepted pipe connection, the service now obtains the client PID from the connected pipe and resolves its executable image path through a process handle. This provides process attribution for audit and a future signed-client policy, but **does not authenticate the executable publisher or prove a live Android session**. The service therefore continues to reject CONNECT and DISCONNECT; PING and read-only QUERY remain available. The service library now includes a tested single-device session-lease state machine with a 15-second maximum TTL, peer-fingerprint binding, renewal, expiry, replacement, and explicit revocation. It is not exposed over IPC or wired to the live Noise session yet. The next security slice must establish a signed desktop-client identity and a cryptographically verifiable binding to the live authenticated Noise session before any lease can be issued or monitor lifecycle operation enabled. The service installer must explicitly choose a driver-authorized identity (initially LocalSystem), while the desktop UI remains unprivileged. The detailed publisher-verification, one-time Noise-session challenge, ephemeral attestation, lease-renewal, replay-protection, and fail-closed requirements are specified in [Windows Display Service Authentication Design](windows-service-authentication.md).
+The desktop Second Screen panel now exposes a read-only **Refresh monitor status** action. It reports whether the IddCx driver currently has a virtual monitor connected and how many modes the driver advertises. It does not bypass attestation or change driver state.
+
+The service is packaged with the per-user MSI as an executable and administrator-run setup scripts. The MSI does not silently register a privileged service. Installation remains an explicit elevated action, with Authenticode verification enabled by default. This is still a development integration path: successful CI builds do not establish that a physical Windows machine has the driver and service correctly installed or that a monitor appears in Windows Display Settings. The detailed publisher-verification, one-time Noise-session challenge, ephemeral attestation, lease-renewal, replay-protection, and fail-closed requirements remain documented in [Windows Display Service Authentication Design](windows-service-authentication.md).
 
 ## Media pipeline
 
@@ -66,8 +68,9 @@ The first physical test target is the currently paired Redmi Note 7 Pro. Start w
 - Add a GitHub Actions Windows runner job that builds the driver package and validates the INF/package outputs. Keep the existing Windows MSI, Android APK, Rust, and iOS CI jobs intact.
 - Start from the official Microsoft IddSampleDriver structure; record the exact WDK/SDK and IddCx versions.
 - [x] Implement driver-side connect/disconnect/status IOCTLs and defer monitor arrival until explicitly requested by the service.
-- [ ] Implement the Bridge Display Service control client, service identity/ACL, and authenticated-session-to-monitor lifecycle binding.
-- [ ] Acceptance: on a dedicated Windows test machine, Device Manager and Windows Display Settings show the Bridge virtual monitor, and connect/disconnect adds/removes it without destabilizing the physical display.
+- [x] Implement the Bridge Display Service control client, service identity/ACL, and authenticated-session-to-monitor lifecycle binding in the development path.
+- [x] Add a desktop diagnostic query for live driver connection state and supported display-mode count.
+- [ ] Physical acceptance: on a dedicated Windows test machine, Device Manager and Windows Display Settings show the Bridge virtual monitor, and connect/disconnect adds/removes it without destabilizing the physical display.
 
 ### Phase B — real frame acquisition and local preview
 - Implement swap-chain lifecycle and Direct3D surface handling.

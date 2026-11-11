@@ -417,6 +417,7 @@ enum TransferUiEvent {
 enum DisplayLeaseEvent {
     Status { session_key: String, message: String },
     OperationStatus { session_key: String, message: String },
+    DriverStatus { session_key: String, message: String },
 }
 
 #[cfg(windows)]
@@ -621,6 +622,29 @@ fn start_display_frame_stream(
         })
         .map(|_| ())
         .map_err(|error| format!("could not start second-screen frame stream: {error}"))
+}
+
+
+#[cfg(windows)]
+fn start_display_status_query(
+    session_key: String,
+    events: Sender<DisplayLeaseEvent>,
+) -> Result<(), String> {
+    thread::Builder::new()
+        .name("bridge-display-status-query".into())
+        .spawn(move || {
+            let message = match display_service::query_status() {
+                Ok(status) => format!(
+                    "Driver: {} · {} supported display modes.",
+                    if status.connected { "virtual monitor connected" } else { "virtual monitor disconnected" },
+                    status.supported_mode_count,
+                ),
+                Err(error) => format!("Driver status unavailable: {error}"),
+            };
+            let _ = events.send(DisplayLeaseEvent::DriverStatus { session_key, message });
+        })
+        .map(|_| ())
+        .map_err(|error| format!("could not start display status query: {error}"))
 }
 
 #[cfg(windows)]
@@ -897,6 +921,8 @@ struct BridgeApp {
     #[cfg(windows)]
     display_lease_status: String,
     #[cfg(windows)]
+    display_driver_status: String,
+    #[cfg(windows)]
     display_input_session: Option<String>,
     #[cfg(windows)]
     last_display_input_sequence: u64,
@@ -1012,6 +1038,8 @@ impl Default for BridgeApp {
             display_lease: Arc::new(Mutex::new(None)),
             #[cfg(windows)]
             display_lease_status: "Waiting for a trusted Android device.".into(),
+            #[cfg(windows)]
+            display_driver_status: "Not checked.".into(),
             #[cfg(windows)]
             display_input_session: None,
             #[cfg(windows)]
@@ -1482,6 +1510,11 @@ impl eframe::App for BridgeApp {
                     | DisplayLeaseEvent::OperationStatus { session_key, message } => {
                         if self.display_challenge_session.as_deref() == Some(session_key.as_str()) {
                             self.display_lease_status = message;
+                        }
+                    }
+                    DisplayLeaseEvent::DriverStatus { session_key, message } => {
+                        if self.display_challenge_session.as_deref() == Some(session_key.as_str()) {
+                            self.display_driver_status = message;
                         }
                     }
                 }
@@ -2147,6 +2180,7 @@ impl eframe::App for BridgeApp {
                             let lease_available = active_lease.is_some();
                             let mut connect_clicked = false;
                             let mut disconnect_clicked = false;
+                            let mut refresh_status_clicked = false;
                             panel(ui, |ui| {
                                 eyebrow(ui, "SECOND SCREEN · AUTHORIZATION");
                                 ui.label(egui::RichText::new("Display-service lease").strong().size(16.0).color(TEXT));
@@ -2160,9 +2194,24 @@ impl eframe::App for BridgeApp {
                                     if ui.add_enabled(lease_available, egui::Button::new("Stop virtual display")).clicked() {
                                         disconnect_clicked = true;
                                     }
+                                    if ui.add_enabled(lease_available, egui::Button::new("Refresh monitor status")).clicked() {
+                                        refresh_status_clicked = true;
+                                    }
                                 });
-                                muted(ui, "These controls request driver operations only. They do not yet create or stream a Windows extended monitor.");
+                                muted(ui, &self.display_driver_status);
+                                muted(ui, "Connect asks the IddCx driver to create the virtual monitor; captured frames are then streamed to the paired Android device. Verify the monitor in Windows Settings > System > Display.");
                             });
+                            if refresh_status_clicked {
+                                if let Some((session_key, _)) = active_lease.as_ref() {
+                                    self.display_driver_status = "Querying the Windows display driver…".into();
+                                    if let Err(error) = start_display_status_query(
+                                        session_key.clone(),
+                                        self.display_lease_tx.clone(),
+                                    ) {
+                                        self.display_driver_status = error;
+                                    }
+                                }
+                            }
                             if connect_clicked || disconnect_clicked {
                                 if let Some((session_key, lease)) = active_lease {
                                     let session = self.active_sessions.iter()

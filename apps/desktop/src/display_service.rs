@@ -100,6 +100,38 @@ fn decode_frame_packet(packet: &[u8]) -> Result<ServiceFrame, String> {
     })
 }
 
+
+/// Current IddCx virtual-monitor state reported by the privileged service.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DriverStatus {
+    pub connected: bool,
+    pub supported_mode_count: u32,
+}
+
+/// Query the driver without changing monitor or lease state.
+pub fn query_status() -> Result<DriverStatus, String> {
+    parse_driver_status(&request("QUERY")?)
+}
+
+fn parse_driver_status(response: &str) -> Result<DriverStatus, String> {
+    let value = response.trim()
+        .strip_prefix("BRIDGE_DISPLAY/1 OK connected=")
+        .ok_or_else(|| service_response_error(response))?;
+    let (connected, modes) = value.split_once(" modes=")
+        .ok_or_else(|| "display service returned malformed driver status".to_string())?;
+    let connected = match connected {
+        "0" => false,
+        "1" => true,
+        _ => return Err("display service returned an invalid connected flag".into()),
+    };
+    let supported_mode_count: u32 = modes.parse()
+        .map_err(|_| "display service returned an invalid supported-mode count".to_string())?;
+    if supported_mode_count == 0 || supported_mode_count > 64 {
+        return Err("display service returned an out-of-policy supported-mode count".into());
+    }
+    Ok(DriverStatus { connected, supported_mode_count })
+}
+
 /// Ask the service for a fresh process-pinned challenge.
 pub fn issue_challenge() -> Result<String, String> {
     parse_challenge(&request("CHALLENGE")?)
@@ -290,6 +322,23 @@ mod tests {
         assert!(parse_challenge("BRIDGE_DISPLAY/1 ERROR signer pin missing").unwrap_err().contains("signer pin missing"));
         assert!(service_response_error("BRIDGE_DISPLAY/1 ERROR signer pin missing").contains("signer pin missing"));
         assert!(service_response_error("unexpected").contains("unexpected"));
+    }
+
+
+    #[test]
+    fn parses_only_valid_read_only_driver_status() {
+        assert_eq!(
+            parse_driver_status("BRIDGE_DISPLAY/1 OK connected=1 modes=3\n").unwrap(),
+            DriverStatus { connected: true, supported_mode_count: 3 }
+        );
+        assert_eq!(
+            parse_driver_status("BRIDGE_DISPLAY/1 OK connected=0 modes=3\n").unwrap(),
+            DriverStatus { connected: false, supported_mode_count: 3 }
+        );
+        assert!(parse_driver_status("BRIDGE_DISPLAY/1 OK connected=2 modes=3").is_err());
+        assert!(parse_driver_status("BRIDGE_DISPLAY/1 OK connected=1 modes=0").is_err());
+        assert!(parse_driver_status("BRIDGE_DISPLAY/1 OK connected=1 modes=65").is_err());
+        assert!(parse_driver_status("BRIDGE_DISPLAY/1 ERROR driver absent").is_err());
     }
 
     #[test]
