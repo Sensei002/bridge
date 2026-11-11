@@ -17,21 +17,29 @@ fn log_path() -> PathBuf {
 
 pub fn record(component: &str, message: &str) {
     let path = log_path();
-    let Some(parent) = path.parent() else { return };
-    if fs::create_dir_all(parent).is_err() { return; }
-    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)
-        .unwrap_or_default().as_secs();
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
     let safe_message = message.replace('\r', " ").replace('\n', " ");
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
         let _ = writeln!(file, "{timestamp} [{component}] {safe_message}");
     }
-    if fs::metadata(&path).map(|m| m.len() > MAX_LOG_BYTES).unwrap_or(false) {
+    if fs::metadata(&path)
+        .map(|metadata| metadata.len() > MAX_LOG_BYTES)
+        .unwrap_or(false)
+    {
         if let Ok(mut file) = OpenOptions::new().read(true).open(&path) {
             let mut bytes = Vec::new();
             if file.read_to_end(&mut bytes).is_ok() {
                 let keep_from = bytes.len().saturating_sub((MAX_LOG_BYTES / 2) as usize);
-                let retained = &bytes[keep_from..];
-                let _ = fs::write(&path, retained);
+                let _ = fs::write(&path, &bytes[keep_from..]);
             }
         }
     }
@@ -47,5 +55,8 @@ pub fn snapshot() -> String {
         return "Bridge desktop diagnostics\nUnable to read the diagnostic log.".into();
     }
     let start = bytes.len().saturating_sub(MAX_LOG_BYTES as usize);
-    format!("Bridge desktop diagnostics\n{}", String::from_utf8_lossy(&bytes[start..]))
+    format!(
+        "Bridge desktop diagnostics\n{}",
+        String::from_utf8_lossy(&bytes[start..])
+    )
 }
