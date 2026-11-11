@@ -15,7 +15,7 @@ use windows::Win32::Media::MediaFoundation::{
     MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES,
     MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_END_OF_STREAM,
     MFT_MESSAGE_NOTIFY_END_STREAMING, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
-    MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample, MF_E_TRANSFORM_NEED_MORE_INPUT,
+    MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample,
     MFMediaType_Video, MFVideoFormat_H264, MFVideoFormat_NV12,
     MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE,
     MF_MT_SUBTYPE, MFShutdown, MFStartup, MFSTARTUP_FULL, MF_VERSION,
@@ -277,8 +277,8 @@ pub fn submit_first_nv12_sample(frame: &bridge_transfer::Nv12Frame) -> Result<Fi
 
                     let stream_info = unsafe { transform.GetOutputStreamInfo(0) }
                         .map_err(|error| format!("could not query H.264 output stream: {error}"))?;
-                    let provides_sample = stream_info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 != 0;
-                    let can_provide_sample = stream_info.dwFlags & MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES.0 != 0;
+                    let provides_sample = stream_info.dwFlags & (MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32) != 0;
+                    let can_provide_sample = stream_info.dwFlags & (MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES.0 as u32) != 0;
                     let output_sample = if provides_sample || can_provide_sample {
                         None
                     } else {
