@@ -115,8 +115,11 @@ private class AvcSurfaceDecoder(
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
         if (closed) return
+        executor.queue.clear()
         runCatching { executor.execute {
             surface = null
+            surfaceWidth = 0
+            surfaceHeight = 0
             releaseCodec()
             postStatus("H.264 output Surface was destroyed; BGRA fallback remains available.")
         } }
