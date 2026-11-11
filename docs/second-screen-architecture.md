@@ -57,6 +57,10 @@ The shared transfer protocol now defines a fixed-size, bounded pointer sample fo
 
 This is a wire-format foundation only. It does not yet inject input into Windows, authenticate a display lease for input operations, or expose touch/stylus controls in the Android UI. The next implementation must bind input to the active display lease and virtual-monitor dimensions, enforce event ordering/rate limits, and use a narrowly scoped Windows input API. Disconnect, lease expiry, malformed packets, and stale sequences must fail closed and release any active pointer state.
 
+## Android frame delivery status
+
+The Android receiver reassembles bounded BGRA8 frame fragments on the authenticated session reader. Completed frames are coalesced before dispatch to the main thread: at most one UI callback is pending per session, and a newer complete frame replaces an older pending frame. Completed frame sequence numbers must increase monotonically. This prevents a slow UI from accumulating stale frame callbacks, but the current renderer still converts BGRA8 frames into Compose bitmaps on the UI side. A dedicated MediaCodec/SurfaceView renderer and hardware video codec pipeline remain future work.
+
 ## Initial device profile and modes
 
 The first physical test target is the currently paired Redmi Note 7 Pro. Start with a portrait-native 1080 x 2340 mode at 60 Hz, plus a lower-bandwidth fallback mode. Confirm actual supported modes and decoder capability at runtime rather than assuming every Android device supports the same profile. Rotation and landscape modes must be negotiated explicitly.
