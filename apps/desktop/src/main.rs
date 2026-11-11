@@ -559,15 +559,28 @@ fn start_display_frame_stream(
         Ok(runtime) => {
             match media_foundation::discover_h264_encoders() {
                 Ok(encoders) if !encoders.is_empty() => {
+                    let activated = encoders.iter()
+                        .filter(|encoder| encoder.activation_succeeded).count();
                     let names = encoders.iter().take(3)
-                        .map(|encoder| encoder.friendly_name.as_str())
+                        .map(|encoder| {
+                            if encoder.activation_succeeded {
+                                format!(
+                                    "{} ({} in/{} out)",
+                                    encoder.friendly_name,
+                                    encoder.input_streams.unwrap_or(0),
+                                    encoder.output_streams.unwrap_or(0)
+                                )
+                            } else {
+                                encoder.friendly_name.clone()
+                            }
+                        })
                         .collect::<Vec<_>>()
                         .join(", ");
                     let _ = events.send(DisplayLeaseEvent::Status {
                         session_key: session_key.clone(),
                         message: format!(
-                            "Media Foundation found {} video encoder(s): {}. H.264 output activation is not enabled yet; using BGRA fallback.",
-                            encoders.len(), names
+                            "Media Foundation found {} H.264 encoder candidate(s); {} activated: {}. Encoding is not enabled yet; using BGRA fallback.",
+                            encoders.len(), activated, names
                         ),
                     });
                 }
