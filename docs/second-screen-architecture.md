@@ -128,3 +128,8 @@ The Android second-screen UI tracks the age of the most recently completed frame
 ## Windows frame-sender diagnostics
 
 The Windows desktop sender reports a rolling one-second source-side estimate while frames are successfully delivered through the authenticated session: sent FPS, raw BGRA payload bitrate, the number of capture sequence values superseded before the sender could read them, and average time spent sending each complete frame. The bitrate is raw pixel payload before Noise/TCP framing and is not a measured Wi-Fi wire rate. Superseded sequence values indicate latest-frame replacement between sender polls; they are not evidence of network packet loss. Compare this source estimate with Android's incoming-frame estimate to localize capture, sender, network, and receiver bottlenecks.
+
+
+## Android H.264 decoder capability probe
+
+The Android Second Screen page inspects the platform's regular (non-encoder) MediaCodec list for H.264/AVC decoders. It reports the preferred declared decoder, hardware-acceleration classification where Android exposes it, maximum declared dimensions/frame rate/bitrate, and whether 1080 × 2340 at 30 FPS is declared supported. The probe does not instantiate or start a codec and does not prove that a decoder can render a live stream to the eventual SurfaceView. Runtime configure/start, color format, sustained playback, rotation, and teardown must be validated by the MediaCodec renderer implementation and on physical hardware.
