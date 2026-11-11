@@ -35,7 +35,7 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
       - uses: Swatinem/rust-cache@v2
-      - name: Validate service installation scripts
+      - name: Validate Windows installation scripts
         shell: pwsh
         run: |
           $scripts = @(
