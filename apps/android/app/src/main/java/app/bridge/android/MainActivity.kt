@@ -555,6 +555,9 @@ private fun SecondScreenView(
     var frameRate by remember { mutableStateOf(0f) }
     var previousFrameAtNs by remember { mutableStateOf(0L) }
     var frameAgeMs by remember { mutableStateOf<Long?>(null) }
+    val avcDecoders by produceState(initialValue = emptyList<AvcDecoderCapability>()) {
+        value = withContext(Dispatchers.Default) { inspectAvcDecoders() }
+    }
     LaunchedEffect(frame?.sequence) {
         val receivedAt = frame?.receivedAtElapsedRealtimeNs ?: 0L
         if (receivedAt > 0L) {
@@ -739,6 +742,49 @@ private fun SecondScreenView(
                 "Your phone as a monitor",
                 "Windows sends captured display frames over your trusted encrypted connection."
             )
+            Surface(color = Panel, shape = RoundedCornerShape(14.dp), modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("H.264 HARDWARE DECODER", color = Accent, fontSize = 9.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+                    when {
+                        avcDecoders.isEmpty() -> {
+                            Text("No regular H.264 decoder reported", color = Amber, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                            Text("This device may not be able to use the planned hardware video path.", color = Muted, fontSize = 10.sp)
+                        }
+                        else -> {
+                            val preferredDecoder = avcDecoders.first()
+                            Text(
+                                if (preferredDecoder.hardwareAccelerated == true) "Hardware decoder available"
+                                else if (preferredDecoder.hardwareAccelerated == false) "Software decoder available"
+                                else "H.264 decoder available · acceleration not reported",
+                                color = if (preferredDecoder.hardwareAccelerated == true) Good else Amber,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(preferredDecoder.name, color = Color.White, fontSize = 10.sp)
+                            Text(
+                                "Max declared ${preferredDecoder.maxWidth} × ${preferredDecoder.maxHeight} · ${preferredDecoder.maxFrameRate.toInt()} FPS · ${preferredDecoder.maxBitrate / 1_000_000} Mbps",
+                                color = Muted,
+                                fontSize = 10.sp
+                            )
+                            Text(
+                                if (preferredDecoder.supportsRedmiTargetMode) "1080 × 2340 @ 30 FPS: declared supported"
+                                else "1080 × 2340 @ 30 FPS: not declared supported",
+                                color = if (preferredDecoder.supportsRedmiTargetMode) Good else Amber,
+                                fontSize = 10.sp
+                            )
+                            if (avcDecoders.size > 1) {
+                                Text("${avcDecoders.size} H.264 decoders reported by Android", color = Muted, fontSize = 9.sp)
+                            }
+                        }
+                    }
+                    Text(
+                        "Capability declaration only; actual codec and Surface initialization will be verified by the video renderer.",
+                        color = Muted,
+                        fontSize = 9.sp,
+                        lineHeight = 13.sp
+                    )
+                }
+            }
             Surface(color = Panel, shape = RoundedCornerShape(14.dp), modifier = Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Row(
