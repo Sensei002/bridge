@@ -227,7 +227,7 @@ private class AvcSurfaceDecoder(
 
     private fun requestKeyframe(frame: BridgeEncodedVideoFrame?) {
         if (frame != null) {
-            BridgeConnectionService.instance?.requestVideoKeyframe(frame.deviceId, frame.sequence)
+            BridgeConnectionService.instance?.requestVideoKeyframe(frame.deviceId, frame.sessionHandle, frame.sequence)
         }
     }
 
