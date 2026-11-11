@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod diagnostics;
+
 #[cfg(windows)]
 mod media_foundation;
 #[cfg(windows)]
@@ -1734,6 +1736,7 @@ impl eframe::App for BridgeApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         ctx.request_repaint_after(Duration::from_millis(500));
         for message in self.network_rx.try_iter() {
+            diagnostics::record("network", &message);
             self.network_status = message;
         }
         #[cfg(windows)]
@@ -2617,6 +2620,16 @@ impl eframe::App for BridgeApp {
                         }
 
                         panel(ui, |ui| {
+                            eyebrow(ui, "SHOW LOGS");
+                            ui.label(egui::RichText::new("Diagnostics").strong());
+                            muted(ui, "Recent Bridge events and errors from this Windows device. Logs stay on this PC.");
+                            if ui.button("Copy Logs").clicked() {
+                                ui.ctx().copy_text(diagnostics::snapshot());
+                            }
+                            muted(ui, "Copies the most recent 500 KB of diagnostic history.");
+                        });
+                        ui.add_space(14.0);
+                        panel(ui, |ui| {
                             eyebrow(ui, "About");
                             ui.label(egui::RichText::new("Bridge for Windows").strong());
                             muted(ui, &format!("Version {} · Native Rust interface", option_env!("BRIDGE_BUILD_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))));
@@ -2936,6 +2949,10 @@ fn now_ms() -> u64 {
 }
 
 fn main() -> eframe::Result<()> {
+    diagnostics::record("app", &format!("Bridge desktop starting · version {}", env!("CARGO_PKG_VERSION")));
+    std::panic::set_hook(Box::new(|info| {
+        diagnostics::record("panic", &info.to_string());
+    }));
     let icon = image::load_from_memory(include_bytes!("../../../assets/bridge-app-icon.png"))
         .expect("Bridge app icon must be a valid PNG").to_rgba8();
     let (icon_width, icon_height) = icon.dimensions();
