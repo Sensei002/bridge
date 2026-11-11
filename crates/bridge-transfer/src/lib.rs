@@ -730,4 +730,49 @@ mod tests {
         assert!(matches!(incoming.finish(), Err(TransferError::ChecksumMismatch)));
         fs::remove_dir_all(directory).unwrap();
     }
+
+
+    #[test]
+    fn display_frames_fragment_and_reassemble_in_order() {
+        let frame = DisplayFrame {
+            sequence: 7, width: 128, height: 128, stride: 512, timestamp_ns: 99,
+            pixels: vec![0x5a; 512 * 128],
+        };
+        let packets = fragment_display_frame(&frame).unwrap();
+        assert!(packets.len() > 1);
+        assert!(packets.iter().all(|packet| packet.len() <= MAX_PACKET_BYTES));
+        let mut assembler = DisplayFrameAssembler::default();
+        for packet in &packets[..packets.len() - 1] {
+            assert!(assembler.push(packet).unwrap().is_none());
+        }
+        assert_eq!(assembler.push(packets.last().unwrap()).unwrap(), Some(frame));
+    }
+
+    #[test]
+    fn display_frame_assembler_rejects_out_of_order_fragments() {
+        let frame = DisplayFrame {
+            sequence: 8, width: 128, height: 128, stride: 512, timestamp_ns: 100,
+            pixels: vec![0x33; 512 * 128],
+        };
+        let packets = fragment_display_frame(&frame).unwrap();
+        let mut assembler = DisplayFrameAssembler::default();
+        assert!(assembler.push(&packets[1]).is_err());
+        assert!(assembler.push(&packets[0]).unwrap().is_none());
+        assert!(assembler.push(&packets[0]).is_err());
+    }
+
+    #[test]
+    fn display_frame_transport_rejects_invalid_metadata_and_oversized_fragments() {
+        let invalid = DisplayFrame {
+            sequence: 1, width: 10, height: 10, stride: 40, timestamp_ns: 1,
+            pixels: vec![0; 399],
+        };
+        assert!(fragment_display_frame(&invalid).is_err());
+        let fragment = DisplayFrameFragment {
+            sequence: 1, width: 2, height: 2, stride: 8, timestamp_ns: 1,
+            total_bytes: 16, offset: 0, data: vec![0; DISPLAY_FRAME_FRAGMENT_BYTES + 1],
+        };
+        assert!(encode_display_frame_fragment(&fragment).is_err());
+    }
+
 }
