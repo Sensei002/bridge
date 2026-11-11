@@ -394,13 +394,15 @@ class BridgeConnectionService : Service() {
         transferReceiver?.sendFile(uri, sessionHandle)
     }
 
-    internal fun requestVideoKeyframe(deviceId: String, lastSequence: Long) {
-        val handle = BridgeRuntimeState.connectedSessionHandles[deviceId] ?: return
+    internal fun requestVideoKeyframe(deviceId: String, sessionHandle: Long, lastSequence: Long) {
+        if (sessionHandle == 0L) return
         try {
-            transferReceiver?.requestVideoKeyframe(handle, lastSequence)
+            transferReceiver?.requestVideoKeyframe(sessionHandle, lastSequence)
         } catch (error: Exception) {
-            BridgeRuntimeState.transferStatus.value =
-                "Could not request an H.264 recovery keyframe: ${error.message ?: error.javaClass.simpleName}"
+            mainHandler.post {
+                if (!stopping) BridgeRuntimeState.transferStatus.value =
+                    "Could not request an H.264 recovery keyframe from $deviceId: ${error.message ?: error.javaClass.simpleName}"
+            }
         }
     }
 
