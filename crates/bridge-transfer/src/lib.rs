@@ -187,6 +187,7 @@ pub enum TransferPacket {
     Control(TransferControl),
     Chunk(FileChunk),
     DisplayFrame(DisplayFrameFragment),
+    EncodedVideoFrame(EncodedVideoFrameFragment),
     DisplayInput(DisplayInputEvent),
 }
 
@@ -250,6 +251,7 @@ pub fn encode_packet(packet: &TransferPacket) -> Result<Vec<u8>, TransferError> 
             bytes
         }
         TransferPacket::DisplayFrame(fragment) => encode_display_frame_fragment(fragment)?,
+        TransferPacket::EncodedVideoFrame(fragment) => encode_encoded_video_fragment(fragment)?,
         TransferPacket::DisplayInput(event) => encode_display_input(*event)?,
     };
     if encoded.len() > MAX_PACKET_BYTES {
@@ -266,6 +268,7 @@ pub fn decode_packet(bytes: &[u8]) -> Result<TransferPacket, TransferError> {
         CONTROL_PACKET_TAG => Ok(TransferPacket::Control(decode_control(&bytes[1..])?)),
         CHUNK_PACKET_TAG => Ok(TransferPacket::Chunk(decode_chunk(&bytes[1..])?)),
         DISPLAY_FRAME_PACKET_TAG => Ok(TransferPacket::DisplayFrame(decode_display_frame_fragment(bytes)?)),
+        ENCODED_VIDEO_PACKET_TAG => Ok(TransferPacket::EncodedVideoFrame(decode_encoded_video_fragment(bytes)?)),
         DISPLAY_INPUT_PACKET_TAG => Ok(TransferPacket::DisplayInput(decode_display_input(bytes)?)),
         _ => Err(TransferError::InvalidChunk("unknown transfer packet type".into())),
     }
@@ -480,6 +483,12 @@ pub const DISPLAY_FRAME_FRAGMENT_BYTES: usize = 48 * 1024;
 pub const DISPLAY_FRAME_PACKET_TAG: u8 = 0x04;
 const DISPLAY_FRAME_FRAGMENT_HEADER_BYTES: usize = 1 + 8 + 4 + 4 + 4 + 8 + 4 + 4;
 
+/// H.264 access units use a separate packet discriminator from raw BGRA frames.
+pub const ENCODED_VIDEO_PACKET_TAG: u8 = 0x06;
+/// Bound a single encoded access unit to 16 MiB, including large keyframes.
+pub const MAX_ENCODED_VIDEO_FRAME_BYTES: usize = 16 * 1024 * 1024;
+const ENCODED_VIDEO_FRAGMENT_HEADER_BYTES: usize = 1 + 8 + 4 + 4 + 8 + 4 + 4 + 1;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DisplayFrameFragment {
     pub sequence: u64,
@@ -500,6 +509,203 @@ pub struct DisplayFrame {
     pub stride: u32,
     pub timestamp_ns: u64,
     pub pixels: Vec<u8>,
+}
+
+/// One bounded fragment of an Annex-B H.264 access unit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EncodedVideoFrameFragment {
+    pub sequence: u64,
+    pub width: u32,
+    pub height: u32,
+    pub timestamp_ns: u64,
+    pub total_bytes: u32,
+    pub offset: u32,
+    pub keyframe: bool,
+    pub data: Vec<u8>,
+}
+
+/// Complete encoded H.264 access unit, ready for a decoder input buffer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EncodedVideoFrame {
+    pub sequence: u64,
+    pub width: u32,
+    pub height: u32,
+    pub timestamp_ns: u64,
+    pub keyframe: bool,
+    /// Annex-B byte stream. The encoder is responsible for including SPS/PPS
+    /// on keyframes or the receiver must obtain codec configuration separately.
+    pub bitstream: Vec<u8>,
+}
+
+fn validate_encoded_video_metadata(
+    sequence: u64, width: u32, height: u32, timestamp_ns: u64, total_bytes: u32,
+) -> Result<(), TransferError> {
+    if sequence == 0 || timestamp_ns == 0 || width == 0 || height == 0
+        || width > 4096 || height > 4096
+        || total_bytes == 0 || total_bytes as usize > MAX_ENCODED_VIDEO_FRAME_BYTES
+    {
+        return Err(TransferError::InvalidChunk("encoded video metadata is invalid or exceeds the 16 MiB access-unit limit".into()));
+    }
+    Ok(())
+}
+
+pub fn encode_encoded_video_fragment(
+    fragment: &EncodedVideoFrameFragment,
+) -> Result<Vec<u8>, TransferError> {
+    validate_encoded_video_metadata(
+        fragment.sequence, fragment.width, fragment.height,
+        fragment.timestamp_ns, fragment.total_bytes,
+    )?;
+    let end = (fragment.offset as u64).checked_add(fragment.data.len() as u64)
+        .ok_or_else(|| TransferError::InvalidChunk("encoded video fragment range overflow".into()))?;
+    if fragment.data.is_empty() || fragment.data.len() > DISPLAY_FRAME_FRAGMENT_BYTES
+        || end > fragment.total_bytes as u64
+    {
+        return Err(TransferError::InvalidChunk("encoded video fragment payload range is invalid".into()));
+    }
+    let mut bytes = Vec::with_capacity(ENCODED_VIDEO_FRAGMENT_HEADER_BYTES + fragment.data.len());
+    bytes.push(ENCODED_VIDEO_PACKET_TAG);
+    bytes.extend_from_slice(&fragment.sequence.to_be_bytes());
+    bytes.extend_from_slice(&fragment.width.to_be_bytes());
+    bytes.extend_from_slice(&fragment.height.to_be_bytes());
+    bytes.extend_from_slice(&fragment.timestamp_ns.to_be_bytes());
+    bytes.extend_from_slice(&fragment.total_bytes.to_be_bytes());
+    bytes.extend_from_slice(&fragment.offset.to_be_bytes());
+    bytes.push(u8::from(fragment.keyframe));
+    bytes.extend_from_slice(&fragment.data);
+    if bytes.len() > MAX_PACKET_BYTES {
+        return Err(TransferError::InvalidChunk("encoded video fragment exceeds the encrypted message limit".into()));
+    }
+    Ok(bytes)
+}
+
+pub fn decode_encoded_video_fragment(
+    bytes: &[u8],
+) -> Result<EncodedVideoFrameFragment, TransferError> {
+    if bytes.len() <= ENCODED_VIDEO_FRAGMENT_HEADER_BYTES || bytes.len() > MAX_PACKET_BYTES
+        || bytes[0] != ENCODED_VIDEO_PACKET_TAG
+    {
+        return Err(TransferError::InvalidChunk("encoded video fragment packet size or tag is invalid".into()));
+    }
+    let u32_at = |offset: usize| -> Result<u32, TransferError> {
+        let value: [u8; 4] = bytes.get(offset..offset + 4)
+            .ok_or_else(|| TransferError::InvalidChunk("truncated encoded video header".into()))?
+            .try_into().map_err(|_| TransferError::InvalidChunk("invalid encoded video field".into()))?;
+        Ok(u32::from_be_bytes(value))
+    };
+    let u64_at = |offset: usize| -> Result<u64, TransferError> {
+        let value: [u8; 8] = bytes.get(offset..offset + 8)
+            .ok_or_else(|| TransferError::InvalidChunk("truncated encoded video header".into()))?
+            .try_into().map_err(|_| TransferError::InvalidChunk("invalid encoded video field".into()))?;
+        Ok(u64::from_be_bytes(value))
+    };
+    let keyframe = match bytes[33] {
+        0 => false,
+        1 => true,
+        _ => return Err(TransferError::InvalidChunk("encoded video keyframe flag is invalid".into())),
+    };
+    let fragment = EncodedVideoFrameFragment {
+        sequence: u64_at(1)?,
+        width: u32_at(9)?,
+        height: u32_at(13)?,
+        timestamp_ns: u64_at(17)?,
+        total_bytes: u32_at(25)?,
+        offset: u32_at(29)?,
+        keyframe,
+        data: bytes[ENCODED_VIDEO_FRAGMENT_HEADER_BYTES..].to_vec(),
+    };
+    validate_encoded_video_metadata(
+        fragment.sequence, fragment.width, fragment.height,
+        fragment.timestamp_ns, fragment.total_bytes,
+    )?;
+    let end = (fragment.offset as u64).checked_add(fragment.data.len() as u64)
+        .ok_or_else(|| TransferError::InvalidChunk("encoded video fragment range overflow".into()))?;
+    if fragment.data.is_empty() || fragment.data.len() > DISPLAY_FRAME_FRAGMENT_BYTES
+        || end > fragment.total_bytes as u64
+    {
+        return Err(TransferError::InvalidChunk("encoded video fragment payload range is invalid".into()));
+    }
+    Ok(fragment)
+}
+
+pub fn fragment_encoded_video_frame(
+    frame: &EncodedVideoFrame,
+) -> Result<Vec<Vec<u8>>, TransferError> {
+    let total_bytes = u32::try_from(frame.bitstream.len())
+        .map_err(|_| TransferError::InvalidChunk("encoded video access unit is too large".into()))?;
+    validate_encoded_video_metadata(
+        frame.sequence, frame.width, frame.height, frame.timestamp_ns, total_bytes,
+    )?;
+    let mut packets = Vec::with_capacity(frame.bitstream.len().div_ceil(DISPLAY_FRAME_FRAGMENT_BYTES));
+    for (index, data) in frame.bitstream.chunks(DISPLAY_FRAME_FRAGMENT_BYTES).enumerate() {
+        let offset = index.checked_mul(DISPLAY_FRAME_FRAGMENT_BYTES)
+            .ok_or_else(|| TransferError::InvalidChunk("encoded video fragment offset overflow".into()))?;
+        packets.push(encode_encoded_video_fragment(&EncodedVideoFrameFragment {
+            sequence: frame.sequence,
+            width: frame.width,
+            height: frame.height,
+            timestamp_ns: frame.timestamp_ns,
+            total_bytes,
+            offset: u32::try_from(offset)
+                .map_err(|_| TransferError::InvalidChunk("encoded video fragment offset overflow".into()))?,
+            keyframe: frame.keyframe,
+            data: data.to_vec(),
+        })?);
+    }
+    Ok(packets)
+}
+
+/// Reassembles one bounded H.264 access unit and rejects stale or reordered fragments.
+#[derive(Default)]
+pub struct EncodedVideoFrameAssembler {
+    active: Option<EncodedVideoFrameFragment>,
+    bitstream: Vec<u8>,
+    last_completed_sequence: u64,
+}
+
+impl EncodedVideoFrameAssembler {
+    pub fn reset(&mut self) {
+        self.active = None;
+        self.bitstream.clear();
+    }
+
+    pub fn push(&mut self, packet: &[u8]) -> Result<Option<EncodedVideoFrame>, TransferError> {
+        let fragment = decode_encoded_video_fragment(packet)?;
+        if fragment.offset == 0 {
+            if self.active.is_some() || fragment.sequence <= self.last_completed_sequence {
+                self.reset();
+                return Err(TransferError::InvalidChunk("encoded video access unit is overlapping or stale".into()));
+            }
+            self.bitstream = Vec::with_capacity(fragment.total_bytes as usize);
+            self.active = Some(fragment.clone());
+        }
+        let Some(first) = self.active.as_ref() else {
+            return Err(TransferError::InvalidChunk("encoded video access unit must begin with offset zero".into()));
+        };
+        if fragment.sequence != first.sequence || fragment.width != first.width
+            || fragment.height != first.height || fragment.timestamp_ns != first.timestamp_ns
+            || fragment.total_bytes != first.total_bytes || fragment.keyframe != first.keyframe
+            || fragment.offset as usize != self.bitstream.len()
+        {
+            self.reset();
+            return Err(TransferError::InvalidChunk("encoded video fragments are out of order or have inconsistent metadata".into()));
+        }
+        self.bitstream.extend_from_slice(&fragment.data);
+        if self.bitstream.len() == fragment.total_bytes as usize {
+            let first = self.active.take().expect("active encoded frame exists");
+            let bitstream = std::mem::take(&mut self.bitstream);
+            self.last_completed_sequence = first.sequence;
+            return Ok(Some(EncodedVideoFrame {
+                sequence: first.sequence,
+                width: first.width,
+                height: first.height,
+                timestamp_ns: first.timestamp_ns,
+                keyframe: first.keyframe,
+                bitstream,
+            }));
+        }
+        Ok(None)
+    }
 }
 
 fn validate_display_frame_metadata(
@@ -831,6 +1037,63 @@ mod tests {
         malformed_action[18] = 0xff;
         assert!(decode_packet(&malformed_action).is_err());
         assert!(decode_packet(&encoded[..encoded.len() - 1]).is_err());
+    }
+
+    #[test]
+    fn encoded_video_fragments_round_trip_through_packet_decoder() {
+        let frame = EncodedVideoFrame {
+            sequence: 11,
+            width: 1080,
+            height: 2340,
+            timestamp_ns: 987_654,
+            keyframe: true,
+            bitstream: vec![0x65; DISPLAY_FRAME_FRAGMENT_BYTES + 31],
+        };
+        let packets = fragment_encoded_video_frame(&frame).unwrap();
+        assert!(packets.len() > 1);
+        assert!(packets.iter().all(|packet| packet.len() <= MAX_PACKET_BYTES));
+        let first = decode_packet(&packets[0]).unwrap();
+        assert!(matches!(first, TransferPacket::EncodedVideoFrame(_)));
+        let mut assembler = EncodedVideoFrameAssembler::default();
+        for packet in &packets[..packets.len() - 1] {
+            assert!(assembler.push(packet).unwrap().is_none());
+        }
+        assert_eq!(assembler.push(packets.last().unwrap()).unwrap(), Some(frame));
+        assert!(assembler.push(&packets[0]).is_err());
+    }
+
+    #[test]
+    fn encoded_video_rejects_invalid_metadata_flags_and_oversized_access_units() {
+        let mut invalid = EncodedVideoFrame {
+            sequence: 1, width: 1920, height: 1080, timestamp_ns: 1,
+            keyframe: false, bitstream: vec![0x41; 10],
+        };
+        invalid.sequence = 0;
+        assert!(fragment_encoded_video_frame(&invalid).is_err());
+        invalid.sequence = 1;
+        invalid.bitstream = vec![0; MAX_ENCODED_VIDEO_FRAME_BYTES + 1];
+        assert!(fragment_encoded_video_frame(&invalid).is_err());
+
+        let fragment = EncodedVideoFrameFragment {
+            sequence: 1, width: 2, height: 2, timestamp_ns: 1,
+            total_bytes: 4, offset: 0, keyframe: true, data: vec![1, 2, 3, 4],
+        };
+        let mut encoded = encode_encoded_video_fragment(&fragment).unwrap();
+        encoded[33] = 2;
+        assert!(decode_encoded_video_fragment(&encoded).is_err());
+    }
+
+    #[test]
+    fn encoded_video_assembler_rejects_out_of_order_fragments() {
+        let frame = EncodedVideoFrame {
+            sequence: 3, width: 16, height: 16, timestamp_ns: 9,
+            keyframe: false, bitstream: vec![0x41; DISPLAY_FRAME_FRAGMENT_BYTES + 4],
+        };
+        let packets = fragment_encoded_video_frame(&frame).unwrap();
+        let mut assembler = EncodedVideoFrameAssembler::default();
+        assert!(assembler.push(&packets[1]).is_err());
+        assert!(assembler.push(&packets[0]).unwrap().is_none());
+        assert!(assembler.push(&packets[0]).is_err());
     }
 
     #[test]

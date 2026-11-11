@@ -133,3 +133,8 @@ The Windows desktop sender reports a rolling one-second source-side estimate whi
 ## Android H.264 decoder capability probe
 
 The Android Second Screen page inspects the platform's regular (non-encoder) MediaCodec list for H.264/AVC decoders. It reports the preferred declared decoder, hardware-acceleration classification where Android exposes it, maximum declared dimensions/frame rate/bitrate, and whether 1080 × 2340 at 30 FPS is declared supported. The probe does not instantiate or start a codec and does not prove that a decoder can render a live stream to the eventual SurfaceView. Runtime configure/start, color format, sustained playback, rotation, and teardown must be validated by the MediaCodec renderer implementation and on physical hardware.
+
+
+## Bounded H.264 access-unit wire format
+
+The shared transfer crate defines a dedicated packet discriminator for encoded H.264/AVC access-unit fragments, separate from the existing raw BGRA frame tag. Each fragment carries a monotonic frame sequence, dimensions, source timestamp, total access-unit length, byte offset, and keyframe flag. Fragment payloads remain within the existing encrypted-message limit; a complete encoded access unit is capped at 16 MiB. The assembler accepts one access unit at a time, validates contiguous offsets and consistent metadata, and rejects overlapping or stale sequences. This is a protocol foundation only: it does not yet replace the Windows BGRA sender, establish a dedicated datagram media transport, or connect Android MediaCodec to a Surface.
