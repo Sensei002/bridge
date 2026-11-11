@@ -15,7 +15,9 @@
 
     <StandardDirectory Id="LocalAppDataFolder">
       <Directory Id="ProgramsFolder" Name="Programs">
-        <Directory Id="INSTALLFOLDER" Name="Bridge" />
+        <Directory Id="INSTALLFOLDER" Name="Bridge">
+          <Directory Id="DisplayServiceSetupFolder" Name="DisplayServiceSetup" />
+        </Directory>
       </Directory>
     </StandardDirectory>
 
@@ -25,12 +27,21 @@
 
     <Feature Id="MainFeature" Title="Bridge" Level="1">
       <ComponentGroupRef Id="BridgeFiles" />
+      <ComponentGroupRef Id="BridgeDisplayServiceSetup" />
       <ComponentGroupRef Id="BridgeShortcuts" />
     </Feature>
 
     <ComponentGroup Id="BridgeFiles" Directory="INSTALLFOLDER">
       <Component Id="BridgeExecutable" Guid="*">
         <File Id="BridgeExecutableFile" Source="$(var.PublishDir)\bridge-desktop.exe" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <ComponentGroup Id="BridgeDisplayServiceSetup" Directory="DisplayServiceSetupFolder">
+      <Component Id="BridgeDisplayServiceSetupFiles" Guid="*">
+        <File Id="BridgeDisplayServiceExecutable" Source="$(var.ServicePublishDir)\bridge-display-service.exe" KeyPath="yes" />
+        <File Id="BridgeDisplayServiceInstallScript" Source="$(var.ScriptsDir)\Install-BridgeDisplayService.ps1" />
+        <File Id="BridgeDisplayServiceUninstallScript" Source="$(var.ScriptsDir)\Uninstall-BridgeDisplayService.ps1" />
       </Component>
     </ComponentGroup>
 
