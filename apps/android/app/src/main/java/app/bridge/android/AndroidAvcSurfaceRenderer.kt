@@ -79,6 +79,7 @@ private class AvcSurfaceDecoder(
     private var configuredWidth = 0
     private var configuredHeight = 0
     private var waitingForKeyframe = true
+    private val recoveryState = AvcDecoderRecoveryState()
 
     override fun surfaceCreated(holder: SurfaceHolder) {
         val newSurface = holder.surface
@@ -117,15 +118,21 @@ private class AvcSurfaceDecoder(
         val outputSurface = surface
         if (outputSurface == null || !outputSurface.isValid) return
 
+        val recovery = recoveryState.observe(frame)
+        if (recovery.sequenceGap) {
+            releaseCodec()
+            postStatus("H.264 frame sequence gap detected; decoder reset and waiting for the next IDR keyframe.")
+        }
+
         if (codec != null && (configuredWidth != frame.width || configuredHeight != frame.height)) {
             releaseCodec()
         }
 
         if (codec == null) {
             if (!frame.keyframe) return
-            val parameterSets = AvcAnnexBParser.extract(frame.bitstream)
+            val parameterSets = recovery.parameterSets
             if (parameterSets == null) {
-                postStatus("Received an H.264 IDR frame without Annex-B SPS/PPS; waiting for a configured keyframe.")
+                postStatus("Received an H.264 IDR frame but no cached SPS/PPS is available; waiting for a configured keyframe.")
                 return
             }
             try {
@@ -226,5 +233,6 @@ private class AvcSurfaceDecoder(
             }
         }
         executor.shutdown()
+        recoveryState.reset()
     }
 }
