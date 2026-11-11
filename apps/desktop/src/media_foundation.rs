@@ -97,7 +97,7 @@ unsafe fn test_nv12_h264_profile(transform: &IMFTransform) -> Result<(), String>
 /// Commit the target profile after the non-mutating compatibility probe.
 /// The transform is shut down by the caller after diagnostics are collected;
 /// this milestone deliberately does not submit input samples.
-unsafe fn configure_nv12_h264_profile(transform: &IMFTransform) -> Result<(), String> {
+unsafe fn configure_nv12_h264_profile(transform: &IMFTransform, width: u32, height: u32) -> Result<(), String> {
     let input = unsafe { MFCreateMediaType() }
         .map_err(|error| format!("could not create NV12 media type: {error}"))?;
     unsafe {
@@ -105,7 +105,7 @@ unsafe fn configure_nv12_h264_profile(transform: &IMFTransform) -> Result<(), St
             .map_err(|error| format!("could not set NV12 major type: {error}"))?;
         input.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_NV12)
             .map_err(|error| format!("could not set NV12 subtype: {error}"))?;
-        input.SetUINT64(&MF_MT_FRAME_SIZE, (1080_u64 << 32) | 2340)
+        input.SetUINT64(&MF_MT_FRAME_SIZE, ((width as u64) << 32) | height as u64)
             .map_err(|error| format!("could not set NV12 frame size: {error}"))?;
         input.SetUINT64(&MF_MT_FRAME_RATE, (60_u64 << 32) | 1)
             .map_err(|error| format!("could not set NV12 frame rate: {error}"))?;
@@ -118,7 +118,7 @@ unsafe fn configure_nv12_h264_profile(transform: &IMFTransform) -> Result<(), St
             .map_err(|error| format!("could not set H.264 major type: {error}"))?;
         output.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_H264)
             .map_err(|error| format!("could not set H.264 subtype: {error}"))?;
-        output.SetUINT64(&MF_MT_FRAME_SIZE, (1080_u64 << 32) | 2340)
+        output.SetUINT64(&MF_MT_FRAME_SIZE, ((width as u64) << 32) | height as u64)
             .map_err(|error| format!("could not set H.264 frame size: {error}"))?;
         output.SetUINT64(&MF_MT_FRAME_RATE, (60_u64 << 32) | 1)
             .map_err(|error| format!("could not set H.264 frame rate: {error}"))?;
@@ -141,10 +141,10 @@ unsafe fn configure_nv12_h264_profile(transform: &IMFTransform) -> Result<(), St
             .map_err(|error| format!("could not read committed NV12 dimensions: {error}"))?;
         let output_size = current_output.GetUINT64(&MF_MT_FRAME_SIZE)
             .map_err(|error| format!("could not read committed H.264 dimensions: {error}"))?;
-        if input_size != ((1080_u64 << 32) | 2340)
-            || output_size != ((1080_u64 << 32) | 2340)
+        if input_size != (((width as u64) << 32) | height as u64)
+            || output_size != (((width as u64) << 32) | height as u64)
         {
-            return Err("encoder did not retain the requested 1080x2340 frame dimensions".into());
+            return Err("encoder did not retain the requested frame dimensions".into());
         }
     }
     Ok(())
@@ -232,7 +232,7 @@ pub fn submit_first_nv12_sample(frame: &bridge_transfer::Nv12Frame) -> Result<Fi
                 };
                 let transform = unsafe { activation.ActivateObject::<IMFTransform>() }
                     .map_err(|error| format!("{name}: activation failed: {error}"))?;
-                let configured = unsafe { configure_nv12_h264_profile(&transform) };
+                let configured = unsafe { configure_nv12_h264_profile(&transform, 1080, 2340) };
                 if let Err(error) = configured {
                     drop(transform);
                     let _ = unsafe { activation.ShutdownObject() };
@@ -360,12 +360,17 @@ pub struct PersistentH264Encoder {
     activation: Option<IMFActivate>,
     transform: Option<IMFTransform>,
     encoder_name: String,
+    width: u32,
+    height: u32,
     last_timestamp_100ns: Option<i64>,
 }
 
 impl PersistentH264Encoder {
     /// Enumerate, activate, and configure one synchronous H.264 encoder.
-    pub fn start() -> Result<Self, String> {
+    pub fn start(width: u32, height: u32) -> Result<Self, String> {
+        if width < 2 || height < 2 || width > 4096 || height > 4096 || width % 2 != 0 || height % 2 != 0 {
+            return Err(format!("unsupported H.264 frame dimensions: {width}x{height}; dimensions must be even and within 2..=4096"));
+        }
         let flags: MFT_ENUM_FLAG = MFT_ENUM_FLAG_HARDWARE
             | MFT_ENUM_FLAG_SYNCMFT
             | MFT_ENUM_FLAG_LOCALMFT
@@ -404,7 +409,7 @@ impl PersistentH264Encoder {
                     };
                     let transform = unsafe { activation.ActivateObject::<IMFTransform>() }
                         .map_err(|error| format!("{name}: activation failed: {error}"))?;
-                    if let Err(error) = unsafe { configure_nv12_h264_profile(&transform) } {
+                    if let Err(error) = unsafe { configure_nv12_h264_profile(&transform, width, height) } {
                         drop(transform);
                         return Err(format!("{name}: {error}"));
                     }
@@ -436,6 +441,8 @@ impl PersistentH264Encoder {
             activation: Some(activation),
             transform: Some(transform),
             encoder_name,
+            width,
+            height,
             last_timestamp_100ns: None,
         })
     }
@@ -444,10 +451,14 @@ impl PersistentH264Encoder {
         &self.encoder_name
     }
 
+    pub fn dimensions(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
     /// Submit one frame and drain currently available output, with strict bounds.
     pub fn encode(&mut self, frame: &bridge_transfer::Nv12Frame) -> Result<PersistentEncodeResult, String> {
-        if frame.width != 1080 || frame.height != 2340 {
-            return Err(format!("persistent encoder expects 1080x2340 NV12; received {}x{}", frame.width, frame.height));
+        if frame.width != self.width || frame.height != self.height {
+            return Err(format!("persistent encoder expects {}x{} NV12; received {}x{}", self.width, self.height, frame.width, frame.height));
         }
         let expected = (frame.width as usize)
             .checked_mul(frame.height as usize)
