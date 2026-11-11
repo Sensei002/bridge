@@ -29,7 +29,7 @@ pub fn record(component: &str, message: &str) {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let safe_message = message.replace(['\\r', '\\n'], " ");
+    let safe_message = message.replace(['\r', '\n'], " ");
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
         let _ = writeln!(file, "{timestamp} [{component}] {safe_message}");
     }
@@ -48,18 +48,18 @@ pub fn record(component: &str, message: &str) {
 }
 
 pub fn snapshot() -> String {
-    let Ok(_guard) = LOG_LOCK.lock() else { return "Bridge desktop diagnostics\\nLog is busy; try again.".into() };
+    let Ok(_guard) = LOG_LOCK.lock() else { return "Bridge desktop diagnostics\nLog is busy; try again.".into() };
     let path = log_path();
     let Ok(mut file) = OpenOptions::new().read(true).open(path) else {
-        return "Bridge desktop diagnostics\\nNo log entries have been recorded yet.".into();
+        return "Bridge desktop diagnostics\nNo log entries have been recorded yet.".into();
     };
     let mut bytes = Vec::new();
     if file.read_to_end(&mut bytes).is_err() {
-        return "Bridge desktop diagnostics\\nUnable to read the diagnostic log.".into();
+        return "Bridge desktop diagnostics\nUnable to read the diagnostic log.".into();
     }
     let start = bytes.len().saturating_sub(MAX_LOG_BYTES as usize);
     format!(
-        "Bridge desktop diagnostics\\n{}",
+        "Bridge desktop diagnostics\n{}",
         String::from_utf8_lossy(&bytes[start..])
     )
 }
