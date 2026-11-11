@@ -38,10 +38,14 @@
     </ComponentGroup>
 
     <ComponentGroup Id="BridgeDisplayServiceSetup" Directory="DisplayServiceSetupFolder">
-      <Component Id="BridgeDisplayServiceSetupFiles" Guid="*">
+      <Component Id="BridgeDisplayServiceExecutableComponent" Guid="*">
         <File Id="BridgeDisplayServiceExecutable" Source="$(var.ServicePublishDir)\bridge-display-service.exe" KeyPath="yes" />
-        <File Id="BridgeDisplayServiceInstallScript" Source="$(var.ScriptsDir)\Install-BridgeDisplayService.ps1" />
-        <File Id="BridgeDisplayServiceUninstallScript" Source="$(var.ScriptsDir)\Uninstall-BridgeDisplayService.ps1" />
+      </Component>
+      <Component Id="BridgeDisplayServiceInstallScriptComponent" Guid="*">
+        <File Id="BridgeDisplayServiceInstallScript" Source="$(var.ScriptsDir)\Install-BridgeDisplayService.ps1" KeyPath="yes" />
+      </Component>
+      <Component Id="BridgeDisplayServiceUninstallScriptComponent" Guid="*">
+        <File Id="BridgeDisplayServiceUninstallScript" Source="$(var.ScriptsDir)\Uninstall-BridgeDisplayService.ps1" KeyPath="yes" />
       </Component>
     </ComponentGroup>
 
