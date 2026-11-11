@@ -47,6 +47,8 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.input.pointer.pointerInteropFilter
 import androidx.compose.ui.Alignment
@@ -547,11 +549,22 @@ private fun SecondScreenView(
 ) {
     var imageSize by remember { mutableStateOf(IntSize.Zero) }
     val activePointers = remember { mutableSetOf<Int>() }
-    val bitmap = remember(frame?.sequence, frame?.width, frame?.height) {
-        frame?.let {
-            Bitmap.createBitmap(it.width, it.height, Bitmap.Config.ARGB_8888).also { image ->
-                image.copyPixelsFromBuffer(ByteBuffer.wrap(it.pixels))
-            }.asImageBitmap()
+    val bitmap by produceState<androidx.compose.ui.graphics.ImageBitmap?>(
+        initialValue = null,
+        key1 = frame?.sequence,
+        key2 = frame?.width,
+        key3 = frame?.height
+    ) {
+        value = if (frame == null) {
+            null
+        } else {
+            // Bitmap allocation and BGRA-to-platform pixel upload can be expensive
+            // at display refresh rates; keep that work off the Compose main thread.
+            withContext(Dispatchers.Default) {
+                Bitmap.createBitmap(frame.width, frame.height, Bitmap.Config.ARGB_8888).also { image ->
+                    image.copyPixelsFromBuffer(ByteBuffer.wrap(frame.pixels))
+                }.asImageBitmap()
+            }
         }
     }
 
