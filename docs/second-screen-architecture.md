@@ -61,6 +61,10 @@ This is a wire-format foundation only. It does not yet inject input into Windows
 
 The Android receiver reassembles bounded BGRA8 frame fragments on the authenticated session reader. Completed frames are coalesced before dispatch to the main thread: at most one UI callback is pending per session, and a newer complete frame replaces an older pending frame. Completed frame sequence numbers must increase monotonically. This prevents a slow UI from accumulating stale frame callbacks, but the current renderer still converts BGRA8 frames into Compose bitmaps on the UI side. A dedicated MediaCodec/SurfaceView renderer and hardware video codec pipeline remain future work.
 
+## Android bitmap conversion
+
+The Compose second-screen view performs bitmap allocation and BGRA8 pixel upload on a cancellable coroutine using `Dispatchers.Default`, rather than doing the CPU work on the main thread. A new frame key cancels the previous conversion coroutine so obsolete conversion results are not applied to the UI. This reduces main-thread work but is still a CPU bitmap path; it is not a hardware-decoded video renderer and does not eliminate frame copies.
+
 ## Initial device profile and modes
 
 The first physical test target is the currently paired Redmi Note 7 Pro. Start with a portrait-native 1080 x 2340 mode at 60 Hz, plus a lower-bandwidth fallback mode. Confirm actual supported modes and decoder capability at runtime rather than assuming every Android device supports the same profile. Rotation and landscape modes must be negotiated explicitly.
