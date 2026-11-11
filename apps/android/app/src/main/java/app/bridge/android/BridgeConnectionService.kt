@@ -219,6 +219,7 @@ class BridgeConnectionService : Service() {
                         }
                     },
                     onStatus = { message ->
+                        BridgeDiagnostics.record("transfer", message)
                         mainHandler.post {
                             if (!stopping) {
                                 BridgeRuntimeState.transferStatus.value = message
