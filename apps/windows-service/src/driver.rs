@@ -158,6 +158,22 @@ pub struct CapturedFrame {
     pub pixels: Vec<u8>,
 }
 
+impl CapturedFrame {
+    /// Serialize the fixed driver header followed by its BGRA8 pixel payload.
+    pub fn into_packet(self) -> Vec<u8> {
+        let mut packet = Vec::with_capacity(FRAME_HEADER_SIZE + self.pixels.len());
+        for value in [FRAME_HEADER_SIZE as u32, 1, self.header.width, self.header.height, self.header.stride, self.header.pixel_format] {
+            packet.extend_from_slice(&value.to_le_bytes());
+        }
+        packet.extend_from_slice(&self.header.sequence.to_le_bytes());
+        packet.extend_from_slice(&self.header.timestamp_ns.to_le_bytes());
+        packet.extend_from_slice(&self.header.data_size.to_le_bytes());
+        packet.extend_from_slice(&0_u32.to_le_bytes());
+        packet.extend_from_slice(&self.pixels);
+        packet
+    }
+}
+
 fn read_u32(bytes: &[u8], offset: usize) -> io::Result<u32> {
     let value = bytes.get(offset..offset + 4)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "truncated frame header"))?;

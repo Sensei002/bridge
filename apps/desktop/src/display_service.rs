@@ -18,6 +18,9 @@ use windows_sys::Win32::{
 const PIPE_NAME: &str = r"\\.\pipe\BridgeDisplayService";
 const PIPE_WAIT_MS: u32 = 1_500;
 const MAX_RESPONSE_BYTES: usize = 512;
+const FRAME_HEADER_BYTES: usize = 48;
+const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
+const MAX_FRAME_PACKET_BYTES: usize = FRAME_HEADER_BYTES + MAX_FRAME_BYTES;
 
 struct OwnedPipe(HANDLE);
 
@@ -34,6 +37,67 @@ impl Drop for OwnedPipe {
 pub struct ServiceLease {
     pub id: uuid::Uuid,
     pub expires_in_ms: u64,
+}
+
+/// A validated BGRA8 frame copied from the privileged Windows display service.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceFrame {
+    pub width: u32,
+    pub height: u32,
+    pub stride: u32,
+    pub sequence: u64,
+    pub timestamp_ns: u64,
+    pub pixels: Vec<u8>,
+}
+
+/// Read one complete frame through the service's lease-authorized named pipe.
+pub fn read_frame_with_lease(lease: &ServiceLease, device_fingerprint: &str) -> Result<ServiceFrame, String> {
+    if lease.expires_in_ms == 0 || lease.expires_in_ms > 15_000 || !is_hex(device_fingerprint, 64) {
+        return Err("invalid or expired display lease identity".into());
+    }
+    let command = format!("READ_FRAME lease={} fingerprint={}", lease.id, device_fingerprint.to_ascii_lowercase());
+    let packet = request_bytes(&command, MAX_FRAME_PACKET_BYTES)?;
+    decode_frame_packet(&packet)
+}
+
+fn decode_frame_packet(packet: &[u8]) -> Result<ServiceFrame, String> {
+    if packet.len() < FRAME_HEADER_BYTES {
+        return Err("display service returned a truncated frame header".into());
+    }
+    let read_u32 = |offset: usize| -> Result<u32, String> {
+        let bytes: [u8; 4] = packet.get(offset..offset + 4).ok_or_else(|| "truncated frame header".to_string())?
+            .try_into().map_err(|_| "invalid frame header field".to_string())?;
+        Ok(u32::from_le_bytes(bytes))
+    };
+    let read_u64 = |offset: usize| -> Result<u64, String> {
+        let bytes: [u8; 8] = packet.get(offset..offset + 8).ok_or_else(|| "truncated frame header".to_string())?
+            .try_into().map_err(|_| "invalid frame header field".to_string())?;
+        Ok(u64::from_le_bytes(bytes))
+    };
+    let size = read_u32(0)? as usize;
+    let version = read_u32(4)?;
+    let width = read_u32(8)?;
+    let height = read_u32(12)?;
+    let stride = read_u32(16)?;
+    let pixel_format = read_u32(20)?;
+    let sequence = read_u64(24)?;
+    let timestamp_ns = read_u64(32)?;
+    let data_size = read_u32(40)? as usize;
+    let reserved = read_u32(44)?;
+    let expected_stride = width.checked_mul(4).ok_or_else(|| "frame stride overflow".to_string())?;
+    let expected_size = (stride as u64) * (height as u64);
+    if size != FRAME_HEADER_BYTES || version != 1 || reserved != 0
+        || width == 0 || height == 0 || width > 4096 || height > 4096
+        || stride != expected_stride || pixel_format != 1 || sequence == 0
+        || expected_size > MAX_FRAME_BYTES as u64 || data_size != expected_size as usize
+        || packet.len() != FRAME_HEADER_BYTES + data_size
+    {
+        return Err("display service returned invalid frame metadata or payload length".into());
+    }
+    Ok(ServiceFrame {
+        width, height, stride, sequence, timestamp_ns,
+        pixels: packet[FRAME_HEADER_BYTES..].to_vec(),
+    })
 }
 
 /// Ask the service for a fresh process-pinned challenge.
@@ -170,56 +234,47 @@ fn service_response_error(response: &str) -> String {
 }
 
 fn request(command: &str) -> Result<String, String> {
-    if command.is_empty() || command.len() > 384
-        || !command.is_ascii()
-        || command.contains('\r') || command.contains('\n')
+    let bytes = request_bytes(command, MAX_RESPONSE_BYTES)?;
+    String::from_utf8(bytes).map_err(|_| "display service returned a non-UTF-8 response".into())
+}
+
+fn request_bytes(command: &str, response_capacity: usize) -> Result<Vec<u8>, String> {
+    if command.is_empty() || command.len() > 384 || !command.is_ascii()
+        || command.contains('\\r') || command.contains('\\n')
     {
         return Err("invalid display-service command".into());
     }
-
+    if response_capacity == 0 || response_capacity > MAX_FRAME_PACKET_BYTES {
+        return Err("invalid display-service response limit".into());
+    }
     let name = OsStr::new(PIPE_NAME).encode_wide().chain(Some(0)).collect::<Vec<_>>();
     if unsafe { WaitNamedPipeW(name.as_ptr(), PIPE_WAIT_MS) } == 0 {
         return Err(format!("Bridge Display Service pipe is unavailable: {}", io::Error::last_os_error()));
     }
-
     let handle = unsafe {
-        CreateFileW(
-            name.as_ptr(),
-            FILE_GENERIC_READ | FILE_GENERIC_WRITE,
-            0,
-            null_mut(),
-            OPEN_EXISTING,
-            0,
-            null_mut(),
-        )
+        CreateFileW(name.as_ptr(), FILE_GENERIC_READ | FILE_GENERIC_WRITE, 0, null_mut(), OPEN_EXISTING, 0, null_mut())
     };
     if handle == INVALID_HANDLE_VALUE {
         return Err(format!("could not open Bridge Display Service pipe: {}", io::Error::last_os_error()));
     }
     let pipe = OwnedPipe(handle);
-
     let request = format!("BRIDGE_DISPLAY/1 {command}");
     let mut written = 0_u32;
-    let write_ok = unsafe {
-        WriteFile(pipe.0, request.as_ptr(), request.len() as u32, &mut written, null_mut())
-    };
+    let write_ok = unsafe { WriteFile(pipe.0, request.as_ptr(), request.len() as u32, &mut written, null_mut()) };
     if write_ok == 0 || written as usize != request.len() {
         return Err(format!("could not write display-service request: {}", io::Error::last_os_error()));
     }
-
-    let mut response = [0_u8; MAX_RESPONSE_BYTES];
+    let mut response = vec![0_u8; response_capacity];
     let mut read = 0_u32;
-    let read_ok = unsafe {
-        ReadFile(pipe.0, response.as_mut_ptr(), response.len() as u32, &mut read, null_mut())
-    };
+    let read_ok = unsafe { ReadFile(pipe.0, response.as_mut_ptr(), response.len() as u32, &mut read, null_mut()) };
     if read_ok == 0 {
         return Err(format!("could not read display-service response: {}", io::Error::last_os_error()));
     }
-    if read == 0 || read as usize > MAX_RESPONSE_BYTES {
+    if read == 0 || read as usize > response_capacity {
         return Err("display service returned an empty or oversized response".into());
     }
-    String::from_utf8(response[..read as usize].to_vec())
-        .map_err(|_| "display service returned a non-UTF-8 response".into())
+    response.truncate(read as usize);
+    Ok(response)
 }
 
 #[cfg(test)]

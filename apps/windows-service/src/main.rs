@@ -31,7 +31,7 @@ use windows_sys::Win32::{
     System::{
         Pipes::{
             ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_NOWAIT,
-            PIPE_READMODE_MESSAGE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_MESSAGE,
+            PIPE_READMODE_MESSAGE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_MESSAGE, SetNamedPipeHandleState, PIPE_WAIT,
         },
     },
 };
@@ -268,9 +268,14 @@ fn run_pipe_server(shutdown: &mpsc::Receiver<()>) -> io::Result<()> {
             };
             let mut written = 0_u32;
             if read > 0 {
-                let _ = unsafe {
-                    WriteFile(pipe, response.as_ptr(), response.len() as u32, &mut written, null_mut())
-                };
+                // Enable blocking response writes only after the request timeout has completed.
+                let mut mode = PIPE_READMODE_MESSAGE | PIPE_WAIT;
+                let mode_ok = unsafe { SetNamedPipeHandleState(pipe, &mut mode, null_mut(), null_mut()) };
+                if mode_ok == 0 {
+                    eprintln!("Bridge Display Service could not enable blocking response mode: {}", io::Error::last_os_error());
+                } else if unsafe { WriteFile(pipe, response.as_ptr(), response.len() as u32, &mut written, null_mut()) } == 0 || written as usize != response.len() {
+                    eprintln!("Bridge Display Service response write failed: {}", io::Error::last_os_error());
+                }
             }
             unsafe {
                 DisconnectNamedPipe(pipe);
@@ -434,6 +439,13 @@ fn handle_request(
                 pinned_clients.remove(&caller.process_id);
                 Ok(b"BRIDGE_DISPLAY/1 OK disconnected\n".to_vec())
             }),
+        Request::ReadFrame { lease_id, device_fingerprint } =>
+            verify_publisher::verify_client_publisher(&caller.image_path).and_then(|_| {
+                validate_lease_owner(caller, &device_fingerprint, pinned_clients, lease_fingerprints)?;
+                leases.authorize_operation(lease_id, caller.process_id, &device_fingerprint)
+                    .map_err(|message| io::Error::new(io::ErrorKind::PermissionDenied, message))?;
+                driver::read_latest_frame().map(|frame| frame.into_packet())
+            })
     };
     result.unwrap_or_else(|error| format!("BRIDGE_DISPLAY/1 ERROR {error}\n").into_bytes())
 }
