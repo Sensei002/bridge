@@ -1,6 +1,9 @@
 package app.bridge.android
 
 import android.os.Bundle
+import android.graphics.Bitmap
+import java.nio.ByteBuffer
+import androidx.compose.ui.graphics.asImageBitmap
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
@@ -65,6 +68,7 @@ private enum class BridgeTab(val label: String, val symbol: String) {
     Devices("Devices", "⌁"),
     Transfers("Files", "⇧"),
     Clipboard("Clip", "▤"),
+    SecondScreen("Screen", "▣"),
     Tools("Tools", "⌘"),
     Settings("Settings", "⚙")
 }
@@ -81,6 +85,7 @@ class MainActivity : ComponentActivity() {
     private val clipboardStatus get() = BridgeRuntimeState.clipboardStatus.value
     private val pairingStatus get() = BridgeRuntimeState.pairingStatus.value
     private val transferStatus get() = BridgeRuntimeState.transferStatus.value
+    private val latestDisplayFrame get() = BridgeRuntimeState.latestDisplayFrame.value
 
     private var pendingExportFile: File? = null
     private lateinit var exportFileLauncher: ActivityResultLauncher<String>
@@ -130,6 +135,7 @@ class MainActivity : ComponentActivity() {
                 pairingStatus = pairingStatus,
                 incomingOffers = incomingOffers,
                 transferStatus = transferStatus,
+                latestDisplayFrame = latestDisplayFrame,
                 receivedFiles = receivedFiles,
                 clipboardReceivedText = clipboardReceivedText,
                 clipboardReceivedFrom = clipboardReceivedFrom,
@@ -251,6 +257,7 @@ private fun BridgeApp(
     pairingStatus: String,
     incomingOffers: List<BridgeIncomingOffer>,
     transferStatus: String,
+    latestDisplayFrame: BridgeDisplayFrame?,
     receivedFiles: List<File>,
     clipboardReceivedText: String?,
     clipboardReceivedFrom: String,
@@ -330,6 +337,7 @@ private fun BridgeApp(
                             status = clipboardStatus,
                             onSend = onSendClipboard
                         )
+                        BridgeTab.SecondScreen -> SecondScreenView(frame = latestDisplayFrame, connectedDevices = connectedSessionHandles.size)
                         BridgeTab.Tools -> ToolsScreen()
                         BridgeTab.Settings -> SettingsScreen(
                             notifications = notifications,
@@ -464,6 +472,37 @@ private fun HeaderBar() {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             Surface(color = Good.copy(alpha = 0.12f), shape = CircleShape, modifier = Modifier.size(7.dp)) {}
             Text("LOCAL MODE", color = Good, fontSize = 9.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp)
+        }
+    }
+}
+
+@Composable
+private fun SecondScreenView(frame: BridgeDisplayFrame?, connectedDevices: Int) {
+    ScreenContent {
+        Eyebrow("WIRELESS DISPLAY")
+        ScreenHeading("SECOND SCREEN", "Your phone as a monitor", "Windows sends captured display frames over your trusted encrypted connection.")
+        Surface(color = Panel, shape = RoundedCornerShape(14.dp), modifier = Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
+                    Text(if (frame == null) "Waiting for Windows frames" else "Live frame received", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                    Text(if (frame == null) "IDLE" else "RECEIVING", color = if (frame == null) Muted else Good, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                }
+                if (frame != null) {
+                    val bitmap = remember(frame.sequence, frame.width, frame.height) {
+                        Bitmap.createBitmap(frame.width, frame.height, Bitmap.Config.ARGB_8888).also {
+                            it.copyPixelsFromBuffer(ByteBuffer.wrap(frame.pixels))
+                        }.asImageBitmap()
+                    }
+                    Image(bitmap = bitmap, contentDescription = "Windows secondary display", contentScale = ContentScale.Fit,
+                        modifier = Modifier.fillMaxWidth().background(Color.Black, RoundedCornerShape(8.dp)))
+                    Text("${frame.width} × ${frame.height} · Frame ${frame.sequence}", color = Muted, fontSize = 11.sp)
+                } else {
+                    Box(Modifier.fillMaxWidth().height(190.dp).background(Color.Black, RoundedCornerShape(8.dp)), contentAlignment = Alignment.Center) {
+                        Text(if (connectedDevices == 0) "Connect a trusted Windows PC first." else "Waiting for the Windows display stream…", color = Muted, fontSize = 12.sp)
+                    }
+                }
+                Text("Frame preview only. Touch input and full-screen extended-display controls are not enabled yet.", color = Muted, fontSize = 11.sp, lineHeight = 16.sp)
+            }
         }
     }
 }
