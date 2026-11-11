@@ -339,10 +339,18 @@ pub fn submit_first_nv12_sample(frame: &bridge_transfer::Nv12Frame) -> Result<Fi
     result.ok_or_else(|| last_error.unwrap_or_else(|| "no synchronous H.264 encoder was available".into()))
 }
 
+/// One encoded H.264 access unit and the timestamp assigned by Media Foundation.
+pub struct EncodedAccessUnit {
+    /// Presentation timestamp in Media Foundation's 100 ns timebase.
+    pub timestamp_100ns: i64,
+    /// Contiguous Annex-B H.264 bytes.
+    pub bytes: Vec<u8>,
+}
+
 /// Result of one frame submitted to the long-lived encoder.
 pub struct PersistentEncodeResult {
-    /// Encoded output samples. Each item is one contiguous H.264 output sample.
-    pub access_units: Vec<Vec<u8>>,
+    /// Encoded output samples with their original presentation timestamps.
+    pub access_units: Vec<EncodedAccessUnit>,
     /// True when the encoder accepted input but has not emitted output yet.
     pub buffered: bool,
 }
@@ -484,7 +492,7 @@ impl PersistentH264Encoder {
                 .map_err(|error| format!("persistent H.264 encoder rejected NV12 input: {error}"))?;
         }
         access_units.extend(drain_encoder_output(transform)?);
-        let total = access_units.iter().try_fold(0_usize, |sum, unit| sum.checked_add(unit.len()))
+        let total = access_units.iter().try_fold(0_usize, |sum, unit| sum.checked_add(unit.bytes.len()))
             .ok_or_else(|| "H.264 output size overflow".to_string())?;
         if total > 16 * 1024 * 1024 {
             return Err("persistent encoder output exceeded the 16 MiB per-frame bound".into());
@@ -513,7 +521,7 @@ impl Drop for PersistentH264Encoder {
 /// Pull at most eight output samples per call. A synchronous transform must
 /// eventually report NEED_MORE_INPUT; exceeding the bound is treated as an
 /// encoder fault rather than allowing an unbounded drain loop.
-fn drain_encoder_output(transform: &IMFTransform) -> Result<Vec<Vec<u8>>, String> {
+fn drain_encoder_output(transform: &IMFTransform) -> Result<Vec<EncodedAccessUnit>, String> {
     let stream_info = unsafe { transform.GetOutputStreamInfo(0) }
         .map_err(|error| format!("could not query H.264 output stream: {error}"))?;
     let provides_sample = stream_info.dwFlags & (MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32) != 0;
@@ -563,6 +571,8 @@ fn drain_encoder_output(transform: &IMFTransform) -> Result<Vec<Vec<u8>>, String
         let Some(sample) = sample else {
             continue;
         };
+        let timestamp_100ns = unsafe { sample.GetSampleTime() }
+            .map_err(|error| format!("encoder output sample has no presentation timestamp: {error}"))?;
         let output_buffer = unsafe { sample.ConvertToContiguousBuffer() }
             .map_err(|error| format!("could not access H.264 output buffer: {error}"))?;
         let current_len = unsafe { output_buffer.GetCurrentLength() }
@@ -580,7 +590,7 @@ fn drain_encoder_output(transform: &IMFTransform) -> Result<Vec<Vec<u8>>, String
         unsafe { output_buffer.Unlock() }
             .map_err(|error| format!("could not unlock H.264 output buffer: {error}"))?;
         total_bytes += bytes.len();
-        access_units.push(bytes);
+        access_units.push(EncodedAccessUnit { timestamp_100ns, bytes });
     }
     Err("encoder did not request more input within the eight-sample output drain bound".into())
 }

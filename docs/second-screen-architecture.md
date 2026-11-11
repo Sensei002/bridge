@@ -191,3 +191,8 @@ The raw BGRA image remains the visible fallback until MediaCodec has actually re
 ## Android AVC decoder configuration
 
 Before creating the MediaCodec decoder, the Android renderer now extracts Annex-B SPS and PPS NAL units from the first IDR access unit and supplies them as `csd-0` and `csd-1` in the decoder format. It waits for a keyframe containing both parameter sets rather than starting a decoder with incomplete codec configuration. The parser retains the Annex-B start codes and is covered by JVM unit tests for three-/four-byte start codes, missing parameter sets, non-Annex-B input, and trailing zero bytes. This improves decoder initialization but does not yet guarantee that every Media Foundation encoder emits SPS/PPS with every recovery keyframe or solve packet-loss/keyframe requests.
+
+
+## Preserve H.264 presentation timestamps
+
+The persistent Windows Media Foundation encoder now reads the presentation timestamp from each emitted output sample instead of assigning the timestamp of whichever captured frame happened to trigger the drain. Encoded access units carry the encoder's 100 ns timestamp through the desktop sender and convert it to nanoseconds for the Android packet protocol. This preserves timestamps when the encoder buffers or reorders output. If an output sample has no timestamp, the H.264 encode path reports an error and retains the BGRA fallback rather than silently attaching a potentially incorrect timestamp. Physical-device A/V timing and encoder-specific timestamp behavior still require validation.
