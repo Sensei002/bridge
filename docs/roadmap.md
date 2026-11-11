@@ -43,10 +43,41 @@
 
 **Milestone 1 is complete for the currently available Windows + Android target.** iOS and Linux physical-device/platform validation remain explicitly deferred; the completed milestone does not claim those platforms have passed real-device testing. See [docs/network-test.md](network-test.md) for the detailed record.
 
-## Device capabilities
+
+## Milestone 2: Android as a native extended Windows display — active
+
+**Goal:** a trusted Android phone or tablet appears as a real monitor in Windows Settings → System → Display. The user can choose **Extend**, position the display, and move normal application windows onto it. A mirrored desktop preview alone does not satisfy this milestone.
+
+### Implemented in the development code
+- [x] Select Microsoft IddCx / Indirect Display Driver (UMDF) as the Windows virtual-monitor architecture.
+- [x] Add the Windows IddCx driver project and separate Bridge Display Service.
+- [x] Add restricted driver connect/disconnect/status controls and service-side authenticated control flow.
+- [x] Build and package the Windows driver and display service in GitHub Actions.
+- [x] Implement Windows Media Foundation H.264 encoding and bounded access-unit transmission over the authenticated Bridge session.
+- [x] Implement Android H.264 access-unit reception and MediaCodec Surface rendering with SPS/PPS configuration.
+- [x] Add dynamic display-size handling, keyframe recovery requests, throttling, and BGRA fallback.
+- [x] Add Windows and Android diagnostic logging with Settings → Show Logs / Copy Logs.
+
+### Remaining acceptance gates
+- [ ] Validate signed driver distribution, installation, service registration, virtual-monitor arrival/removal, and safe mode negotiation on a physical Windows host.
+- [ ] Validate actual IddCx Direct3D swap-chain frame acquisition and delivery into the media pipeline.
+- [ ] Confirm sustained H.264 playback and IDR/SPS/PPS recovery on the target Windows PC and Redmi Note 7 Pro.
+- [ ] Validate rotation, orientation changes, sleep/wake, Wi-Fi recovery, and decoder recreation on hardware.
+- [ ] Complete Windows Extend-mode acceptance: move real application windows onto the Android display and see them rendered there.
+- [ ] Implement end-to-end touch/pen input forwarding from Android to Windows.
+- [ ] Measure end-to-end latency, frame pacing, bitrate, CPU/GPU use, and thermal impact; add adaptive bitrate/congestion handling.
+- [ ] Validate installer upgrade, rollback, removal, and recovery behaviour.
+
+**Current status:** software components and CI build paths are in place, but physical acceptance is not yet complete. CI success or a published development release does not prove the driver installs, the virtual monitor appears, or live video works on the target devices.
+
+## Milestone 3: secure local file transfer — planned
+
+The shared Rust transfer engine has foundational bounded framing, offer validation, safe filename handling, and SHA-256 integrity verification. Authenticated-session integration, incoming-file approval UI, progress/cancellation, and physical-device transfer tests remain future work. File transfer is not the current active milestone.
+
+## Other device capabilities
 - [ ] Capability permission model
 - [ ] Universal clipboard (text first)
-- [ ] Local file transfer with explicit destination approval
+- [ ] Local file transfer with explicit destination approval (planned under Milestone 3)
 - [ ] Presence and device status
 - [ ] Android notification bridge (subject to platform permissions)
 - [ ] iOS-compatible feature set using public platform APIs
