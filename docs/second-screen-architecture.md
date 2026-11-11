@@ -153,3 +153,8 @@ The Windows desktop stream lifecycle now initializes Media Foundation before sta
 ## Windows Media Foundation encoder discovery
 
 The desktop stream startup now enumerates registered Media Foundation video-encoder transforms that advertise H.264 output after platform initialization and reports the discovered names in the second-screen status. Enumeration requests hardware, synchronous, asynchronous, and local transforms. The current result is diagnostic only: it does not yet prove a transform accepts Bridge's target NV12 dimensions/rate, does not activate an encoder, and does not emit H.264 access units. BGRA remains the active transport fallback.
+
+
+## Windows H.264 encoder activation probe
+
+The encoder diagnostic now attempts to activate each registered H.264-output MFT as an IMFTransform and query its input/output stream counts. Activation failures are retained per candidate rather than aborting discovery of other encoders. Successful transform objects are released and shut down immediately; no frame types are negotiated and no samples are submitted. This confirms activation only, not NV12 input support, hardware acceleration, or successful H.264 bitstream production. BGRA remains the active sender.
