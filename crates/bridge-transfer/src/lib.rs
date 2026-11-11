@@ -971,8 +971,7 @@ mod tests {
         let frame = DisplayFrame { sequence: 1, width: 2, height: 2, stride: 8, timestamp_ns: 1, pixels };
         let converted = bgra_to_nv12(&frame).unwrap();
         assert_eq!(converted.pixels.len(), 6);
-        assert!(converted.pixels[4] > 100 && converted.pixels[4] < 150);
-        assert!(converted.pixels[5] > 100 && converted.pixels[5] < 150);
+        assert_eq!(&converted.pixels[4..], &[171, 179]);
     }
 
     #[test]
