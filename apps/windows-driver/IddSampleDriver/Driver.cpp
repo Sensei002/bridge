@@ -701,8 +701,9 @@ void IndirectDeviceContext::GetDisplayStatus(BRIDGE_DISPLAY_STATUS& Status)
     Status.SupportedModeCount = ARRAYSIZE(s_BridgeMonitorModes);
 }
 
-IndirectMonitorContext::IndirectMonitorContext(_In_ IDDCX_MONITOR Monitor) :
-    m_Monitor(Monitor)
+IndirectMonitorContext::IndirectMonitorContext(_In_ IDDCX_MONITOR Monitor, IndirectDeviceContext* FrameSink) :
+    m_Monitor(Monitor),
+    m_FrameSink(FrameSink)
 {
 }
 
@@ -726,7 +727,7 @@ NTSTATUS IndirectMonitorContext::AssignSwapChain(IDDCX_SWAPCHAIN SwapChain, LUID
         return STATUS_DEVICE_NOT_READY;
     }
 
-    auto Processor = make_unique<SwapChainProcessor>(SwapChain, Device, NewFrameEvent);
+    auto Processor = make_unique<SwapChainProcessor>(SwapChain, Device, NewFrameEvent, m_FrameSink);
     NTSTATUS Status = Processor->Start();
     if (!NT_SUCCESS(Status))
     {
