@@ -471,15 +471,20 @@ void SwapChainProcessor::RunCore()
                         {
                             const ULONG TightStride = SourceDesc.Width * 4u;
                             const size_t FrameBytes = static_cast<size_t>(TightStride) * SourceDesc.Height;
-                            std::vector<BYTE> Pixels(FrameBytes);
-                            for (UINT Row = 0; Row < SourceDesc.Height; ++Row)
+                            std::vector<BYTE> Pixels;
+                            try { Pixels.resize(FrameBytes); }
+                            catch (...) { Pixels.clear(); }
+                            if (!Pixels.empty())
                             {
-                                memcpy(Pixels.data() + static_cast<size_t>(Row) * TightStride,
-                                    static_cast<const BYTE*>(Mapped.pData) + static_cast<size_t>(Row) * Mapped.RowPitch,
-                                    TightStride);
+                                for (UINT Row = 0; Row < SourceDesc.Height; ++Row)
+                                {
+                                    memcpy(Pixels.data() + static_cast<size_t>(Row) * TightStride,
+                                        static_cast<const BYTE*>(Mapped.pData) + static_cast<size_t>(Row) * Mapped.RowPitch,
+                                        TightStride);
+                                }
                             }
                             m_Device->DeviceContext->Unmap(StagingTexture.Get(), 0);
-                            if (m_FrameSink) m_FrameSink->PublishLatestFrame(
+                            if (m_FrameSink && !Pixels.empty()) m_FrameSink->PublishLatestFrame(
                                 SourceDesc.Width, SourceDesc.Height, TightStride,
                                 BRIDGE_DISPLAY_FRAME_PIXEL_FORMAT_BGRA8, Pixels.data(), Pixels.size());
                         }
@@ -669,7 +674,9 @@ void IndirectDeviceContext::PublishLatestFrame(ULONG Width, ULONG Height, ULONG 
     if (Data == nullptr || DataSize == 0 || DataSize > BRIDGE_DISPLAY_FRAME_MAX_BYTES ||
         Width == 0 || Height == 0 || Width > 4096 || Height > 4096 ||
         static_cast<ULONGLONG>(Stride) * Height != DataSize) return;
-    std::vector<BYTE> Frame(Data, Data + DataSize);
+    std::vector<BYTE> Frame;
+    try { Frame.assign(Data, Data + DataSize); }
+    catch (...) { return; }
     std::lock_guard<std::mutex> lock(m_FrameLock);
     m_LatestFrame.swap(Frame);
     m_LatestFrameHeader = {};
