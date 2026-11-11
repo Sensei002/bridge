@@ -548,6 +548,25 @@ private fun SecondScreenView(
     onDisplayInput: (String, Int, Int, Int, Int) -> Unit
 ) {
     var imageSize by remember { mutableStateOf(IntSize.Zero) }
+    var frameRate by remember { mutableStateOf(0f) }
+    var previousFrameAtNs by remember { mutableStateOf(0L) }
+    LaunchedEffect(frame?.sequence) {
+        val receivedAt = frame?.receivedAtElapsedRealtimeNs ?: 0L
+        if (receivedAt > 0L) {
+            if (previousFrameAtNs > 0L) {
+                val intervalNs = receivedAt - previousFrameAtNs
+                if (intervalNs > 0L) {
+                    val instantaneousFps = 1_000_000_000f / intervalNs.toFloat()
+                    frameRate = if (frameRate == 0f) instantaneousFps
+                        else frameRate * 0.75f + instantaneousFps * 0.25f
+                }
+            }
+            previousFrameAtNs = receivedAt
+        } else {
+            previousFrameAtNs = 0L
+            frameRate = 0f
+        }
+    }
     val activePointers = remember { mutableSetOf<Int>() }
     val bitmap by produceState<androidx.compose.ui.graphics.ImageBitmap?>(
         initialValue = null,
@@ -592,6 +611,11 @@ private fun SecondScreenView(
                         if (frame == null) "No display frame yet" else "${frame.width} × ${frame.height} · Frame ${frame.sequence}",
                         color = Color.White,
                         fontSize = 11.sp
+                    )
+                    Text(
+                        if (frame == null || frameRate <= 0f) "— FPS" else "${frameRate.toInt()} FPS · incoming",
+                        color = Muted,
+                        fontSize = 10.sp
                     )
                 }
                 Button(
@@ -711,6 +735,11 @@ private fun SecondScreenView(
                             modifier = Modifier.fillMaxWidth().background(Color.Black, RoundedCornerShape(8.dp))
                         )
                         Text("${frame!!.width} × ${frame.height} · Frame ${frame.sequence}", color = Muted, fontSize = 11.sp)
+                        Text(
+                            if (frameRate <= 0f) "Measuring incoming frame rate…" else "${frameRate.toInt()} FPS incoming",
+                            color = Muted,
+                            fontSize = 10.sp
+                        )
                     } else {
                         Box(
                             Modifier.fillMaxWidth().height(190.dp).background(Color.Black, RoundedCornerShape(8.dp)),
