@@ -134,6 +134,7 @@ class BridgeConnectionService : Service() {
     }
 
     private fun postStatus(message: String) {
+        BridgeDiagnostics.record("connection", message)
         mainHandler.post {
             if (!stopping) BridgeRuntimeState.pairingStatus.value = message
         }
