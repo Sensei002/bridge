@@ -138,3 +138,8 @@ The Android Second Screen page inspects the platform's regular (non-encoder) Med
 ## Bounded H.264 access-unit wire format
 
 The shared transfer crate defines a dedicated packet discriminator for encoded H.264/AVC access-unit fragments, separate from the existing raw BGRA frame tag. Each fragment carries a monotonic frame sequence, dimensions, source timestamp, total access-unit length, byte offset, and keyframe flag. Fragment payloads remain within the existing encrypted-message limit; a complete encoded access unit is capped at 16 MiB. The assembler accepts one access unit at a time, validates contiguous offsets and consistent metadata, and rejects overlapping or stale sequences. This is a protocol foundation only: it does not yet replace the Windows BGRA sender, establish a dedicated datagram media transport, or connect Android MediaCodec to a Surface.
+
+
+## Android encoded-video packet reception
+
+The Android authenticated-session reader recognizes the H.264 access-unit packet tag separately from raw BGRA frames. It reassembles one access unit at a time with a 16 MiB cap, validates metadata, keyframe flag, contiguous fragment offsets, and strictly increasing completed sequences, then exposes the completed access unit and source metadata to the connection runtime. Session teardown clears the latest encoded frame for that peer. The access unit is not yet passed to MediaCodec; decoder configuration, input-buffer scheduling, SurfaceView rendering, and sender-side H.264 encoding remain separate milestones.
