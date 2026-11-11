@@ -659,7 +659,7 @@ pub fn discover_h264_encoders() -> Result<Vec<H264EncoderCandidate>, String> {
                         let stream_result = unsafe { transform.GetStreamCount(&mut inputs, &mut outputs) };
                         let profile_result = unsafe { test_nv12_h264_profile(&transform) };
                         let configuration_result = if profile_result.is_ok() {
-                            unsafe { configure_nv12_h264_profile(&transform) }
+                            unsafe { configure_nv12_h264_profile(&transform, 1080, 2340) }
                         } else {
                             Err("configuration skipped because the compatibility probe failed".into())
                         };
