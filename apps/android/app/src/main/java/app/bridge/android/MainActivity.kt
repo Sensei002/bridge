@@ -567,6 +567,8 @@ private fun SecondScreenView(
             }
         }
     }
+    // Snapshot delegated state into a stable local value for Kotlin smart casts.
+    val displayBitmap = bitmap
 
     if (immersive) {
         Column(
@@ -602,9 +604,9 @@ private fun SecondScreenView(
                 modifier = Modifier.weight(1f).fillMaxWidth().background(Color.Black),
                 contentAlignment = Alignment.Center
             ) {
-                if (bitmap != null) {
+                if (displayBitmap != null) {
                     Image(
-                        bitmap = bitmap,
+                        bitmap = displayBitmap,
                         contentDescription = "Windows secondary display",
                         contentScale = ContentScale.Fit,
                         modifier = Modifier.fillMaxSize().onSizeChanged { imageSize = it }.pointerInteropFilter { event ->
@@ -701,9 +703,9 @@ private fun SecondScreenView(
                             fontWeight = FontWeight.Bold
                         )
                     }
-                    if (bitmap != null) {
+                    if (displayBitmap != null) {
                         Image(
-                            bitmap = bitmap,
+                            bitmap = displayBitmap,
                             contentDescription = "Windows secondary display",
                             contentScale = ContentScale.Fit,
                             modifier = Modifier.fillMaxWidth().background(Color.Black, RoundedCornerShape(8.dp))
