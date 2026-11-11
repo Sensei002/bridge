@@ -581,6 +581,37 @@ fn h264_annex_b_keyframe(bitstream: &[u8]) -> Option<bool> {
     found_nal.then_some(keyframe)
 }
 
+#[cfg(all(test, windows))]
+mod h264_access_unit_tests {
+    use super::h264_annex_b_keyframe;
+
+    #[test]
+    fn recognizes_four_byte_start_code_and_idr_slice() {
+        assert_eq!(h264_annex_b_keyframe(&[0, 0, 0, 1, 0x65, 0xaa]), Some(true));
+    }
+
+    #[test]
+    fn recognizes_three_byte_start_code_and_non_idr_slice() {
+        assert_eq!(h264_annex_b_keyframe(&[0, 0, 1, 0x41, 0xbb]), Some(false));
+    }
+
+    #[test]
+    fn recognizes_sps_pps_and_idr_in_one_access_unit() {
+        let access_unit = [
+            0, 0, 0, 1, 0x67, 0x42, 0,
+            0, 0, 1, 0x68, 0xce,
+            0, 0, 0, 1, 0x65, 0x88,
+        ];
+        assert_eq!(h264_annex_b_keyframe(&access_unit), Some(true));
+    }
+
+    #[test]
+    fn rejects_unrecognized_or_truncated_annex_b_output() {
+        assert_eq!(h264_annex_b_keyframe(&[0x65, 0xaa, 0xbb]), None);
+        assert_eq!(h264_annex_b_keyframe(&[0, 0, 0, 1]), None);
+    }
+}
+
 #[cfg(windows)]
 fn start_display_frame_stream(
     session: Arc<DesktopSession>,
