@@ -17,7 +17,7 @@ use bridge_core::trust::{SasConfirmation, TrustStore};
 #[cfg(windows)]
 use bridge_protocol::{DeviceDescriptor, DeviceId, Platform, PROTOCOL_VERSION};
 #[cfg(windows)]
-use bridge_transfer::{decode_packet, encode_packet, fragment_display_frame, offer_for_file, DisplayFrame, FileOffer, IncomingFile, OutgoingFile, TransferControl, TransferPacket};
+use bridge_transfer::{decode_packet, encode_packet, fragment_display_frame, offer_for_file, DisplayFrame, DisplayInputAction, DisplayInputEvent, FileOffer, IncomingFile, OutgoingFile, TransferControl, TransferPacket};
 #[cfg(windows)]
 use std::net::TcpListener;
 #[cfg(windows)]
@@ -141,6 +141,7 @@ struct DesktopSession {
     incoming_offers: std::sync::Mutex<Receiver<FileOffer>>,
     clipboard_incoming: std::sync::Mutex<Receiver<String>>,
     challenge_responses: std::sync::Mutex<Receiver<AndroidAttestationResponse>>,
+    display_inputs: std::sync::Mutex<Receiver<DisplayInputEvent>>,
     session_id: Uuid,
     attestation_public_key: Option<String>,
     stop: Arc<std::sync::atomic::AtomicBool>,
@@ -165,6 +166,7 @@ impl DesktopSession {
         let (offer_sender, incoming_offers) = mpsc::channel();
         let (clipboard_sender, clipboard_incoming) = mpsc::sync_channel(4);
         let (challenge_sender, challenge_responses) = mpsc::sync_channel(8);
+        let (display_input_sender, display_inputs) = mpsc::sync_channel(256);
         let reader_connection_for_thread = Arc::clone(&reader_connection);
         thread::Builder::new()
             .name("bridge-desktop-session-reader".into())
@@ -220,6 +222,15 @@ impl DesktopSession {
                             };
                             if let Err(mpsc::TrySendError::Disconnected(_)) = challenge_sender.try_send(response) { break; }
                         }
+                        Ok(TransferPacket::DisplayInput(event)) => {
+                            // Preserve terminal releases even when a burst fills the bounded queue.
+                            let terminal = matches!(event.action, DisplayInputAction::Up | DisplayInputAction::Cancel);
+                            if terminal {
+                                if display_input_sender.send(event).is_err() { break; }
+                            } else {
+                                let _ = display_input_sender.try_send(event);
+                            }
+                        }
                         _ => {
                             if sender.send(plaintext).is_err() { break; }
                         }
@@ -265,7 +276,7 @@ impl DesktopSession {
                 }
             })
             .map_err(|error| error.to_string())?;
-        Ok(Arc::new(Self { connection, incoming: std::sync::Mutex::new(incoming), incoming_offers: std::sync::Mutex::new(incoming_offers), clipboard_incoming: std::sync::Mutex::new(clipboard_incoming), challenge_responses: std::sync::Mutex::new(challenge_responses), session_id, attestation_public_key, stop, alive, remote_fingerprint }))
+        Ok(Arc::new(Self { connection, incoming: std::sync::Mutex::new(incoming), incoming_offers: std::sync::Mutex::new(incoming_offers), clipboard_incoming: std::sync::Mutex::new(clipboard_incoming), challenge_responses: std::sync::Mutex::new(challenge_responses), display_inputs: std::sync::Mutex::new(display_inputs), session_id, attestation_public_key, stop, alive, remote_fingerprint }))
     }
 
     fn is_alive(&self) -> bool {
@@ -374,6 +385,10 @@ impl DesktopSession {
 
     fn try_receive_clipboard_text(&self) -> Option<String> {
         self.clipboard_incoming.lock().ok()?.try_recv().ok()
+    }
+
+    fn try_receive_display_input(&self) -> Option<DisplayInputEvent> {
+        self.display_inputs.lock().ok()?.try_recv().ok()
     }
 }
 
@@ -882,6 +897,10 @@ struct BridgeApp {
     #[cfg(windows)]
     display_lease_status: String,
     #[cfg(windows)]
+    display_input_session: Option<String>,
+    #[cfg(windows)]
+    last_display_input_sequence: u64,
+    #[cfg(windows)]
     display_lease_tx: Sender<DisplayLeaseEvent>,
     #[cfg(windows)]
     display_lease_rx: Receiver<DisplayLeaseEvent>,
@@ -991,6 +1010,10 @@ impl Default for BridgeApp {
             display_lease: Arc::new(Mutex::new(None)),
             #[cfg(windows)]
             display_lease_status: "Waiting for a trusted Android device.".into(),
+            #[cfg(windows)]
+            display_input_session: None,
+            #[cfg(windows)]
+            last_display_input_sequence: 0,
             #[cfg(windows)]
             display_lease_tx,
             #[cfg(windows)]
@@ -1455,6 +1478,31 @@ impl eframe::App for BridgeApp {
                     | DisplayLeaseEvent::OperationStatus { session_key, message } => {
                         if self.display_challenge_session.as_deref() == Some(session_key.as_str()) {
                             self.display_lease_status = message;
+                        }
+                    }
+                }
+            }
+            let active_display_key = self.display_lease.lock().ok()
+                .and_then(|active| active.as_ref().map(|(key, _)| key.clone()));
+            if self.display_input_session != active_display_key {
+                let _ = inject_display_pointer_release();
+                self.display_input_session = active_display_key.clone();
+                self.last_display_input_sequence = 0;
+            }
+            for session in &self.active_sessions {
+                let session_key = format!("{}:{}", session.remote_fingerprint, session.session_id);
+                while let Some(event) = session.try_receive_display_input() {
+                    if !session.is_alive()
+                        || active_display_key.as_deref() != Some(session_key.as_str())
+                        || self.display_challenge_session.as_deref() != Some(session_key.as_str())
+                        || event.sequence <= self.last_display_input_sequence
+                    {
+                        continue;
+                    }
+                    self.last_display_input_sequence = event.sequence;
+                    if event.pointer_id == 0 {
+                        if let Err(error) = inject_display_pointer_event(event) {
+                            self.display_lease_status = format!("Second-screen pointer input rejected: {error}");
                         }
                     }
                 }
@@ -2319,6 +2367,56 @@ impl eframe::App for BridgeApp {
                     if ui.button("Close").clicked() { self.show_pair_dialog = false; }
                 });
         }
+    }
+}
+
+#[cfg(windows)]
+fn inject_display_pointer_event(event: DisplayInputEvent) -> Result<(), String> {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_ABSOLUTE,
+        MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE,
+        MOUSEEVENTF_VIRTUALDESK, MOUSEINPUT,
+    };
+    let mut flags = MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+    match event.action {
+        DisplayInputAction::Down => flags |= MOUSEEVENTF_MOVE | MOUSEEVENTF_LEFTDOWN,
+        DisplayInputAction::Move => flags |= MOUSEEVENTF_MOVE,
+        DisplayInputAction::Up => flags |= MOUSEEVENTF_MOVE | MOUSEEVENTF_LEFTUP,
+        DisplayInputAction::Cancel => flags |= MOUSEEVENTF_LEFTUP,
+    }
+    let input = INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 { mi: MOUSEINPUT {
+            dx: i32::from(event.x), dy: i32::from(event.y), mouseData: 0,
+            dwFlags: flags, time: 0, dwExtraInfo: 0,
+        }},
+    };
+    let inserted = unsafe { SendInput(1, &input, std::mem::size_of::<INPUT>() as i32) };
+    if inserted != 1 {
+        return Err(format!("Windows rejected pointer input (error {})", unsafe {
+            windows_sys::Win32::Foundation::GetLastError()
+        }));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn inject_display_pointer_release() -> Result<(), String> {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTUP, MOUSEINPUT,
+    };
+    let input = INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 { mi: MOUSEINPUT {
+            dx: 0, dy: 0, mouseData: 0, dwFlags: MOUSEEVENTF_LEFTUP,
+            time: 0, dwExtraInfo: 0,
+        }},
+    };
+    let inserted = unsafe { SendInput(1, &input, std::mem::size_of::<INPUT>() as i32) };
+    if inserted == 1 { Ok(()) } else {
+        Err(format!("Windows could not release the second-screen pointer (error {})", unsafe {
+            windows_sys::Win32::Foundation::GetLastError()
+        }))
     }
 }
 
