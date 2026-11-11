@@ -901,6 +901,8 @@ struct BridgeApp {
     #[cfg(windows)]
     last_display_input_sequence: u64,
     #[cfg(windows)]
+    display_pointer_down: bool,
+    #[cfg(windows)]
     display_lease_tx: Sender<DisplayLeaseEvent>,
     #[cfg(windows)]
     display_lease_rx: Receiver<DisplayLeaseEvent>,
@@ -1014,6 +1016,8 @@ impl Default for BridgeApp {
             display_input_session: None,
             #[cfg(windows)]
             last_display_input_sequence: 0,
+            #[cfg(windows)]
+            display_pointer_down: false,
             #[cfg(windows)]
             display_lease_tx,
             #[cfg(windows)]
@@ -1486,6 +1490,7 @@ impl eframe::App for BridgeApp {
                 .and_then(|active| active.as_ref().map(|(key, _)| key.clone()));
             if self.display_input_session != active_display_key {
                 let _ = inject_display_pointer_release();
+                self.display_pointer_down = false;
                 self.display_input_session = active_display_key.clone();
                 self.last_display_input_sequence = 0;
             }
@@ -1500,8 +1505,18 @@ impl eframe::App for BridgeApp {
                         continue;
                     }
                     self.last_display_input_sequence = event.sequence;
-                    if event.pointer_id == 0 {
-                        if let Err(error) = inject_display_pointer_event(event) {
+                    if event.pointer_id != 0
+                        || !should_process_display_pointer_event(event.action, self.display_pointer_down)
+                    {
+                        continue;
+                    }
+                    match inject_display_pointer_event(event) {
+                        Ok(()) => match event.action {
+                            DisplayInputAction::Down => self.display_pointer_down = true,
+                            DisplayInputAction::Up | DisplayInputAction::Cancel => self.display_pointer_down = false,
+                            DisplayInputAction::Move => {}
+                        },
+                        Err(error) => {
                             self.display_lease_status = format!("Second-screen pointer input rejected: {error}");
                         }
                     }
@@ -2371,6 +2386,15 @@ impl eframe::App for BridgeApp {
 }
 
 #[cfg(windows)]
+fn should_process_display_pointer_event(action: DisplayInputAction, pointer_down: bool) -> bool {
+    match action {
+        DisplayInputAction::Down => !pointer_down,
+        DisplayInputAction::Move => pointer_down,
+        DisplayInputAction::Up | DisplayInputAction::Cancel => pointer_down,
+    }
+}
+
+#[cfg(windows)]
 fn inject_display_pointer_event(event: DisplayInputEvent) -> Result<(), String> {
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_ABSOLUTE,
@@ -2554,6 +2578,23 @@ fn inject_display_pointer_release() -> Result<(), String> {
         Err(format!("Windows could not release the second-screen pointer (error {})", unsafe {
             windows_sys::Win32::Foundation::GetLastError()
         }))
+    }
+}
+
+#[cfg(all(test, windows))]
+mod display_pointer_state_tests {
+    use super::*;
+
+    #[test]
+    fn pointer_events_follow_a_single_contact_lifecycle() {
+        assert!(should_process_display_pointer_event(DisplayInputAction::Down, false));
+        assert!(!should_process_display_pointer_event(DisplayInputAction::Down, true));
+        assert!(!should_process_display_pointer_event(DisplayInputAction::Move, false));
+        assert!(should_process_display_pointer_event(DisplayInputAction::Move, true));
+        assert!(!should_process_display_pointer_event(DisplayInputAction::Up, false));
+        assert!(should_process_display_pointer_event(DisplayInputAction::Up, true));
+        assert!(!should_process_display_pointer_event(DisplayInputAction::Cancel, false));
+        assert!(should_process_display_pointer_event(DisplayInputAction::Cancel, true));
     }
 }
 
