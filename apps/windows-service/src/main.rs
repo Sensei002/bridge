@@ -92,6 +92,22 @@ fn run_service() -> Result<(), Box<dyn std::error::Error>> {
     Ok(result?)
 }
 
+
+/// Best-effort fail-safe: remove the IddCx connection whenever its authorization
+/// is no longer valid. Cleanup must never prevent the service from revoking a lease.
+fn disconnect_driver_if_connected(reason: &str) {
+    match driver::query() {
+        Ok(status) if status.is_connected != 0 => {
+            match driver::set_connected(false) {
+                Ok(()) => eprintln!("Bridge display disconnected ({reason})"),
+                Err(error) => eprintln!("Bridge display disconnect failed ({reason}): {error}"),
+            }
+        }
+        Ok(_) => {}
+        Err(error) => eprintln!("Bridge display status unavailable during cleanup ({reason}): {error}"),
+    }
+}
+
 fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
 }
@@ -150,12 +166,15 @@ fn run_pipe_server(shutdown: &mpsc::Receiver<()>) -> io::Result<()> {
     while shutdown.try_recv().is_err() {
         for process_id in challenges.revoke_expired() {
             pinned_clients.remove(&process_id);
-            leases.revoke_process(process_id);
+            if leases.revoke_process(process_id) {
+                disconnect_driver_if_connected("attestation challenge expired");
+            }
             lease_fingerprints.remove(&process_id);
         }
         let tracked_leases = lease_fingerprints.clone();
         for (process_id, fingerprint) in tracked_leases {
             if leases.active_for(process_id, &fingerprint).is_none() {
+                disconnect_driver_if_connected("display lease expired");
                 lease_fingerprints.remove(&process_id);
                 pinned_clients.remove(&process_id);
             }
@@ -164,6 +183,10 @@ fn run_pipe_server(shutdown: &mpsc::Receiver<()>) -> io::Result<()> {
         let connected = loop {
             if shutdown.try_recv().is_ok() {
                 unsafe { CloseHandle(pipe); }
+                disconnect_driver_if_connected("service shutdown");
+                leases.clear();
+                lease_fingerprints.clear();
+                pinned_clients.clear();
                 return Ok(());
             }
             let result = unsafe { ConnectNamedPipe(pipe, null_mut()) };
@@ -183,6 +206,9 @@ fn run_pipe_server(shutdown: &mpsc::Receiver<()>) -> io::Result<()> {
                     for process_id in exited {
                         challenges.revoke_process(process_id);
                         leases.revoke_process(process_id);
+                        if leases.revoke_process(process_id) {
+                            disconnect_driver_if_connected("desktop process exited");
+                        }
                         lease_fingerprints.remove(&process_id);
                         pinned_clients.remove(&process_id);
                     }
@@ -316,7 +342,9 @@ fn handle_request(
             verify_publisher::verify_client_publisher(&caller.image_path).and_then(|_| {
                 let public_key = decode_hex_array::<32>(&pinned_public_key)?;
                 // A fresh challenge supersedes any prior authorization for this process.
-                leases.revoke_process(caller.process_id);
+                if leases.revoke_process(caller.process_id) {
+                    disconnect_driver_if_connected("new Android attestation challenge superseded lease");
+                }
                 lease_fingerprints.remove(&caller.process_id);
                 let nonce = challenges.issue_attestation_after_client_verification(
                     caller.process_id,
