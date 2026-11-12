@@ -65,7 +65,7 @@ Every push to `main` and every pull request validates Rust and builds:
 
 Push a version tag such as `v0.2.0` to build release assets and publish a GitHub Release automatically.
 
-**Signing note:** Windows desktop/MSI/service output is currently unsigned. Bridge's zero-cost plan is to own and protect a code-signing certificate, sign the IddCx driver package in trusted GitHub Actions runs, and ship the public certificate with the installer for explicit administrator approval. The private key will never be included in releases. A self-signed certificate is not automatically trusted by Windows, and broad compatibility with Secure Boot/Memory Integrity configurations must be validated before public rollout. Android release signing is configured independently; iOS archive signing is not configured. See [Windows signing and trust plan](docs/windows-code-signing.md).
+**Windows driver note:** Bridge uses the vendor-signed VirtualDrivers Virtual Display Driver as a third-party dependency. Bridge will not build or sign its own IddCx driver. The pinned upstream archive and catalog signature are validated in Windows CI; bundling and redistribution remain gated on verifying the exact package contents and permissions. Bridge's Windows desktop/MSI/service binaries may still need their own application code-signing strategy, which is separate from display-driver signing. See [Second Screen architecture](docs/second-screen-architecture.md).
 
 ## Windows desktop technology
 
