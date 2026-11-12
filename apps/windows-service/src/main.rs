@@ -38,6 +38,7 @@ use windows_sys::Win32::{
 
 mod pipe_client;
 mod vdd_control;
+mod vdd_device;
 mod vdd_topology;
 mod verify_publisher;
 
@@ -419,6 +420,7 @@ fn handle_request(
                 validate_lease_owner(caller, &device_fingerprint, pinned_clients, lease_fingerprints)?;
                 leases.authorize_operation(lease_id, caller.process_id, &device_fingerprint)
                     .map_err(|message| io::Error::new(io::ErrorKind::PermissionDenied, message))?;
+                vdd_device::ensure_installed()?;
                 vdd_control::set_display_count(1)
                     .map(|_| b"BRIDGE_DISPLAY/1 OK connect_requested\n".to_vec())
             }),
