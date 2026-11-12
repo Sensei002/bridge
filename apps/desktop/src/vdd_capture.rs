@@ -163,7 +163,8 @@ impl VddCapture {
         // the staging texture after rotation, resolution changes, or topology
         // transitions. CopyResource requires compatible resources; detect this
         // before copying and let the caller reopen the duplication session.
-        let source_desc = unsafe { texture.GetDesc() };
+        let mut source_desc = D3D11_TEXTURE2D_DESC::default();
+        unsafe { texture.GetDesc(&mut source_desc) };
         validate_frame_texture(
             source_desc.Width,
             source_desc.Height,
