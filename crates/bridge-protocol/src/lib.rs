@@ -19,7 +19,7 @@ impl Default for DeviceId {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Platform { Windows, Android, Ios, Linux, Macos, Unknown }
+pub enum Platform { Windows, Android, Linux, Macos, Unknown }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceDescriptor {
