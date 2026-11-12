@@ -66,7 +66,7 @@ jobs:
           Write-Host "Driver INF declarations:"
           Select-String -LiteralPath $inf -Pattern "NTamd64|NTx64|NTarm64|NTx86|CatalogFile|Manufacturer|HardwareID" | ForEach-Object { Write-Host $_.Line }
 
-      - name: Verify Windows kernel-mode catalog policy
+      - name: Verify UMDF package signature and stage with Windows PnP
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -77,13 +77,15 @@ jobs:
           $kits = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\bin"
           $signtool = Get-ChildItem -LiteralPath $kits -Recurse -File -Filter "signtool.exe" | Where-Object { $_.FullName -match "\\x64\\signtool\.exe$" } | Sort-Object FullName -Descending | Select-Object -First 1
           if (-not $signtool) { throw "Windows SDK x64 SignTool was not found." }
-          Write-Host "Using SignTool: $($signtool.FullName)"
-          & $signtool.FullName verify /kp /v /c $cat $inf
-          if ($LASTEXITCODE -ne 0) { throw "Driver INF failed Windows kernel-mode catalog verification (exit $LASTEXITCODE)." }
-          & $signtool.FullName verify /kp /v /c $cat $dll
-          if ($LASTEXITCODE -ne 0) { throw "Driver DLL failed Windows kernel-mode catalog verification (exit $LASTEXITCODE)." }
-          Write-Host "INF and AMD64 driver DLL pass Windows kernel-mode catalog policy."
-
+          Write-Host "This is an UMDF user-mode display driver. Verify PnP package signing with /pa, not kernel-mode /kp."
+          & $signtool.FullName verify /pa /v /c $cat $inf
+          if ($LASTEXITCODE -ne 0) { throw "Driver INF failed Windows PnP catalog verification (exit $LASTEXITCODE)." }
+          & $signtool.FullName verify /pa /v /c $cat $dll
+          if ($LASTEXITCODE -ne 0) { throw "Driver DLL failed Windows PnP catalog verification (exit $LASTEXITCODE)." }
+          Write-Host "Staging the vendor-signed UMDF package with Windows PnPUtil (no test-signing or root-certificate import)."
+          & pnputil.exe /add-driver $inf
+          if ($LASTEXITCODE -ne 0) { throw "Windows PnPUtil rejected the signed driver package (exit $LASTEXITCODE)." }
+          Write-Host "Windows accepted and staged the signed VirtualDrivers VDD package."
       - name: Upload pinned upstream archive for inspection
         uses: actions/upload-artifact@v4
         with:
