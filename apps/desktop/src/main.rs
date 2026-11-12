@@ -7,6 +7,8 @@ mod media_foundation;
 #[cfg(windows)]
 mod display_service;
 #[cfg(windows)]
+mod vdd_capture;
+#[cfg(windows)]
 mod identity_store;
 #[cfg(windows)]
 mod updater;
@@ -21,7 +23,7 @@ use bridge_core::trust::{SasConfirmation, TrustStore};
 #[cfg(windows)]
 use bridge_protocol::{DeviceDescriptor, DeviceId, Platform, PROTOCOL_VERSION};
 #[cfg(windows)]
-use bridge_transfer::{decode_packet, encode_packet, fragment_display_frame, fragment_encoded_video_frame, offer_for_file, DisplayFrame, EncodedVideoFrame, DisplayInputAction, DisplayInputEvent, FileOffer, IncomingFile, OutgoingFile, TransferControl, TransferPacket};
+use bridge_transfer::{decode_packet, encode_packet, fragment_display_frame, fragment_encoded_video_frame, offer_for_file, EncodedVideoFrame, DisplayInputAction, DisplayInputEvent, FileOffer, IncomingFile, OutgoingFile, TransferControl, TransferPacket};
 #[cfg(windows)]
 use std::net::TcpListener;
 #[cfg(windows)]
@@ -636,7 +638,7 @@ mod h264_access_unit_tests {
 fn start_display_frame_stream(
     session: Arc<DesktopSession>,
     session_key: String,
-    lease: display_service::ServiceLease,
+    _lease: display_service::ServiceLease,
     stop: Arc<std::sync::atomic::AtomicBool>,
     events: Sender<DisplayLeaseEvent>,
 ) -> Result<(), String> {
@@ -664,6 +666,35 @@ fn start_display_frame_stream(
                 });
             }
             let _com_apartment = com_apartment;
+            let capture_deadline = Instant::now() + Duration::from_secs(15);
+            let mut capture = loop {
+                match vdd_capture::VddCapture::open() {
+                    Ok(capture) => {
+                        let (width, height) = capture.dimensions();
+                        let _ = events.send(DisplayLeaseEvent::Status {
+                            session_key: session_key.clone(),
+                            message: format!("DXGI is capturing the upstream VDD output at {width}×{height}."),
+                        });
+                        break capture;
+                    }
+                    Err(error) if Instant::now() < capture_deadline
+                        && !stop.load(Ordering::Acquire) && session.is_alive() =>
+                    {
+                        let _ = events.send(DisplayLeaseEvent::Status {
+                            session_key: session_key.clone(),
+                            message: format!("Waiting for Windows to enumerate the upstream VDD monitor: {error}"),
+                        });
+                        thread::sleep(Duration::from_millis(250));
+                    }
+                    Err(error) => {
+                        let _ = events.send(DisplayLeaseEvent::Status {
+                            session_key: session_key.clone(),
+                            message: format!("Could not start DXGI capture for the upstream VDD output: {error}"),
+                        });
+                        return;
+                    }
+                }
+            };
             // Create the encoder only after the first real frame reveals the active
             // virtual-display dimensions. Recreate it on rotation or recovery requests.
             let mut persistent_encoder: Option<media_foundation::PersistentH264Encoder> = None;
@@ -681,17 +712,9 @@ fn start_display_frame_stream(
             let mut send_duration_window = Duration::ZERO;
             while !stop.load(Ordering::Acquire) && session.is_alive() {
                 let started = Instant::now();
-                match display_service::read_frame_with_lease(&lease, &session.remote_fingerprint) {
-                    Ok(frame) if frame.sequence > last_sequence => {
-                        let superseded_frames = frame.sequence.saturating_sub(last_sequence).saturating_sub(1);
-                        let display_frame = DisplayFrame {
-                            sequence: frame.sequence,
-                            width: frame.width,
-                            height: frame.height,
-                            stride: frame.stride,
-                            timestamp_ns: frame.timestamp_ns,
-                            pixels: frame.pixels,
-                        };
+                match capture.next_frame() {
+                    Ok(Some(display_frame)) if display_frame.sequence > last_sequence => {
+                        let superseded_frames = display_frame.sequence.saturating_sub(last_sequence).saturating_sub(1);
                         let keyframe_requested = session.take_video_keyframe_request();
                         let dimensions_changed = encoder_dimensions
                             .is_some_and(|dimensions| dimensions != (display_frame.width, display_frame.height));
@@ -871,10 +894,33 @@ fn start_display_frame_stream(
                             }
                         }
                     }
-                    Ok(_) => {}
-                    Err(_) => {
-                        // The capture callback can briefly have no complete frame while
-                        // the indirect display is starting or changing modes. Retry.
+                    Ok(Some(_)) | Ok(None) => {}
+                    Err(error) => {
+                        let _ = events.send(DisplayLeaseEvent::Status {
+                            session_key: session_key.clone(),
+                            message: format!("DXGI capture needs to be reopened: {error}"),
+                        });
+                        persistent_encoder = None;
+                        encoder_dimensions = None;
+                        encoder_unavailable = false;
+                        match vdd_capture::VddCapture::open() {
+                            Ok(reopened) => {
+                                let (width, height) = reopened.dimensions();
+                                capture = reopened;
+                                last_sequence = 0;
+                                let _ = events.send(DisplayLeaseEvent::Status {
+                                    session_key: session_key.clone(),
+                                    message: format!("DXGI capture recovered on the upstream VDD output at {width}×{height}."),
+                                });
+                            }
+                            Err(reopen_error) => {
+                                let _ = events.send(DisplayLeaseEvent::Status {
+                                    session_key: session_key.clone(),
+                                    message: format!("Upstream VDD capture is unavailable: {reopen_error}"),
+                                });
+                                thread::sleep(Duration::from_millis(500));
+                            }
+                        }
                     }
                 }
                 let stats_elapsed = stats_window_started.elapsed();
