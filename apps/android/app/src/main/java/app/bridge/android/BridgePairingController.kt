@@ -98,12 +98,24 @@ internal class BridgePairingController(
             try {
                 val trusted = trustedDevices().firstOrNull { it.deviceId == peer.deviceId }
                 val expected = expectedFingerprint ?: trusted?.fingerprint
-                val response = JSONObject(
-                    BridgeNative.pairConnect(request(host = peer.host, expectedFingerprint = expected, expectedDeviceId = peer.deviceId, port = peer.port))
-                )
-                handleResult(response)
-            } catch (error: Exception) {
-                postStatus("Secure connection attempt failed: ${error.message}")
+                var retryDelayMs = 1_000L
+                do {
+                    if (stopped || activeSessions.containsKey(peer.deviceId)) break
+                    try {
+                        val response = JSONObject(
+                            BridgeNative.pairConnect(request(host = peer.host, expectedFingerprint = expected, expectedDeviceId = peer.deviceId, port = peer.port))
+                        )
+                        handleResult(response)
+                    } catch (error: Exception) {
+                        if (!stopped) postStatus("Secure connection attempt failed: ${error.message}")
+                    }
+                    if (expected == null || stopped || activeSessions.containsKey(peer.deviceId)) break
+                    // Trusted-device reconnect is persistent while this discovered
+                    // peer remains the pinned identity. A bounded backoff avoids
+                    // waiting for another multicast discovery event after failure.
+                    try { Thread.sleep(retryDelayMs) } catch (_: InterruptedException) { break }
+                    retryDelayMs = (retryDelayMs * 2).coerceAtMost(15_000L)
+                } while (!stopped && !activeSessions.containsKey(peer.deviceId))
             } finally {
                 connectingDevices.remove(peer.deviceId)
             }
