@@ -619,8 +619,8 @@ mod tests {
         let initiator_key = generate_static_keypair().unwrap();
         let responder_key = generate_static_keypair().unwrap();
         let initiator_device = DeviceDescriptor {
-            id: DeviceId::new(), display_name: "Bridge iPhone".into(),
-            platform: Platform::Ios, protocol_version: PROTOCOL_VERSION, attestation_public_key: None,
+            id: DeviceId::new(), display_name: "Bridge Android".into(),
+            platform: Platform::Android, protocol_version: PROTOCOL_VERSION, attestation_public_key: None,
         };
         let responder_device = DeviceDescriptor {
             id: DeviceId::new(), display_name: "Bridge Android".into(),
@@ -645,7 +645,7 @@ mod tests {
         assert_eq!(initiator["role"], "initiator");
         assert_eq!(responder["role"], "responder");
         assert_eq!(initiator["remote_device"]["platform"], "android");
-        assert_eq!(responder["remote_device"]["platform"], "ios");
+        assert_eq!(responder["remote_device"]["platform"], "android");
 
         let initiator_handle = initiator["handle"].as_u64().unwrap();
         let responder_handle = responder["handle"].as_u64().unwrap();
