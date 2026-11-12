@@ -10,11 +10,11 @@ This is not desktop mirroring, a remote-control window, Miracast casting, or a v
 
 Bridge will **reuse the upstream VirtualDrivers Virtual Display Driver (VDD)**. Bridge will not maintain, compile, or sign its own IddCx/UMDF driver.
 
-- Initial candidate: **Parsec Virtual Display Driver 0.45** via the MIT-licensed `nomi-san/parsec-vdd` integration project.
-- The newer VirtualDrivers package was rejected for Bridge's x64 target: its 25.7.23 bundle contained only ARM64 and x86 driver packages, while its older x64 ZIP contained a catalog that Windows reported as `NotSigned` and a certificate-install batch file. Bridge will not install that self-signed certificate.
-- Parsec VDD's upstream project documents Windows 10/11 64-bit support and a signed driver package. Its companion ParsecDisplay application is unsigned; Bridge will not bundle or execute that companion app.
-- The Parsec VDD driver must remain unmodified. CI verified the x64 INF/DLL/catalog and a valid catalog signature from Microsoft Windows Hardware Compatibility Publisher. The pinned portable archive SHA-256 is `9792e4121d85ed3e4c40c2d8ba36ec8657e13227a8357d719d923e801238ccdd`.
-- No test-signing mode, Secure Boot change, Bridge-owned driver certificate, or certificate-root import is permitted.
+- Preferred candidate: **VirtualDrivers Virtual Display Driver 25.7.23**, whose catalog signature was verified by CI as SignPath Foundation. Its driver folder is named `x86`, so Bridge is now checking the actual PE machine type rather than assuming the folder name means 32-bit.
+- The older VirtualDrivers x64-only ZIP (24.10.27) was rejected because Windows reported its catalog as `NotSigned` and it shipped a certificate-install batch file.
+- **Fallback candidate:** Parsec VDD 0.45.1. CI verified its x64 INF/DLL and Microsoft Windows Hardware Compatibility Publisher catalog signature. Its driver is Parsec-owned; binary redistribution terms must be confirmed before bundling.
+- CI inspects both packages. The VirtualDrivers package wins if its `MttVDD.dll` PE machine is AMD64; otherwise Parsec remains the fallback candidate.
+- Neither path may require test-signing mode, Secure Boot changes, a Bridge-owned driver certificate, or importing a Bridge-owned root certificate.
 
 ### Required Bridge integration
 
@@ -46,7 +46,7 @@ Introduce separate components:
 
 1. **Bridge desktop UI (existing Rust/egui app):** normal interactive user-session app. Owns device selection, permissions, display settings, connect/disconnect actions, status, and diagnostics.
 2. **Bridge Display Service (Windows service):** privileged boundary for driver lifecycle, authenticated session coordination, media transport, encoder orchestration, recovery, and Windows service startup/shutdown. Expose a narrow, ACL-protected named-pipe API to the desktop UI. Run with the least privilege compatible with driver communication; do not default to LocalSystem without a demonstrated need.
-3. **Upstream Parsec Virtual Display Driver (third-party signed package):** owns the virtual display adapter, monitor PnP lifecycle, and mode negotiation. Bridge does not build or sign this driver. Bridge's capture adapter reads the resulting virtual output through Windows display/capture APIs.
+3. **Selected upstream Virtual Display Driver (third-party signed package):** owns the virtual display adapter, monitor PnP lifecycle, and mode negotiation. Bridge does not build or sign this driver. Bridge's capture adapter reads the resulting virtual output through Windows display/capture APIs.
 
 Driver installation and device configuration require elevation. Normal use of the desktop UI should not require running the whole app as administrator. Package the driver and service with the Windows installer only after installation, upgrade, rollback, and uninstall behaviour are defined.
 
