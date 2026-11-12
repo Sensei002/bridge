@@ -75,7 +75,8 @@ impl VddCapture {
                 };
                 let output1: IDXGIOutput1 = output.cast()
                     .map_err(|error| format!("VDD output does not expose IDXGIOutput1: {error}"))?;
-                let output_desc = unsafe { output1.GetDesc() };
+                let output_desc = unsafe { output1.GetDesc() }
+                    .map_err(|error| format!("could not query DXGI output description: {error}"))?;
                 let device_name = wide_field(&output_desc.DeviceName);
                 if device_name.is_empty() || !is_upstream_vdd_output(&device_name) {
                     continue;
