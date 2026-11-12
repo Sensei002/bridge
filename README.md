@@ -6,15 +6,14 @@
 <p align="center"><strong>CONNECT · SHARE · BEYOND</strong></p>
 <p align="center">One ecosystem. Every device.</p>
 
-Bridge is an open-source, local-first device interoperability project for Windows, Android, and iOS. The goal is to make nearby devices work together through one secure, permission-based ecosystem.
+Bridge is an open-source, local-first device interoperability project focused on Windows and Android, with Linux planned for the future. The goal is to make nearby devices work together through one secure, permission-based ecosystem.
 
-> **Status: Milestone 1 complete for the validated Windows + Android pairing target.** Both platforms have passed real-device discovery, bidirectional pairing, receiver approval, trusted reconnection, app restart/reconnection, and local-network reconnect checks. Windows firewall and Android network permissions have been tested successfully. iOS builds in CI but has not been physically tested; Linux desktop validation is deferred until a Linux test environment is available. See the validation scope and remaining follow-up items below.
+> **Status: Milestone 1 complete for the validated Windows + Android pairing target.** Both supported platforms have passed real-device discovery, bidirectional pairing, receiver approval, trusted reconnection, app restart/reconnection, and local-network reconnect checks. Windows firewall and Android network permissions have been tested successfully. Linux desktop support is planned.
 
 ## Platforms
 
 - **Windows:** Native Rust + [egui](https://github.com/emilk/egui) desktop application. No WebView2, Tauri, Electron, Chromium, or embedded browser runtime.
 - **Android:** Kotlin + Jetpack Compose.
-- **iOS:** SwiftUI native app.
 - **Shared engine:** Rust workspace with versioned protocol types, device registry, pairing consent state machine, local-network discovery, encrypted-session primitives, and trust persistence.
 
 ## Repository layout
@@ -26,7 +25,6 @@ Bridge is an open-source, local-first device interoperability project for Window
 - `crates/bridge-mobile` — C ABI/JNI FFI for native mobile clients.
 - `apps/desktop` — native Rust + egui Windows desktop app.
 - `apps/android` — Android app.
-- `apps/ios` — iOS app.
 - `assets/Bridge — Connect, Share, Beyond.png` — original master brand artwork.
 - `scripts/generate_brand_assets.py` — deterministic platform icon generation from the master artwork.
 - `docs/` — architecture, protocol, security model, and roadmap.
@@ -36,18 +34,17 @@ Bridge is an open-source, local-first device interoperability project for Window
 
 Implemented foundations:
 
-- mDNS/DNS-SD discovery on Windows, Android NSD, and iOS Bonjour.
+- mDNS/DNS-SD discovery on Windows and Android NSD.
 - Versioned, validated discovery metadata treated as untrusted until authentication.
 - Bounded length-prefixed TCP framing, socket timeouts, and Noise XX sessions.
 - SHA-256 static-key fingerprints, symmetric six-digit short authentication strings, and pinned-identity checks.
-- Device identity persistence using Windows Credential Manager, Android Keystore-backed storage, and iOS Keychain.
+- Device identity persistence using Windows Credential Manager and Android Keystore-backed storage.
 - Explicit approval on the receiving device before first-time trust; the initiating device is trusted only after receiving the encrypted acceptance response. Persistent trusted-device records and revocation.
 - Authenticated descriptor exchange, replay-resistant transport counters, encrypted pairing-decision messages, and one-tap approval on the receiving device.
 
 Milestone 1 validation outcome:
 
 - **Windows ↔ Android:** physical-device pairing and reconnection validated in both directions. App restart/reconnection, Wi-Fi disconnect/reconnect, Windows firewall, and Android network-permission behaviour were tested and reported working.
-- **iOS:** CI Simulator build passes; physical-device interoperability remains unverified because no iPhone or Mac test environment is currently available.
 - **Linux:** deferred until a Linux installation is available for testing.
 - **Follow-up hardening:** broader router/AP-isolation and IPv6-only coverage, resource-limit/lifecycle stress testing, and an independent security review remain recommended before a broad public release.
 
@@ -82,7 +79,7 @@ The Windows client is a native Rust desktop application rendered by egui. It doe
 - No silent cloud upload or background relay.
 - Never commit secrets or signing keys.
 
-The Windows + Android Milestone 1 target is validated on physical devices. iOS and Linux remain build/platform validation follow-ups, not claims of completed physical-device interoperability. A successful CI build or loopback test alone is not proof of real-device interoperability.
+The Windows + Android Milestone 1 target is validated on physical devices. Linux support is planned and will require its own build and physical-device validation. A successful CI build or loopback test alone is not proof of real-device interoperability.
 
 ## License
 
