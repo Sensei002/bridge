@@ -58,7 +58,6 @@ Every push to `main` and every pull request validates Rust and builds:
 1. Rust formatting, Clippy, and unit tests.
 2. Native Windows desktop executable using egui.
 3. Android debug APK.
-4. iOS Simulator app.
 
 Push a version tag such as `v0.2.0` to build release assets and publish a GitHub Release automatically.
 
