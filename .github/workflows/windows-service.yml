@@ -5,7 +5,11 @@ on:
     paths:
       - "apps/windows-service/**"
       - "scripts/windows/*BridgeDisplayService.ps1"
+      - "scripts/windows/Remove-LegacyBridgeMsi.ps1"
+      - "scripts/windows/*BridgeVirtualDisplayDriver.ps1"
       - "scripts/windows/Sign-BridgeBinaries.ps1"
+      - "scripts/windows/Remove-LegacyBridgeMsi.ps1"
+      - "scripts/windows/*BridgeVirtualDisplayDriver.ps1"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/windows-service.yml"
@@ -42,7 +46,10 @@ jobs:
           $scripts = @(
             "scripts/windows/Install-BridgeDisplayService.ps1",
             "scripts/windows/Uninstall-BridgeDisplayService.ps1",
-            "scripts/windows/Sign-BridgeBinaries.ps1"
+            "scripts/windows/Sign-BridgeBinaries.ps1",
+            "scripts/windows/Remove-LegacyBridgeMsi.ps1",
+            "scripts/windows/Install-BridgeVirtualDisplayDriver.ps1",
+            "scripts/windows/Uninstall-BridgeVirtualDisplayDriver.ps1"
           )
           foreach ($path in $scripts) {
             if (-not (Test-Path $path)) { throw "Missing service installation script: $path" }
