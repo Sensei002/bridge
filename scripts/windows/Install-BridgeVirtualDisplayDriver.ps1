@@ -1,9 +1,21 @@
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
     [string]$DownloadDirectory = (Join-Path $env:TEMP "Bridge-VDD-25.7.23"),
-    [string]$PayloadDirectory = (Join-Path $env:ProgramFiles "Bridge\DisplayServiceSetup\VDD")
+    [string]$PayloadDirectory = ""
 )
 $ErrorActionPreference = "Stop"
+
+# NSIS can launch 32-bit PowerShell, where ProgramFiles points to Program Files (x86).
+# Bridge is installed under the native 64-bit Program Files directory.
+if ([string]::IsNullOrWhiteSpace($PayloadDirectory)) {
+    $nativeProgramFiles = if ([Environment]::Is64BitOperatingSystem -and $env:ProgramW6432) {
+        $env:ProgramW6432
+    } else {
+        $env:ProgramFiles
+    }
+    $PayloadDirectory = Join-Path $nativeProgramFiles "Bridge\DisplayServiceSetup\VDD"
+}
+Write-Host "Bridge VDD activation payload destination: $PayloadDirectory"
 $releaseUrl = "https://github.com/VirtualDrivers/Virtual-Display-Driver/releases/download/25.7.23/VirtualDisplayDriver-x86.Driver.Only.zip"
 $expectedArchiveSha256 = "e24210692b442b39af763536330ce78b423f19342b7a7792c26de3944e418b3a"
 $expectedSignerThumbprint = "3CF8CF26D8BA266C3A483AB7D26D4A818E317D76"
@@ -85,7 +97,7 @@ if ($existingPackages.Count -gt 0) {
 # Keep the verified INF payload and pinned root-device installer for the
 # privileged service. Device creation is deferred until a trusted session has
 # passed Android attestation and received a short-lived display lease.
-Copy-Item -LiteralPath (Split-Path -Parent $infs[0].FullName) -Destination $PayloadDirectory -Recurse -Force
+Get-ChildItem -LiteralPath (Split-Path -Parent $infs[0].FullName) -Force | Copy-Item -Destination $PayloadDirectory -Recurse -Force
 Write-Host "Downloading the pinned NefCon root-device installer (not executed during setup)..."
 Invoke-WebRequest -Uri $nefconUrl -OutFile $nefconArchive -UseBasicParsing
 $nefconHash = (Get-FileHash -LiteralPath $nefconArchive -Algorithm SHA256).Hash.ToLowerInvariant()
