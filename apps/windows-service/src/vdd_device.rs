@@ -15,7 +15,7 @@ fn find_file(root: &Path, name: &str) -> io::Result<Option<PathBuf>> {
     for entry in fs::read_dir(root)? {
         let entry = entry?;
         let path = entry.path();
-        if path.is_file() && path.file_name().is_some_and(|value| value.eq_ignore_ascii_case(name)) {
+        if path.is_file() && path.file_name().is_some_and(|value| value.to_string_lossy().eq_ignore_ascii_case(name)) {
             return Ok(Some(path));
         }
         if path.is_dir() {
