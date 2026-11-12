@@ -48,12 +48,12 @@
 Architecture and acceptance gates: [docs/second-screen-architecture.md](second-screen-architecture.md).
 
 ### Windows virtual display foundation
-- [x] Stop developing/signing a Bridge-owned IddCx driver; evaluate signed third-party VDD packages instead.
-- [x] Reject the VirtualDrivers 25.7.23 package for x64 (only ARM64/x86 packages were present) and reject its older x64 ZIP because Windows reported its catalog as NotSigned.
-- [x] Validate Parsec VDD 0.45.1 as the x64 signed-driver candidate; pin archive SHA-256 `9792e4121d85ed3e4c40c2d8ba36ec8657e13227a8357d719d923e801238ccdd`; CI confirms the driver catalog is signed by Microsoft Windows Hardware Compatibility Publisher.
-- [x] Add CI validation for the upstream archive, driver INF/catalog presence, and Windows catalog signature.
-- [ ] Confirm exact x64 driver package contents, signer identity, and binary redistribution permissions before bundling.
-- [ ] Replace Bridge-specific driver IOCTL control with a supported VDD lifecycle/control integration.
+- [x] Stop developing/signing a Bridge-owned IddCx driver and select upstream VirtualDrivers VDD 25.7.23.
+- [x] Verify `SignedDrivers/x86/VDD/MttVDD.dll` is AMD64 (`0x8664`) despite the folder name.
+- [x] Verify the catalog signature is valid and signed by SignPath Foundation; pin archive SHA-256 `a701f2272e9fcf382849b24f913c6dd07597b3b1116525f2e90182f019609154`.
+- [x] Verify the INF and DLL with Windows PnP package-signing policy (`signtool verify /pa`); this is an UMDF user-mode driver, so kernel-mode `/kp` is not applicable.
+- [ ] Confirm redistribution terms for the exact driver-only files before bundling them; do not include the VDD control companion app unless its terms are confirmed.
+- [ ] Replace Bridge-specific driver IOCTL control with a narrow client for the upstream `\\.\\pipe\\MTTVirtualDisplayPipe` control interface.
 - [ ] Identify the VDD virtual output reliably through Windows display topology APIs.
 - [ ] Prototype DXGI Desktop Duplication capture of the VDD virtual output; evaluate Windows Graphics Capture if needed.
 - [ ] Route captured frames into the existing Bridge Media Foundation H.264 and authenticated Android pipeline.
