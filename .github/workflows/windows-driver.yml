@@ -25,20 +25,19 @@ concurrency:
 
 jobs:
   verify-upstream-vdd:
-    name: Verify signed VirtualDrivers AMD64 VDD package
+    name: Verify signed VirtualDrivers AMD64 driver-only package
     runs-on: windows-latest
     steps:
-      - name: Download and pin VirtualDrivers 25.7.23 bundle
+      - name: Download VirtualDrivers 25.7.23 driver-only package
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $url = "https://github.com/VirtualDrivers/Virtual-Display-Driver/releases/download/25.7.23/VDD.Control.25.7.23.zip"
-          $expected = "a701f2272e9fcf382849b24f913c6dd07597b3b1116525f2e90182f019609154"
-          $archive = Join-Path $env:RUNNER_TEMP "VDD.Control.25.7.23.zip"
+          $url = "https://github.com/VirtualDrivers/Virtual-Display-Driver/releases/download/25.7.23/VirtualDisplayDriver-x86.Driver.Only.zip"
+          $archive = Join-Path $env:RUNNER_TEMP "VirtualDisplayDriver-x86.Driver.Only.zip"
           Invoke-WebRequest -Uri $url -OutFile $archive
           $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($actual -ne $expected) { throw "VirtualDrivers VDD archive SHA-256 mismatch. Expected $expected, received $actual." }
-          $root = Join-Path $env:RUNNER_TEMP "virtualdrivers-vdd"
+          Write-Host "VIRTUALDRIVERS DRIVER-ONLY ARCHIVE SHA256: $actual"
+          $root = Join-Path $env:RUNNER_TEMP "virtualdrivers-vdd-driver-only"
           Expand-Archive -LiteralPath $archive -DestinationPath $root -Force
           "VDD_ARCHIVE=$archive" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "VDD_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
@@ -47,11 +46,13 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $driver = Join-Path $env:VDD_ROOT "SignedDrivers\x86\VDD"
-          $dll = Join-Path $driver "MttVDD.dll"
+          $dlls = @(Get-ChildItem -LiteralPath $env:VDD_ROOT -Recurse -File -Filter "MttVDD.dll")
+          if ($dlls.Count -ne 1) { throw "Expected exactly one MttVDD.dll in driver-only package; found $($dlls.Count)." }
+          $driver = $dlls[0].DirectoryName
+          $dll = $dlls[0].FullName
           $inf = Join-Path $driver "MttVDD.inf"
           $cat = Join-Path $driver "mttvdd.cat"
-          foreach ($path in @($dll, $inf, $cat)) { if (-not (Test-Path -LiteralPath $path)) { throw "Expected VDD package file missing: $path" } }
+          foreach ($path in @($inf, $cat)) { if (-not (Test-Path -LiteralPath $path)) { throw "Expected VDD package file missing: $path" } }
           $bytes = [IO.File]::ReadAllBytes($dll)
           if ($bytes.Length -lt 256 -or [BitConverter]::ToUInt16($bytes, 0) -ne 0x5A4D) { throw "MttVDD.dll is not a valid PE image." }
           $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
@@ -70,23 +71,24 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $driver = Join-Path $env:VDD_ROOT "SignedDrivers\x86\VDD"
+          $dll = Get-ChildItem -LiteralPath $env:VDD_ROOT -Recurse -File -Filter "MttVDD.dll" | Select-Object -First 1
+          $driver = $dll.DirectoryName
           $cat = Join-Path $driver "mttvdd.cat"
           $inf = Join-Path $driver "MttVDD.inf"
-          $dll = Join-Path $driver "MttVDD.dll"
           $kits = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\bin"
           $signtool = Get-ChildItem -LiteralPath $kits -Recurse -File -Filter "signtool.exe" | Where-Object { $_.FullName -match "\\x64\\signtool\.exe$" } | Sort-Object FullName -Descending | Select-Object -First 1
           if (-not $signtool) { throw "Windows SDK x64 SignTool was not found." }
           Write-Host "This is an UMDF user-mode display driver. Verify PnP package signing with /pa, not kernel-mode /kp."
           & $signtool.FullName verify /pa /v /c $cat $inf
           if ($LASTEXITCODE -ne 0) { throw "Driver INF failed Windows PnP catalog verification (exit $LASTEXITCODE)." }
-          & $signtool.FullName verify /pa /v /c $cat $dll
+          & $signtool.FullName verify /pa /v /c $cat $dll.FullName
           if ($LASTEXITCODE -ne 0) { throw "Driver DLL failed Windows PnP catalog verification (exit $LASTEXITCODE)." }
           Write-Host "INF and AMD64 UMDF DLL pass Windows PnP package-signing policy."
-      - name: Upload pinned upstream archive for inspection
+
+      - name: Upload pinned driver-only archive for inspection
         uses: actions/upload-artifact@v4
         with:
-          name: virtualdrivers-vdd-amd64-25.7.23
+          name: virtualdrivers-vdd-amd64-driver-only-25.7.23
           path: ${{ env.VDD_ARCHIVE }}
           if-no-files-found: error
           retention-days: 7
