@@ -47,6 +47,12 @@
       <Component Id="BridgeDisplayServiceUninstallScriptComponent" Guid="*">
         <File Id="BridgeDisplayServiceUninstallScript" Source="$(var.ScriptsDir)\Uninstall-BridgeDisplayService.ps1" KeyPath="yes" />
       </Component>
+      <Component Id="BridgeVddInstallScriptComponent" Guid="*">
+        <File Id="BridgeVddInstallScript" Source="$(var.ScriptsDir)\Install-BridgeVirtualDisplayDriver.ps1" KeyPath="yes" />
+      </Component>
+      <Component Id="BridgeVddUninstallScriptComponent" Guid="*">
+        <File Id="BridgeVddUninstallScript" Source="$(var.ScriptsDir)\Uninstall-BridgeVirtualDisplayDriver.ps1" KeyPath="yes" />
+      </Component>
     </ComponentGroup>
 
     <ComponentGroup Id="BridgeShortcuts">

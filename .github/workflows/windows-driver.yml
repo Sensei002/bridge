@@ -7,6 +7,9 @@ on:
       - "apps/windows-driver/**"
       - "docs/second-screen-architecture.md"
       - "apps/windows-driver/README.md"
+      - "scripts/windows/*BridgeVirtualDisplayDriver.ps1"
+      - "installer/windows/Package.wxs"
+      - "docs/windows-display-service-installation.md"
   push:
     branches: [development, stable]
     paths:
@@ -28,6 +31,7 @@ jobs:
     name: Verify signed VirtualDrivers AMD64 driver-only package
     runs-on: windows-latest
     steps:
+      - uses: actions/checkout@v4
       - name: Download VirtualDrivers 25.7.23 driver-only package
         shell: pwsh
         run: |
@@ -86,6 +90,25 @@ jobs:
           & $signtool.FullName verify /pa /v /c $cat $dll.FullName
           if ($LASTEXITCODE -ne 0) { throw "Driver DLL failed Windows PnP catalog verification (exit $LASTEXITCODE)." }
           Write-Host "INF and AMD64 UMDF DLL pass Windows PnP package-signing policy."
+
+      - name: Validate Bridge VDD setup script syntax
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $scripts = @(
+            "scripts/windows/Install-BridgeVirtualDisplayDriver.ps1",
+            "scripts/windows/Uninstall-BridgeVirtualDisplayDriver.ps1"
+          )
+          foreach ($path in $scripts) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD $path), [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) {
+              $errors | ForEach-Object { Write-Error "$path($($_.Extent.StartLineNumber)): $($_.Message)" }
+              throw "PowerShell parser rejected $path."
+            }
+            Write-Host "PowerShell syntax valid: $path"
+          }
 
       - name: Upload pinned driver-only archive for inspection
         uses: actions/upload-artifact@v4

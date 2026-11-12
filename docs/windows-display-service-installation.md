@@ -1,23 +1,36 @@
-# Installing the Bridge Display Service
+# Installing the Bridge Windows display components
 
-Run an elevated PowerShell window. The installer accepts a service executable produced by a trusted Bridge build:
+## Upstream Virtual Display Driver
 
-    .\scripts\windows\Install-BridgeDisplayService.ps1 -ServiceExecutable .\bridge-display-service.exe
+Bridge uses the upstream VirtualDrivers Virtual Display Driver 25.7.23. It does not build, sign, or install a Bridge-owned display driver.
 
-The installer requires a valid Authenticode signature by default. For a locally built, unsigned development artifact only, explicitly opt in:
+The MSI places two setup scripts in the Bridge installation's `DisplayServiceSetup` directory:
 
-    .\scripts\windows\Install-BridgeDisplayService.ps1 -ServiceExecutable .\bridge-display-service.exe -AllowUnsignedDevelopmentBuild
+- `Install-BridgeVirtualDisplayDriver.ps1`
+- `Uninstall-BridgeVirtualDisplayDriver.ps1`
 
-Before registering the service, the installer copies the executable into:
+Open an elevated PowerShell window in that directory and run the install script:
 
-%ProgramFiles%\\Bridge\\DisplayService\\bridge-display-service.exe
+```powershell
+.\Install-BridgeVirtualDisplayDriver.ps1
+```
 
-It applies a protected directory ACL using Windows well-known SIDs: LocalSystem and Administrators receive full control; Users receive read/execute only. The service therefore does not run from a user-writable Downloads or AppData location. The installer verifies that the copied executable's SHA-256 hash matches the source, registers the service as LocalSystem with automatic startup, configures recovery after unexpected crashes, and starts it.
+The script downloads the official driver-only release directly from the upstream GitHub release. It does not redistribute or bundle the driver archive in Bridge's MSI. Before calling Windows PnP installation, it checks the pinned archive SHA-256, requires the expected valid SignPath Foundation catalog signer and thumbprint, verifies the driver DLL is AMD64, and requires Windows' own PnP installer to accept the package. It uses the exact 25.7.23 package validated in Bridge CI.
 
-The installer stops an existing service before replacing its executable. Re-run it from an elevated PowerShell window to update the service binary.
+The script supports PowerShell `-WhatIf` and requires administrator approval. It does not enable the virtual monitor; Bridge requests a display only during an authenticated Second Screen session. A successful `pnputil` command means the driver package was accepted into the Windows Driver Store, not that Windows has enumerated a monitor.
 
-Uninstall the service registration with:
+To remove the upstream driver package:
 
-    .\scripts\windows\Uninstall-BridgeDisplayService.ps1
+```powershell
+.\Uninstall-BridgeVirtualDisplayDriver.ps1
+```
 
-The uninstaller intentionally does not delete the service executable directory or the IddCx driver package. Remove those only after confirming the virtual display is disconnected and no service process is using the files.
+The uninstaller first sends the upstream local-only `SETDISPLAYCOUNT 0` request, then removes matching MttVDD packages with `pnputil`. The upstream pipe has no acknowledgement, so this request is not proof that the monitor has disappeared. Windows may require a restart to finish package removal. Do not remove the driver while a Bridge Second Screen session is active.
+
+## Bridge Display Service
+
+The separate Bridge Display Service installer is documented in [Installing the Bridge Display Service](windows-display-service-installation.md). Its Authenticode verification remains enabled by default; unsigned development builds require the explicit development-only switch.
+
+## Current limitation
+
+These scripts are a verified driver-package setup foundation, not yet a one-click transactional installer. The Windows MSI still installs per-user and does not silently elevate, register the privileged service, or roll back both service and driver as one transaction. The full elevated install/upgrade/uninstall experience remains a Milestone 2 task.
