@@ -99,7 +99,9 @@ internal class BridgePairingController(
                 val trusted = trustedDevices().firstOrNull { it.deviceId == peer.deviceId }
                 val expected = expectedFingerprint ?: trusted?.fingerprint
                 var retryDelayMs = 1_000L
+                var attempts = 0
                 do {
+                    attempts += 1
                     if (stopped || activeSessions.containsKey(peer.deviceId)) break
                     try {
                         val response = JSONObject(
@@ -115,7 +117,7 @@ internal class BridgePairingController(
                     // waiting for another multicast discovery event after failure.
                     try { Thread.sleep(retryDelayMs) } catch (_: InterruptedException) { break }
                     retryDelayMs = (retryDelayMs * 2).coerceAtMost(15_000L)
-                } while (!stopped && !activeSessions.containsKey(peer.deviceId))
+                } while (!stopped && !activeSessions.containsKey(peer.deviceId) && attempts < 8)
             } finally {
                 connectingDevices.remove(peer.deviceId)
             }
