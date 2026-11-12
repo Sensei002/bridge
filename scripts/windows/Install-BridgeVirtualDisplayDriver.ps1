@@ -7,6 +7,18 @@ $expectedSignerThumbprint = "3CF8CF26D8BA266C3A483AB7D26D4A818E317D76"
 $expectedSignerName = "SignPath Foundation"
 $nefconUrl = "https://github.com/nefarius/nefcon/releases/download/v1.14.0/nefcon_v1.14.0.zip"
 $expectedNefconSha256 = "a15557da24a9efca203158de3b43b0eaf982db231f0194031f1ed428bc13e669"
+$logDirectory = Join-Path $env:ProgramData "Bridge\Logs"
+$transcriptPath = Join-Path $logDirectory "installer-vdd.log"
+New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
+$script:TranscriptStarted = $false
+try { Start-Transcript -Path $transcriptPath -Append | Out-Null; $script:TranscriptStarted = $true } catch { Write-Warning "Could not start installer transcript: $($_.Exception.Message)" }
+trap {
+    $failure = $_
+    Write-Host "ERROR: $($failure.Exception.Message)"
+    Write-Host "Diagnostic log: $transcriptPath"
+    if ($script:TranscriptStarted) { Stop-Transcript | Out-Null }
+    exit 1
+}
 
 function Assert-Administrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -20,13 +32,11 @@ function Get-InstalledBridgeVddPackages {
     @(Get-WindowsDriver -Online -All | Where-Object { $_.OriginalFileName -match '(?i)\\MttVDD\.inf$' })
 }
 function Get-BridgeVddDevices {
-    # Root-enumerated devices are exposed by Windows as ROOT\DISPLAY\####.
-    # Root\MttVDD is their hardware ID, not their PnP instance ID.
-    @(Get-PnpDevice -Class Display -PresentOnly:$false -ErrorAction SilentlyContinue |
-        Where-Object {
-            $hardwareIds = (Get-PnpDeviceProperty -InstanceId $_.InstanceId -KeyName 'DEVPKEY_Device_HardwareIds' -ErrorAction SilentlyContinue).Data
-            @($hardwareIds) -contains 'Root\MttVDD'
-        })
+    # Root-enumerated VDD instances have ROOT\DISPLAY\... instance IDs.
+    # Their hardware ID is Root\MttVDD. Query CIM's HardwareID property
+    # directly instead of silently swallowing per-device PnP property errors.
+    @(Get-CimInstance -ClassName Win32_PnPEntity -Filter "PNPClass = 'Display'" -ErrorAction Stop |
+        Where-Object { @($_.HardwareID) -contains 'Root\MttVDD' })
 }
 
 Assert-Administrator
@@ -84,15 +94,33 @@ Invoke-WebRequest -Uri $nefconUrl -OutFile $nefconArchive -UseBasicParsing
 $nefconHash = (Get-FileHash -LiteralPath $nefconArchive -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($nefconHash -ne $expectedNefconSha256) { throw "NefCon archive SHA-256 mismatch. Expected $expectedNefconSha256; received $nefconHash. Nothing was executed." }
 Expand-Archive -LiteralPath $nefconArchive -DestinationPath $nefconExtract -Force
-$nefcon = Join-Path $nefconExtract "x64\nefconw.exe"
-if (-not (Test-Path -LiteralPath $nefcon -PathType Leaf)) { throw "The pinned NefCon archive does not contain x64\nefconw.exe." }
+$nefcon = Join-Path $nefconExtract "x64\nefconc.exe"
+if (-not (Test-Path -LiteralPath $nefcon -PathType Leaf)) { throw "The pinned NefCon archive does not contain x64\nefconc.exe (the console build required for reliable exit-code reporting)." }
 
 $devices = @(Get-BridgeVddDevices)
 if ($devices.Count -eq 0) {
     Write-Host "Creating the missing ROOT\MttVDD device instance..."
-    & $nefcon install $infs[0].FullName "Root\MttVDD"
+    # NefCon performs its own hardware-ID check with --no-duplicates. This is
+    # the final safety barrier if Windows' CIM/PnP enumeration misses an
+    # existing instance: never create another ROOT\MttVDD node on upgrade.
+    $nefconOperationLog = Join-Path $DownloadDirectory "nefcon-operation.log"
+    $nefconConsoleLog = Join-Path $DownloadDirectory "nefcon-console.log"
+    $nefconArguments = @(
+        "install",
+        $infs[0].FullName,
+        "Root\MttVDD",
+        "--no-duplicates",
+        "--default-log-file=$nefconOperationLog",
+        "--verbose"
+    )
+    Write-Host "Running NefCon console installer with duplicate prevention enabled..."
+    & $nefcon @nefconArguments 2>&1 | Tee-Object -FilePath $nefconConsoleLog -Append
     $nefconExit = $LASTEXITCODE
-    if ($nefconExit -ne 0) { throw "NefCon could not create ROOT\MttVDD (exit code $nefconExit)." }
+    Write-Host "NefCon exit code: $nefconExit"
+    Write-Host "NefCon diagnostic log: $nefconOperationLog"
+    if ($null -eq $nefconExit) { throw "NefCon did not provide a process exit code. See $nefconConsoleLog." }
+    if ($nefconExit -notin @(0, 3010)) { throw "NefCon could not install ROOT\MttVDD (exit code $nefconExit). See $nefconOperationLog and $nefconConsoleLog." }
+    if ($nefconExit -eq 3010) { Write-Warning "NefCon completed but Windows requested a restart." }
 } else {
     Write-Host "ROOT\MttVDD device instance already exists; not creating a duplicate."
 }
@@ -118,3 +146,5 @@ if (-not $pipeReady) {
 
 Write-Host "SUCCESS: signed VirtualDrivers VDD is staged, ROOT\MttVDD is enumerated, and its control pipe is available."
 Write-Host "The virtual monitor is still activated only during an authenticated Bridge Second Screen session."
+Write-Host "Diagnostic log: $transcriptPath"
+if ($script:TranscriptStarted) { Stop-Transcript | Out-Null }
