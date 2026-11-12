@@ -160,6 +160,11 @@ class MainActivity : ComponentActivity() {
                 latestDisplayFrame = latestDisplayFrame,
                 latestEncodedVideoFrame = latestEncodedVideoFrame,
                 onImmersiveModeChange = { setSecondScreenImmersive(it) },
+                onRotateScreen = {
+                    requestedOrientation = if (requestedOrientation == android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE)
+                        android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+                    else android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+                },
                 onCopyLogs = {
                     val clipboard = getSystemService(android.content.ClipboardManager::class.java)
                     clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Bridge Android diagnostics", BridgeDiagnostics.snapshot()))
@@ -323,6 +328,7 @@ private fun BridgeApp(
     latestDisplayFrame: BridgeDisplayFrame?,
     latestEncodedVideoFrame: BridgeEncodedVideoFrame?,
     onImmersiveModeChange: (Boolean) -> Unit,
+    onRotateScreen: () -> Unit,
     onCopyLogs: () -> Unit,
     onDisplayInput: (String, Int, Int, Int, Int) -> Unit,
     receivedFiles: List<File>,
@@ -414,7 +420,8 @@ private fun BridgeApp(
                                 immersiveSecondScreen = enabled
                                 onImmersiveModeChange(enabled)
                             },
-                            onDisplayInput = onDisplayInput
+                            onDisplayInput = onDisplayInput,
+                            onRotateScreen = onRotateScreen
                         )
                         BridgeTab.Tools -> ToolsScreen()
                         BridgeTab.Settings -> SettingsScreen(
@@ -573,7 +580,8 @@ private fun SecondScreenView(
     connectedDevices: Int,
     immersive: Boolean,
     onImmersiveChange: (Boolean) -> Unit,
-    onDisplayInput: (String, Int, Int, Int, Int) -> Unit
+    onDisplayInput: (String, Int, Int, Int, Int) -> Unit,
+    onRotateScreen: () -> Unit
 ) {
     var imageSize by remember { mutableStateOf(IntSize.Zero) }
     var frameRate by remember { mutableStateOf(0f) }
@@ -620,7 +628,7 @@ private fun SecondScreenView(
         key2 = frame?.width,
         key3 = frame?.height
     ) {
-        value = if (frame == null) {
+        value = if (frame == null || encodedFrame != null) {
             null
         } else {
             // Bitmap allocation and BGRA-to-platform pixel upload can be expensive
@@ -677,17 +685,24 @@ private fun SecondScreenView(
                         fontSize = 10.sp
                     )
                 }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = onRotateScreen,
+                    colors = ButtonDefaults.buttonColors(containerColor = PanelAlt, contentColor = Color.White),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                ) { Text("Rotate", fontSize = 12.sp) }
                 Button(
                     onClick = { onImmersiveChange(false) },
                     colors = ButtonDefaults.buttonColors(containerColor = PanelAlt, contentColor = Color.White),
                     contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
                 ) { Text("Exit", fontSize = 12.sp) }
+                }
             }
             Box(
                 modifier = Modifier.weight(1f).fillMaxWidth().background(Color.Black),
                 contentAlignment = Alignment.Center
             ) {
-                if (displayBitmap != null) {
+                if (encodedFrame == null && displayBitmap != null) {
                     Image(
                         bitmap = displayBitmap,
                         contentDescription = "Windows secondary display",
@@ -756,7 +771,7 @@ private fun SecondScreenView(
                         onStatus = { message -> BridgeRuntimeState.transferStatus.value = message }
                     )
                 }
-                if (displayBitmap == null) {
+                if (displayBitmap == null && encodedFrame == null) {
                     Text(
                         if (connectedDevices == 0) "Connect a trusted Windows PC first."
                         else "Waiting for the Windows display stream…",
@@ -849,7 +864,7 @@ private fun SecondScreenView(
                             fontWeight = FontWeight.Bold
                         )
                     }
-                    if (displayBitmap != null) {
+                    if (encodedFrame == null && displayBitmap != null) {
                         Image(
                             bitmap = displayBitmap,
                             contentDescription = "Windows secondary display",
