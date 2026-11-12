@@ -2,15 +2,20 @@
 
 ## Driver decision
 
-Bridge uses the upstream **VirtualDrivers Virtual Display Driver (VDD)** instead of maintaining a Bridge-specific IddCx/UMDF driver.
+Bridge will use an existing signed x64 VDD package instead of maintaining a Bridge-specific IddCx/UMDF driver.
 
-- Upstream: https://github.com/VirtualDrivers/Virtual-Display-Driver
-- Initial x64 integration candidate: **24.10.27** (older than the latest upstream control bundle because the 25.7.23 archive tested by CI contained no x64 driver)
-- Package: `VirtualDisplayDriver-x64.zip`
-- Archive SHA-256: pending first Windows CI verification run; it must be pinned before this dependency is accepted
-- The upstream project identifies its source repository as MIT-licensed and release 24.10.27 publishes a separate x64 driver ZIP, and its catalog signature will be verified in Windows CI.
+### Candidate under verification: Parsec VDD 0.45.1
 
-Bridge must use the vendor-supplied driver package unchanged. Do not build, modify, catalog-sign, or certificate-sign a Bridge-owned display driver. Do not install a Bridge-owned root certificate or ask users to enable test signing / disable Secure Boot.
+- Integration project: https://github.com/nomi-san/parsec-vdd
+- Upstream release: https://github.com/nomi-san/parsec-vdd/releases/tag/v0.45.1
+- Package under CI verification: `ParsecVDisplay-v0.45-portable.zip`
+- The project documents Windows 10/11 64-bit support and a signed Parsec virtual display driver.
+- The ParsecDisplay companion app is explicitly unsigned; Bridge will not bundle or execute it.
+- Parsec VDD requires a keepalive ping about once per second or it removes the virtual display. Bridge's Windows service must implement that watchdog.
+
+The VirtualDrivers VDD candidate was rejected for x64: its 25.7.23 bundle had ARM64 and x86 only, and its older x64 ZIP had a catalog reported as NotSigned by Windows. Bridge will not install the self-signed certificate supplied in that package.
+
+Bridge must use the selected vendor-supplied driver package unchanged. Do not build, modify, catalog-sign, or certificate-sign a Bridge-owned display driver. Do not install a Bridge-owned root certificate or ask users to enable test signing / disable Secure Boot. Do not build, modify, catalog-sign, or certificate-sign a Bridge-owned display driver. Do not install a Bridge-owned root certificate or ask users to enable test signing / disable Secure Boot.
 
 ## Important integration boundary
 
@@ -26,7 +31,7 @@ A monitor appearing in Windows is not enough: Second Screen is complete only whe
 
 ## CI and packaging
 
-`.github/workflows/windows-driver.yml` validates the pinned upstream release archive, archive hash, extracted INF/catalog files, and catalog signature on Windows. It does not compile or sign a Bridge driver.
+`.github/workflows/windows-driver.yml` validates the candidate x64 archive, extracted INF/catalog/DLL files, and catalog signature on Windows. The package is not accepted until its archive hash and signer are pinned and its redistribution conditions are reviewed. The workflow does not compile or sign a Bridge driver.
 
 The upstream release archive is a third-party dependency. Before distributing it inside Bridge, verify the exact x64 package contents and redistribution rights for every bundled component, and preserve all upstream notices. Source-code MIT licensing does not automatically settle every binary/companion-app redistribution question.
 
