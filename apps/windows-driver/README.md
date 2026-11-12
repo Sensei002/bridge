@@ -12,7 +12,7 @@ Bridge will use an existing signed x64 VDD package instead of maintaining a Brid
 - The project documents Windows 10/11 64-bit support. CI extracted the x64 driver package and verified its catalog signature as `Microsoft Windows Hardware Compatibility Publisher`.
 - Pinned archive SHA-256: `9792e4121d85ed3e4c40c2d8ba36ec8657e13227a8357d719d923e801238ccdd`.
 - The ParsecDisplay companion app is explicitly unsigned; Bridge will not bundle or execute it.
-- Parsec VDD requires a keepalive ping about once per second or it removes the virtual display. Bridge's Windows service must implement that watchdog.
+- Parsec VDD requires a keepalive ping roughly every 100 ms (never more than 200 ms apart); if pings stop for about one second, the driver removes the virtual display. Bridge's Windows service must implement that watchdog. A reference Rust client is available at https://github.com/rohitsangwan01/parsec-vdd-rust and must be reviewed before reuse.
 
 The VirtualDrivers VDD candidate was rejected for x64: its 25.7.23 bundle had ARM64 and x86 only, and its older x64 ZIP had a catalog reported as NotSigned by Windows. Bridge will not install the self-signed certificate supplied in that package.
 
