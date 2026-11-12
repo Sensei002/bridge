@@ -19,7 +19,7 @@ use windows::{
                 D3D11_MAPPED_SUBRESOURCE, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
             },
             Dxgi::{
-                CreateDXGIFactory1, DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTDUPL_DESC,
+                CreateDXGIFactory1, DXGI_OUTDUPL_FRAME_INFO,
                 IDXGIAdapter, IDXGIFactory1, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
             },
             Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC},
