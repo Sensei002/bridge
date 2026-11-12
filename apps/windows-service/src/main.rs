@@ -36,7 +36,6 @@ use windows_sys::Win32::{
     },
 };
 
-mod driver;
 mod pipe_client;
 mod vdd_control;
 mod vdd_topology;
@@ -435,13 +434,6 @@ fn handle_request(
                 lease_fingerprints.remove(&caller.process_id);
                 pinned_clients.remove(&caller.process_id);
                 Ok(b"BRIDGE_DISPLAY/1 OK disconnect_requested\n".to_vec())
-            }),
-        Request::ReadFrame { lease_id, device_fingerprint } =>
-            verify_publisher::verify_client_publisher(&caller.image_path).and_then(|_| {
-                validate_lease_owner(caller, &device_fingerprint, pinned_clients, lease_fingerprints)?;
-                leases.authorize_operation(lease_id, caller.process_id, &device_fingerprint)
-                    .map_err(|message| io::Error::new(io::ErrorKind::PermissionDenied, message))?;
-                driver::read_latest_frame().map(|frame| frame.into_packet())
             }),
     };
     result.unwrap_or_else(|error| format!("BRIDGE_DISPLAY/1 ERROR {error}\n").into_bytes())

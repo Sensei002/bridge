@@ -19,7 +19,6 @@ pub enum Request {
     Renew { lease_id: uuid::Uuid, device_fingerprint: String },
     Connect { lease_id: uuid::Uuid, device_fingerprint: String },
     Disconnect { lease_id: uuid::Uuid, device_fingerprint: String },
-    ReadFrame { lease_id: uuid::Uuid, device_fingerprint: String },
 }
 
 impl Request {
@@ -100,10 +99,6 @@ impl Request {
                 parse_lease_command(value, "BRIDGE_DISPLAY/1 DISCONNECT ")
                     .map(|(lease_id, device_fingerprint)| Self::Disconnect { lease_id, device_fingerprint })
             }
-            value if value.starts_with("BRIDGE_DISPLAY/1 READ_FRAME ") => {
-                parse_lease_command(value, "BRIDGE_DISPLAY/1 READ_FRAME ")
-                    .map(|(lease_id, device_fingerprint)| Self::ReadFrame { lease_id, device_fingerprint })
-            },
             _ => Err("unsupported display-service request"),
         }
     }
@@ -182,7 +177,7 @@ mod tests {
         assert!(Request::parse(b"BRIDGE_DISPLAY/1 CONNECT").is_err());
         assert!(Request::parse(format!("BRIDGE_DISPLAY/1 DISCONNECT lease={lease_id} fingerprint=bad").as_bytes()).is_err());
         let frame_command = format!("BRIDGE_DISPLAY/1 READ_FRAME lease={lease_id} fingerprint={fingerprint}");
-        assert_eq!(Request::parse(frame_command.as_bytes()), Ok(Request::ReadFrame { lease_id, device_fingerprint: fingerprint.clone() }));
+        assert!(Request::parse(frame_command.as_bytes()).is_err());
         assert!(Request::parse(b"CONNECT").is_err());
         assert!(Request::parse(b"BRIDGE_DISPLAY/2 QUERY").is_err());
     }

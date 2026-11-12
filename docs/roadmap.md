@@ -53,17 +53,19 @@ Architecture and acceptance gates: [docs/second-screen-architecture.md](second-s
 - [x] Verify the catalog signature is valid and signed by SignPath Foundation; pin the smaller upstream driver-only archive `VirtualDisplayDriver-x86.Driver.Only.zip` at SHA-256 `e24210692b442b39af763536330ce78b423f19342b7a7792c26de3944e418b3a`.
 - [x] Verify the INF and DLL with Windows PnP package-signing policy (`signtool verify /pa`); this is an UMDF user-mode driver, so kernel-mode `/kp` is not applicable.
 - [ ] Confirm redistribution terms for the exact driver-only files before bundling them; do not include the VDD control companion app unless its terms are confirmed.
-- [ ] Replace Bridge-specific driver IOCTL control with a narrow client for the upstream `\\.\\pipe\\MTTVirtualDisplayPipe` control interface.
-- [ ] Identify the VDD virtual output reliably through Windows display topology APIs.
-- [ ] Prototype DXGI Desktop Duplication capture of the VDD virtual output; evaluate Windows Graphics Capture if needed.
-- [ ] Route captured frames into the existing Bridge Media Foundation H.264 and authenticated Android pipeline.
+- [x] Replace Bridge-specific driver IOCTL control with a narrow client for the upstream `\\.\\pipe\\MTTVirtualDisplayPipe` control interface.
+- [x] Identify the VDD virtual output through Windows display topology APIs and report presence separately from desktop attachment.
+- [x] Implement DXGI Desktop Duplication capture of the exact VDD virtual output; evaluate Windows Graphics Capture only if hardware validation exposes a compatibility gap.
+- [x] Route captured frames into the existing Bridge Media Foundation H.264 and authenticated Android pipeline.
+- [x] Remove the obsolete Bridge-owned driver IOCTL frame-read path; the privileged service now handles lifecycle and topology only, while DXGI capture stays in the desktop process.
+- [x] Add bounded DXGI capture-session recovery with exponential backoff and resource recreation.
 - [ ] Implement elevated, rollback-capable installation/uninstallation of the vendor-signed VDD package; no Bridge driver signing or test-signing.
 - [ ] Validate Windows Extend mode on a physical Windows machine: move ordinary application windows onto the Android display.
 
 ### Real-time desktop media pipeline
-- [ ] Capture the selected VDD virtual output through DXGI Desktop Duplication or Windows Graphics Capture without blocking display composition.
+- [x] Capture the selected VDD virtual output through DXGI Desktop Duplication without falling back to the primary display.
 - [ ] Add GPU-assisted H.264 hardware encoding and bounded frame queues.
-- [ ] Add a dedicated low-latency media transport authenticated to the trusted Bridge device identity.
+- [ ] Validate and evolve the existing authenticated media path into a dedicated low-latency transport, independent of control and file-transfer traffic.
 - [ ] Add adaptive bitrate, frame pacing, timestamps, and packet-loss recovery.
 - [ ] Keep media traffic independent from file transfers and control messages.
 
