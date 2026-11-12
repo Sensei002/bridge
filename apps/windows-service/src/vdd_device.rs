@@ -72,7 +72,9 @@ pub fn ensure_installed() -> io::Result<()> {
 fn wait_for_control_pipe() -> io::Result<()> {
     let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
-        if Path::new(r"\\.\pipe\MTTVirtualDisplayPipe").exists() {
+        if crate::vdd_control::set_display_count(0).is_ok() {
+            // Establish a known disconnected state before CONNECT requests one
+            // display. This also proves that the vendor pipe is actually ready.
             return Ok(());
         }
         thread::sleep(Duration::from_millis(250));
