@@ -52,7 +52,7 @@ jobs:
           try {
             Export-Certificate -Cert $certificate -FilePath $cerPath -Type CERT | Out-Null
             $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
-            $startInfo.FileName = Join-Path $env:WINDIR "System32\\certutil.exe"
+            $startInfo.FileName = Join-Path $env:WINDIR "System32\certutil.exe"
             $startInfo.UseShellExecute = $false
             $startInfo.CreateNoWindow = $true
             $startInfo.RedirectStandardInput = $true
@@ -83,13 +83,13 @@ jobs:
             Write-Host $stdout
             if ($stderr) { Write-Host $stderr }
             if ($process.ExitCode -ne 0) { throw "certutil root-store smoke test failed (exit $($process.ExitCode))." }
-            $stored = Get-Item -LiteralPath "Cert:\CurrentUser\Root\\$thumbprint" -ErrorAction Stop
-            if ($stored.Thumbprint -ne $thumbprint) { throw "The temporary certificate was not found in CurrentUser\\Root." }
+            $stored = Get-Item -LiteralPath "Cert:\CurrentUser\Root\$thumbprint" -ErrorAction Stop
+            if ($stored.Thumbprint -ne $thumbprint) { throw "The temporary certificate was not found in CurrentUser\Root." }
             Write-Host "Verified non-interactive current-user root-store import."
           }
           finally {
-            Remove-Item -LiteralPath "Cert:\CurrentUser\Root\\$thumbprint" -Force -ErrorAction SilentlyContinue
-            Remove-Item -LiteralPath "Cert:\CurrentUser\My\\$thumbprint" -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath "Cert:\CurrentUser\Root\$thumbprint" -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath "Cert:\CurrentUser\My\$thumbprint" -Force -ErrorAction SilentlyContinue
             if (Test-Path $cerPath) { Remove-Item $cerPath -Force }
           }
 
