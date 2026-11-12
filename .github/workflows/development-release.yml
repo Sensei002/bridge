@@ -42,7 +42,7 @@ jobs:
           ./scripts/windows/Sign-BridgeBinaries.ps1 -Files @(
             "target/release/bridge-desktop.exe",
             "target/x86_64-pc-windows-msvc/release/bridge-display-service.exe"
-          ) -PublisherPinOutput "$PWD\\bridge-desktop-publisher.sha256"
+          ) -PublisherPinOutput "$PWD\bridge-desktop-publisher.sha256"
       - name: Create non-publishable placeholder pin for pull-request packaging checks
         if: github.event_name == 'pull_request'
         shell: pwsh
