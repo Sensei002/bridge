@@ -157,12 +157,47 @@ jobs:
             )
 
             $certutilPath = Join-Path $env:WINDIR "System32\\certutil.exe"
-            Write-Host "SIGNING CHECKPOINT: starting certutil for $Operation (30-second limit)"
-            $process = Start-Process -FilePath $certutilPath -ArgumentList $Arguments -NoNewWindow -PassThru
-            if (-not $process.WaitForExit(30000)) {
-              Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-              throw "certutil timed out during $Operation after 30 seconds."
+            Write-Host "SIGNING CHECKPOINT: starting certutil for $Operation (30-second limit; stdin closed; stdout/stderr captured)"
+            $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+            $startInfo.FileName = $certutilPath
+            $startInfo.UseShellExecute = $false
+            $startInfo.CreateNoWindow = $true
+            $startInfo.RedirectStandardInput = $true
+            $startInfo.RedirectStandardOutput = $true
+            $startInfo.RedirectStandardError = $true
+            foreach ($argument in $Arguments) {
+              [void]$startInfo.ArgumentList.Add($argument)
             }
+
+            $process = [System.Diagnostics.Process]::new()
+            $process.StartInfo = $startInfo
+            if (-not $process.Start()) {
+              throw "Could not start certutil during $Operation."
+            }
+            $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+            $stderrTask = $process.StandardError.ReadToEndAsync()
+            # A closed stdin distinguishes a hidden confirmation prompt from a
+            # certificate-store operation that is blocked independently of input.
+            $process.StandardInput.Close()
+
+            if (-not $process.WaitForExit(30000)) {
+              try { $process.Kill() } catch { }
+              $process.WaitForExit()
+              $stdout = $stdoutTask.GetAwaiter().GetResult()
+              $stderr = $stderrTask.GetAwaiter().GetResult()
+              Write-Host "CERTUTIL STDOUT ($Operation):"
+              Write-Host $stdout
+              Write-Host "CERTUTIL STDERR ($Operation):"
+              Write-Host $stderr
+              throw "certutil timed out during $Operation after 30 seconds. Full output was captured above."
+            }
+
+            $stdout = $stdoutTask.GetAwaiter().GetResult()
+            $stderr = $stderrTask.GetAwaiter().GetResult()
+            Write-Host "CERTUTIL STDOUT ($Operation):"
+            Write-Host $stdout
+            Write-Host "CERTUTIL STDERR ($Operation):"
+            Write-Host $stderr
             if ($process.ExitCode -ne 0) {
               throw "certutil failed during $Operation (exit $($process.ExitCode))."
             }
