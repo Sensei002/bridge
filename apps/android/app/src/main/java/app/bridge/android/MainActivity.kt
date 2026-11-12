@@ -626,7 +626,8 @@ private fun SecondScreenView(
         initialValue = null,
         key1 = frame?.sequence,
         key2 = frame?.width,
-        key3 = frame?.height
+        key3 = frame?.height,
+        key4 = encodedFrame == null
     ) {
         value = if (frame == null || encodedFrame != null) {
             null
