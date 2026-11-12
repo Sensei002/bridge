@@ -1,5 +1,6 @@
 name: Windows Indirect Display Driver
 
+# CI queue recovery: harmless comment-only change to request a fresh run.
 on:
   pull_request:
     paths:
