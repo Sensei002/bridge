@@ -42,6 +42,57 @@ jobs:
         run: |
           cargo test -p bridge-display-service
           cargo build --release --manifest-path apps/windows-service/Cargo.toml --features service-bin --target x86_64-pc-windows-msvc
+      - name: Smoke-test non-interactive current-user certificate trust import
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $certificate = New-SelfSignedCertificate -Subject "CN=Bridge CI Root Store Smoke Test" -CertStoreLocation "Cert:\CurrentUser\My" -Type CodeSigningCert -KeyAlgorithm RSA -KeyLength 2048 -HashAlgorithm SHA256 -NotAfter (Get-Date).AddDays(2)
+          $thumbprint = $certificate.Thumbprint
+          $cerPath = Join-Path $env:RUNNER_TEMP "bridge-ci-root-store-smoke.cer"
+          try {
+            Export-Certificate -Cert $certificate -FilePath $cerPath -Type CERT | Out-Null
+            $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+            $startInfo.FileName = Join-Path $env:WINDIR "System32\\certutil.exe"
+            $startInfo.UseShellExecute = $false
+            $startInfo.CreateNoWindow = $true
+            $startInfo.RedirectStandardInput = $true
+            $startInfo.RedirectStandardOutput = $true
+            $startInfo.RedirectStandardError = $true
+            foreach ($argument in @("-f", "-user", "-addstore", "Root", $cerPath)) {
+              [void]$startInfo.ArgumentList.Add($argument)
+            }
+            $process = [System.Diagnostics.Process]::new()
+            $process.StartInfo = $startInfo
+            if (-not $process.Start()) { throw "Could not start certutil for the root-store smoke test." }
+            $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+            $stderrTask = $process.StandardError.ReadToEndAsync()
+            $process.StandardInput.Close()
+            if (-not $process.WaitForExit(30000)) {
+              try { $process.Kill() } catch { }
+              $process.WaitForExit()
+              $stdout = $stdoutTask.GetAwaiter().GetResult()
+              $stderr = $stderrTask.GetAwaiter().GetResult()
+              Write-Host "CERTUTIL STDOUT:"
+              Write-Host $stdout
+              Write-Host "CERTUTIL STDERR:"
+              Write-Host $stderr
+              throw "certutil root-store smoke test timed out after 30 seconds."
+            }
+            $stdout = $stdoutTask.GetAwaiter().GetResult()
+            $stderr = $stderrTask.GetAwaiter().GetResult()
+            Write-Host $stdout
+            if ($stderr) { Write-Host $stderr }
+            if ($process.ExitCode -ne 0) { throw "certutil root-store smoke test failed (exit $($process.ExitCode))." }
+            $stored = Get-Item -LiteralPath "Cert:\CurrentUser\Root\\$thumbprint" -ErrorAction Stop
+            if ($stored.Thumbprint -ne $thumbprint) { throw "The temporary certificate was not found in CurrentUser\\Root." }
+            Write-Host "Verified non-interactive current-user root-store import."
+          }
+          finally {
+            Remove-Item -LiteralPath "Cert:\CurrentUser\Root\\$thumbprint" -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath "Cert:\CurrentUser\My\\$thumbprint" -Force -ErrorAction SilentlyContinue
+            if (Test-Path $cerPath) { Remove-Item $cerPath -Force }
+          }
+
       - name: Stage unsigned binaries
         shell: pwsh
         run: |
