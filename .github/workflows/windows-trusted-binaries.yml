@@ -127,9 +127,16 @@ jobs:
             Write-Host "SIGNING CHECKPOINT: certificate identity and EKU validated"
             Export-Certificate -Cert $certificate -FilePath $cerPath -Type CERT | Out-Null
             Write-Host "SIGNING CHECKPOINT: public certificate exported; importing temporary root trust"
-            Invoke-BoundedCertUtil -Arguments @("-silent", "-user", "-addstore", "-f", "Root", $cerPath) -Operation "temporary root trust import"
-            Write-Host "SIGNING CHECKPOINT: temporary root trust import returned"
-            $rootThumbprint = $certificate.Thumbprint
+            $rootStore = [Security.Cryptography.X509Certificates.X509Store]::new([Security.Cryptography.X509Certificates.StoreName]::Root, [Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser)
+            $publicCertificate = [Security.Cryptography.X509Certificates.X509Certificate2]::new($cerPath)
+            try {
+              $rootStore.Open([Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+              $rootStore.Add($publicCertificate)
+              $rootThumbprint = $publicCertificate.Thumbprint
+              Write-Host "SIGNING CHECKPOINT: temporary root trust added through .NET X509Store"
+            } finally {
+              $rootStore.Close()
+            }
 
             Write-Host "SIGNING CHECKPOINT: locating Windows SDK SignTool"
             $kitRoots = @("${env:ProgramFiles(x86)}\Windows Kits\10\bin", "${env:ProgramFiles}\Windows Kits\10\bin") | Where-Object { $_ -and (Test-Path $_) }
@@ -165,13 +172,18 @@ jobs:
             Write-Host "Verified Bridge publisher SHA-256: $publisherSha256"
           }
           finally {
-            if ($rootThumbprint) {
+            if ($rootThumbprint -and $publicCertificate) {
               try {
-                Invoke-BoundedCertUtil -Arguments @("-user", "-delstore", "Root", $rootThumbprint) -Operation "temporary root trust cleanup"
+                $cleanupStore = [Security.Cryptography.X509Certificates.X509Store]::new([Security.Cryptography.X509Certificates.StoreName]::Root, [Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser)
+                $cleanupStore.Open([Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+                $cleanupStore.Remove($publicCertificate)
+                $cleanupStore.Close()
+                Write-Host "SIGNING CHECKPOINT: temporary root trust removed"
               } catch {
                 Write-Warning "Could not remove temporary root trust: $($_.Exception.Message)"
               }
             }
+            if ($publicCertificate) { $publicCertificate.Dispose() }
             if ($imported) { foreach ($cert in @($imported)) { Remove-Item -Path "Cert:\CurrentUser\My\$($cert.Thumbprint)" -ErrorAction SilentlyContinue } }
             if (Test-Path $pfxPath) { Remove-Item $pfxPath -Force }
             Remove-Variable pfxBytes -ErrorAction SilentlyContinue
