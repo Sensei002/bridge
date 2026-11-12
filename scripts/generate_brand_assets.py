@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate every platform icon from the original Bridge master artwork."""
+"""Generate Windows and Android app icons from the original Bridge master artwork."""
 from pathlib import Path
 from PIL import Image
 
@@ -9,9 +9,6 @@ if not SOURCE.is_file():
     raise SystemExit(f"Missing master Bridge artwork: {SOURCE}")
 
 brand = Image.open(SOURCE).convert("RGBA")
-# Keep the full wordmark/tagline intact for in-app and README branding.
-brand.save(ROOT / "apps/ios/BridgeApp/Assets.xcassets/BridgeBrand.imageset/BridgeBrand.png", "PNG", optimize=True)
-
 # Store/app icons must be square. Fit the complete logo on a dark canvas rather
 # than stretching or cropping the original horizontal artwork.
 def app_icon(size: int) -> Image.Image:
@@ -24,7 +21,6 @@ def app_icon(size: int) -> Image.Image:
     return canvas.convert("RGB")
 
 app_icon(512).save(ROOT / "assets/bridge-app-icon.png", "PNG", optimize=True)
-app_icon(1024).save(ROOT / "apps/ios/BridgeApp/Assets.xcassets/AppIcon.appiconset/AppIcon.png", "PNG", optimize=True)
 
 # Android adaptive-icon foreground and in-app header both reference this drawable.
 android_drawables = ROOT / "apps/android/app/src/main/res/drawable-nodpi"
