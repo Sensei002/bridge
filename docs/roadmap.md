@@ -49,7 +49,7 @@ Architecture and acceptance gates: [docs/second-screen-architecture.md](second-s
 
 ### Windows virtual display foundation
 - [x] Stop developing/signing a Bridge-owned IddCx driver and select upstream VirtualDrivers VDD 25.7.23.
-- [x] Verify `SignedDrivers/x86/VDD/MttVDD.dll` is AMD64 (`0x8664`) despite the folder name.
+- [x] Verify the driver-only archive's `MttVDD.dll` is AMD64 (`0x8664`) despite the archive's `x86` label.
 - [x] Verify the catalog signature is valid and signed by SignPath Foundation; pin the smaller upstream driver-only archive `VirtualDisplayDriver-x86.Driver.Only.zip` at SHA-256 `e24210692b442b39af763536330ce78b423f19342b7a7792c26de3944e418b3a`.
 - [x] Verify the INF and DLL with Windows PnP package-signing policy (`signtool verify /pa`); this is an UMDF user-mode driver, so kernel-mode `/kp` is not applicable.
 - [ ] Confirm redistribution terms for the exact driver-only files before bundling them; do not include the VDD control companion app unless its terms are confirmed.
