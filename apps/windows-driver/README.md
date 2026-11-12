@@ -12,7 +12,7 @@ Bridge will use an existing signed x64 VDD package instead of maintaining a Brid
 - Driver path in the package: `SignedDrivers\\x86\\VDD\\`
 - The DLL at that path is verified as AMD64 (PE machine `0x8664`); the folder name is misleading.
 - Catalog signer: SignPath Foundation; thumbprint `3CF8CF26D8BA266C3A483AB7D26D4A818E317D76`.
-- CI verifies the archive hash, AMD64 PE architecture, and catalog signature. CI verifies the INF and DLL using Windows PnP package policy (`signtool verify /pa`) and stages the package using `pnputil /add-driver`. This is a UMDF user-mode driver; kernel-mode `/kp` is not applicable.
+- CI verifies the archive hash, AMD64 PE architecture, and catalog signature. CI verifies the INF and DLL using Windows PnP package policy (`signtool verify /pa`). This is a UMDF user-mode driver; kernel-mode `/kp` is not applicable. Physical installation and driver loading still need hardware validation.
 
 Bridge must use the selected vendor-supplied driver package unchanged. Do not build, modify, catalog-sign, or certificate-sign a Bridge-owned display driver. Do not install a Bridge-owned root certificate or ask users to enable test signing / disable Secure Boot. Do not build, modify, catalog-sign, or certificate-sign a Bridge-owned display driver. Do not install a Bridge-owned root certificate or ask users to enable test signing / disable Secure Boot. Do not build, modify, catalog-sign, or certificate-sign a Bridge-owned display driver. Do not install a Bridge-owned root certificate or ask users to enable test signing / disable Secure Boot. Do not build, modify, catalog-sign, or certificate-sign a Bridge-owned display driver. Do not install a Bridge-owned root certificate or ask users to enable test signing / disable Secure Boot.
 
