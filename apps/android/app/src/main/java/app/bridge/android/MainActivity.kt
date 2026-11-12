@@ -587,11 +587,15 @@ private fun SecondScreenView(
     var frameRate by remember { mutableStateOf(0f) }
     var previousFrameAtNs by remember { mutableStateOf(0L) }
     var frameAgeMs by remember { mutableStateOf<Long?>(null) }
+    val activeFrameSequence = encodedFrame?.sequence ?: frame?.sequence
+    val activeFrameReceivedAtNs = encodedFrame?.receivedAtElapsedRealtimeNs ?: frame?.receivedAtElapsedRealtimeNs ?: 0L
+    val activeFrameWidth = encodedFrame?.width ?: frame?.width
+    val activeFrameHeight = encodedFrame?.height ?: frame?.height
     val avcDecoders by produceState(initialValue = emptyList<AvcDecoderCapability>()) {
         value = withContext(Dispatchers.Default) { inspectAvcDecoders() }
     }
-    LaunchedEffect(frame?.sequence) {
-        val receivedAt = frame?.receivedAtElapsedRealtimeNs ?: 0L
+    LaunchedEffect(activeFrameSequence, activeFrameReceivedAtNs) {
+        val receivedAt = activeFrameReceivedAtNs
         if (receivedAt > 0L) {
             if (previousFrameAtNs > 0L) {
                 val intervalNs = receivedAt - previousFrameAtNs
@@ -607,8 +611,8 @@ private fun SecondScreenView(
             frameRate = 0f
         }
     }
-    LaunchedEffect(frame?.sequence, frame?.receivedAtElapsedRealtimeNs) {
-        val receivedAt = frame?.receivedAtElapsedRealtimeNs ?: 0L
+    LaunchedEffect(activeFrameSequence, activeFrameReceivedAtNs) {
+        val receivedAt = activeFrameReceivedAtNs
         if (receivedAt <= 0L) {
             frameAgeMs = null
         } else {
@@ -619,7 +623,7 @@ private fun SecondScreenView(
             }
         }
     }
-    val streamStale = frame != null && (frameAgeMs ?: 0L) > DISPLAY_FRAME_STALE_AFTER_MS
+    val streamStale = (frame != null || encodedFrame != null) && (frameAgeMs ?: 0L) > DISPLAY_FRAME_STALE_AFTER_MS
     val staleDurationSeconds = ((frameAgeMs ?: 0L) / 1_000L)
     val activePointers = remember { mutableSetOf<Int>() }
     val bitmap by produceState<androidx.compose.ui.graphics.ImageBitmap?>(
@@ -657,12 +661,12 @@ private fun SecondScreenView(
                 Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     Text(
                         when {
-                            frame == null -> "WAITING FOR WINDOWS"
+                            frame == null && encodedFrame == null -> "WAITING FOR WINDOWS"
                             streamStale -> "STREAM STALLED"
                             else -> "BRIDGE SECOND SCREEN"
                         },
                         color = when {
-                            frame == null -> Muted
+                            frame == null && encodedFrame == null -> Muted
                             streamStale -> Amber
                             else -> Accent
                         },
@@ -671,13 +675,13 @@ private fun SecondScreenView(
                         letterSpacing = 1.sp
                     )
                     Text(
-                        if (frame == null) "No display frame yet" else "${frame.width} × ${frame.height} · Frame ${frame.sequence}",
+                        if (activeFrameWidth == null || activeFrameHeight == null) "No display frame yet" else "$activeFrameWidth × $activeFrameHeight · Frame ${activeFrameSequence ?: 0L}",
                         color = Color.White,
                         fontSize = 11.sp
                     )
                     Text(
                         when {
-                            frame == null -> "— FPS"
+                            frame == null && encodedFrame == null -> "— FPS"
                             streamStale -> "No new frame for ${staleDurationSeconds}s"
                             frameRate <= 0f -> "Measuring incoming FPS…"
                             else -> "${frameRate.toInt()} FPS · incoming"
@@ -852,12 +856,12 @@ private fun SecondScreenView(
                         )
                         Text(
                             when {
-                                frame == null -> "IDLE"
+                                frame == null && encodedFrame == null -> "IDLE"
                                 streamStale -> "STALE"
                                 else -> "RECEIVING"
                             },
                             color = when {
-                                frame == null -> Muted
+                                frame == null && encodedFrame == null -> Muted
                                 streamStale -> Amber
                                 else -> Good
                             },
