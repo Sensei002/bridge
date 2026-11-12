@@ -67,6 +67,10 @@ Push a version tag such as `v0.2.0` to build release assets and publish a GitHub
 
 **Windows driver note:** Bridge uses the signed upstream VirtualDrivers VDD 25.7.23 package (AMD64 driver binary verified by CI, despite its `x86` folder name). CI verifies the SignPath catalog and checks Windows PnP package-signing policy. The UMDF DLL is user-mode, so kernel-mode `/kp` is not applicable. Bridge will not build or sign its own IddCx driver. Driver bundling remains gated on confirming redistribution permissions. Bridge's Windows desktop/MSI/service binaries may still need their own application code-signing strategy, which is separate from display-driver signing. See [Second Screen architecture](docs/second-screen-architecture.md).
 
+## Windows system platform
+
+Bridge for Windows is planned as a system-integrated platform: a background Windows service will own trusted sessions and capability permissions, while the existing egui app remains the management UI. Optional, separately packaged Windows drivers will expose capabilities such as a virtual monitor and virtual audio endpoints. The architecture and phased implementation plan are documented in [docs/windows-system-platform.md](docs/windows-system-platform.md). The service and device drivers are not implemented yet.
+
 ## Windows desktop technology
 
 The Windows client is a native Rust desktop application rendered by egui. It does not embed a browser engine and does not depend on Microsoft Edge WebView2 Runtime. The desktop build compiles directly from the Rust crate in `apps/desktop`.
