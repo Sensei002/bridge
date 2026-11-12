@@ -24,54 +24,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  verify-parsec-vdd:
-    name: Verify Parsec signed x64 VDD fallback
+  verify-upstream-vdd:
+    name: Verify signed VirtualDrivers AMD64 VDD package
     runs-on: windows-latest
     steps:
-      - name: Download and pin Parsec VDD 0.45.1 package
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $url = "https://github.com/nomi-san/parsec-vdd/releases/download/v0.45.1/ParsecVDisplay-v0.45-portable.zip"
-          $expected = "9792e4121d85ed3e4c40c2d8ba36ec8657e13227a8357d719d923e801238ccdd"
-          $archive = Join-Path $env:RUNNER_TEMP "ParsecVDisplay-v0.45-portable.zip"
-          Invoke-WebRequest -Uri $url -OutFile $archive
-          $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($actual -ne $expected) { throw "Parsec VDD archive SHA-256 mismatch. Expected $expected, received $actual." }
-          $root = Join-Path $env:RUNNER_TEMP "parsec-vdd"
-          Expand-Archive -LiteralPath $archive -DestinationPath $root -Force
-          $installer = Join-Path $root "parsec-vdd-0.45.0.0.exe"
-          if (-not (Test-Path -LiteralPath $installer)) { throw "The Parsec VDD driver installer was not found in the pinned archive." }
-          $sevenZip = Get-Command "7z.exe" -ErrorAction Stop
-          $driverRoot = Join-Path $env:RUNNER_TEMP "parsec-vdd-extracted"
-          New-Item -ItemType Directory -Force -Path $driverRoot | Out-Null
-          & $sevenZip.Source x -y "-o$driverRoot" $installer | Out-Host
-          if ($LASTEXITCODE -ne 0) { throw "Could not extract the Parsec VDD setup package with 7-Zip (exit $LASTEXITCODE)." }
-          "VDD_ARCHIVE=$archive" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "VDD_ROOT=$driverRoot" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-
-      - name: Verify x64 driver package and Microsoft catalog signature
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $driver = Join-Path $env:VDD_ROOT "driver"
-          $inf = Join-Path $driver "mm.inf"
-          $cat = Join-Path $driver "mm.cat"
-          $dll = Join-Path $driver "mm.dll"
-          foreach ($path in @($inf, $cat, $dll)) { if (-not (Test-Path -LiteralPath $path)) { throw "Missing Parsec driver file: $path" } }
-          $signature = Get-AuthenticodeSignature -LiteralPath $cat
-          Write-Host "Parsec catalog signature: $($signature.Status)"
-          if ($signature.SignerCertificate) { Write-Host "Signer: $($signature.SignerCertificate.Subject)"; Write-Host "Thumbprint: $($signature.SignerCertificate.Thumbprint)" }
-          if ($signature.Status -ne "Valid" -or $signature.SignerCertificate.Subject -notmatch "Microsoft Windows Hardware Compatibility Publisher") { throw "Parsec driver catalog is not validly signed by Microsoft Windows Hardware Compatibility Publisher." }
-          $infText = Get-Content -LiteralPath $inf -Raw
-          if ($infText -notmatch "NTamd64|NTx64|NT\s*\=\s*amd64") { throw "Parsec driver INF does not declare a recognizable x64/AMD64 install section." }
-          Write-Host "Parsec VDD x64 package and Microsoft catalog signature verified."
-
-  inspect-virtualdrivers-vdd:
-    name: Inspect VirtualDrivers VDD x64 architecture
-    runs-on: windows-latest
-    steps:
-      - name: Download pinned VirtualDrivers 25.7.23 bundle
+      - name: Download and pin VirtualDrivers 25.7.23 bundle
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -80,12 +37,13 @@ jobs:
           $archive = Join-Path $env:RUNNER_TEMP "VDD.Control.25.7.23.zip"
           Invoke-WebRequest -Uri $url -OutFile $archive
           $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($actual -ne $expected) { throw "VirtualDrivers VDD archive SHA-256 mismatch." }
+          if ($actual -ne $expected) { throw "VirtualDrivers VDD archive SHA-256 mismatch. Expected $expected, received $actual." }
           $root = Join-Path $env:RUNNER_TEMP "virtualdrivers-vdd"
           Expand-Archive -LiteralPath $archive -DestinationPath $root -Force
+          "VDD_ARCHIVE=$archive" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "VDD_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      - name: Inspect actual PE architecture and signed catalog
+      - name: Verify AMD64 binary and SignPath catalog
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -99,12 +57,37 @@ jobs:
           $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
           if ($peOffset -lt 0 -or ($peOffset + 6) -gt $bytes.Length) { throw "Invalid PE header offset." }
           $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
-          $machineName = switch ($machine) { 0x8664 { "AMD64" } 0x014c { "x86" } 0xAA64 { "ARM64" } default { "Unknown ($machine)" } }
-          Write-Host "VirtualDrivers MttVDD.dll PE machine: $machineName (0x$('{0:X4}' -f $machine))"
+          if ($machine -ne 0x8664) { throw "Expected AMD64 driver (0x8664), found PE machine 0x$('{0:X4}' -f $machine)." }
+          Write-Host "Verified MttVDD.dll is AMD64 (PE machine 0x8664)."
           $signature = Get-AuthenticodeSignature -LiteralPath $cat
-          Write-Host "VirtualDrivers catalog signature: $($signature.Status)"
+          Write-Host "Catalog signature: $($signature.Status)"
           if ($signature.SignerCertificate) { Write-Host "Signer: $($signature.SignerCertificate.Subject)"; Write-Host "Thumbprint: $($signature.SignerCertificate.Thumbprint)" }
-          Write-Host "INF architecture declarations:"
-          Select-String -LiteralPath $inf -Pattern "NTamd64|NTx64|NTarm64|NTx86|CatalogFile|Manufacturer" | ForEach-Object { Write-Host $_.Line }
-          if ($signature.Status -ne "Valid" -or $signature.SignerCertificate.Subject -notmatch "SignPath Foundation") { throw "VirtualDrivers catalog signature validation failed." }
-          if ($machine -eq 0x8664) { Write-Host "RESULT: VirtualDrivers package contains an AMD64 driver and is eligible for Bridge x64." } else { Write-Host "RESULT: VirtualDrivers package does not contain an AMD64 driver; retain Parsec VDD fallback candidate." }
+          if ($signature.Status -ne "Valid" -or $signature.SignerCertificate.Subject -notmatch "SignPath Foundation" -or $signature.SignerCertificate.Thumbprint -ne "3CF8CF26D8BA266C3A483AB7D26D4A818E317D76") { throw "VirtualDrivers catalog signature is not the expected valid SignPath Foundation signature." }
+          Write-Host "Driver INF declarations:"
+          Select-String -LiteralPath $inf -Pattern "NTamd64|NTx64|NTarm64|NTx86|CatalogFile|Manufacturer|HardwareID" | ForEach-Object { Write-Host $_.Line }
+
+      - name: Verify Windows kernel-mode catalog policy
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $driver = Join-Path $env:VDD_ROOT "SignedDrivers\x86\VDD"
+          $cat = Join-Path $driver "mttvdd.cat"
+          $inf = Join-Path $driver "MttVDD.inf"
+          $dll = Join-Path $driver "MttVDD.dll"
+          $kits = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\bin"
+          $signtool = Get-ChildItem -LiteralPath $kits -Recurse -File -Filter "signtool.exe" | Where-Object { $_.FullName -match "\\x64\\signtool\.exe$" } | Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $signtool) { throw "Windows SDK x64 SignTool was not found." }
+          Write-Host "Using SignTool: $($signtool.FullName)"
+          & $signtool.FullName verify /kp /v /c $cat $inf
+          if ($LASTEXITCODE -ne 0) { throw "Driver INF failed Windows kernel-mode catalog verification (exit $LASTEXITCODE)." }
+          & $signtool.FullName verify /kp /v /c $cat $dll
+          if ($LASTEXITCODE -ne 0) { throw "Driver DLL failed Windows kernel-mode catalog verification (exit $LASTEXITCODE)." }
+          Write-Host "INF and AMD64 driver DLL pass Windows kernel-mode catalog policy."
+
+      - name: Upload pinned upstream archive for inspection
+        uses: actions/upload-artifact@v4
+        with:
+          name: virtualdrivers-vdd-amd64-25.7.23
+          path: ${{ env.VDD_ARCHIVE }}
+          if-no-files-found: error
+          retention-days: 7
