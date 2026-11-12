@@ -742,6 +742,7 @@ fn start_display_frame_stream(
                 match capture.next_frame() {
                     Ok(Some(display_frame)) if display_frame.sequence > last_sequence => {
                         let superseded_frames = display_frame.sequence.saturating_sub(last_sequence).saturating_sub(1);
+                        superseded_frames_window = superseded_frames_window.saturating_add(superseded_frames);
                         let keyframe_requested = session.take_video_keyframe_request();
                         let dimensions_changed = encoder_dimensions
                             .is_some_and(|dimensions| dimensions != (display_frame.width, display_frame.height));
@@ -864,6 +865,7 @@ fn start_display_frame_stream(
                                         h264_samples_sent = h264_samples_sent.saturating_add(1);
                                         frames_sent_window = frames_sent_window.saturating_add(1);
                                         bytes_sent_window = bytes_sent_window.saturating_add(encoded_bytes);
+                                        send_duration_window += started.elapsed();
                                         if h264_samples_sent == 1 || h264_samples_sent % 120 == 0 {
                                             let _ = events.send(DisplayLeaseEvent::Status {
                                                 session_key: session_key.clone(),
@@ -906,7 +908,6 @@ fn start_display_frame_stream(
                                     last_sequence = display_frame.sequence;
                                     frames_sent_window += 1;
                                     bytes_sent_window = bytes_sent_window.saturating_add(frame_bytes);
-                                    superseded_frames_window = superseded_frames_window.saturating_add(superseded_frames);
                                     send_duration_window += send_started.elapsed();
                                     if !announced {
                                         announced = true;
@@ -937,6 +938,7 @@ fn start_display_frame_stream(
                             session_key: session_key.clone(),
                             message: format!("DXGI capture needs to be reopened: {error}"),
                         });
+                        h264_stream_active = false;
                         persistent_encoder = None;
                         encoder_dimensions = None;
                         encoder_unavailable = false;
@@ -990,7 +992,7 @@ fn start_display_frame_stream(
                         let _ = events.send(DisplayLeaseEvent::Status {
                             session_key: session_key.clone(),
                             message: format!(
-                                "Windows sender: {fps:.1} FPS · {mbps:.1} Mbps raw · {superseded_frames_window} capture frames superseded · {average_send_ms:.1} ms/frame send time."
+                                "Windows sender: {fps:.1} FPS · {mbps:.1} Mbps transport · {superseded_frames_window} capture frames superseded · {average_send_ms:.1} ms/frame send time."
                             ),
                         });
                     }
