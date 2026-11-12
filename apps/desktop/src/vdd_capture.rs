@@ -159,6 +159,19 @@ impl VddCapture {
         let texture: ID3D11Texture2D = resource.cast()
             .map_err(|error| format!("DXGI desktop resource is not an ID3D11Texture2D: {error}"))?;
 
+        // Desktop Duplication can hand us a resource whose mode no longer matches
+        // the staging texture after rotation, resolution changes, or topology
+        // transitions. CopyResource requires compatible resources; detect this
+        // before copying and let the caller reopen the duplication session.
+        let source_desc = unsafe { texture.GetDesc() };
+        validate_frame_texture(
+            source_desc.Width,
+            source_desc.Height,
+            source_desc.Format,
+            self.width,
+            self.height,
+        )?;
+
         unsafe { self.context.CopyResource(&self.staging, &texture) };
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
         unsafe { self.context.Map(&self.staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped)) }
@@ -201,6 +214,28 @@ impl VddCapture {
     }
 }
 
+fn validate_frame_texture(
+    width: u32,
+    height: u32,
+    format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT,
+    expected_width: u32,
+    expected_height: u32,
+) -> Result<(), String> {
+    if width != expected_width || height != expected_height {
+        return Err(format!(
+            "upstream VDD mode changed from {}x{} to {}x{}; reopen DXGI capture and recreate its staging texture",
+            expected_width, expected_height, width, height
+        ));
+    }
+    if format != DXGI_FORMAT_B8G8R8A8_UNORM {
+        return Err(format!(
+            "upstream VDD frame format changed to {:?}; reopen capture and negotiate a supported format",
+            format
+        ));
+    }
+    Ok(())
+}
+
 fn wide_field(value: &[u16]) -> String {
     let end = value.iter().position(|unit| *unit == 0).unwrap_or(value.len());
     String::from_utf16_lossy(&value[..end])
@@ -231,6 +266,15 @@ fn is_vdd_hardware_id(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accepts_only_the_opened_bgra8_mode() {
+        assert!(validate_frame_texture(1920, 1080, DXGI_FORMAT_B8G8R8A8_UNORM, 1920, 1080).is_ok());
+        assert!(validate_frame_texture(1080, 1920, DXGI_FORMAT_B8G8R8A8_UNORM, 1920, 1080)
+            .unwrap_err().contains("mode changed"));
+        assert!(validate_frame_texture(1920, 1080, windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R8G8B8A8_UNORM, 1920, 1080)
+            .unwrap_err().contains("format changed"));
+    }
 
     #[test]
     fn vdd_hardware_id_match_is_exact_to_upstream_root_device() {
