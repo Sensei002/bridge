@@ -51,11 +51,7 @@ try {
     }
 
     $sha256 = [Security.Cryptography.SHA256]::Create()
-    try {
-        $publisherPin = ([Convert]::ToHexString($sha256.ComputeHash($certificate.RawData))).ToUpperInvariant()
-    } finally {
-        $sha256.Dispose()
-    }
+    $publisherPin = ([Convert]::ToHexString($sha256.ComputeHash($certificate.RawData))).ToUpperInvariant()
 
     $sdkRoot = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\bin"
     $signTool = Get-ChildItem -Path $sdkRoot -Filter signtool.exe -Recurse -ErrorAction Stop |
@@ -100,6 +96,7 @@ try {
     }
     Write-Host "All requested Bridge binaries passed Authenticode verification."
 } finally {
+    if ($null -ne $sha256) { $sha256.Dispose() }
     $certificates | ForEach-Object { $_.Dispose() }
     if (Test-Path -LiteralPath $pfxPath) {
         Remove-Item -LiteralPath $pfxPath -Force
