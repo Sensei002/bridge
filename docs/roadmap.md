@@ -48,18 +48,16 @@
 Architecture and acceptance gates: [docs/second-screen-architecture.md](second-screen-architecture.md).
 
 ### Windows virtual display foundation
-- [x] Select Microsoft IddCx / Indirect Display Driver (UMDF) as the Windows virtual-monitor architecture.
-- [x] Define separation between the existing Rust/egui UI, a Bridge Display Windows service, and the C++ UMDF display driver.
-- [x] Add a WDK/Visual Studio C++ IddCx driver project based on Microsoft's pinned official sample (build-only foundation; not installable as a Bridge feature yet).
-- [x] Build and validate the unsigned x64 driver package in GitHub Actions (CI artifact only; not yet installable for normal use).
-- [x] Replace the sample demonstration monitors with one Bridge-branded virtual monitor and conservative portrait mode list.
-- [x] Add restricted driver-side connect/disconnect/status control IOCTLs; monitor arrival is no longer automatic at adapter startup.
-- [x] Add a separate Rust Windows service executable, bounded versioned named-pipe protocol, and driver QUERY/CONNECT/DISCONNECT client (development scaffold; not yet production-secure or installable).
-- [ ] Validate named-pipe caller identity and bind lifecycle commands to an authenticated trusted Android Second Screen session (CONNECT/DISCONNECT currently fail closed).
-- [ ] Add service account configuration, recovery policy, and elevated installer lifecycle.
-- [ ] Validate virtual monitor arrival/removal and safe display-mode negotiation on a disposable Windows test machine.
-- [ ] Package driver + service installation, upgrade, rollback, and removal with explicit elevation.
-- [ ] Establish a supported driver signing/distribution process.
+- [x] Select upstream VirtualDrivers Virtual Display Driver (VDD) as Bridge's Windows virtual-monitor dependency; stop developing/signing a Bridge-owned IddCx driver.
+- [x] Pin upstream release 25.7.23 and its published SHA-256 archive digest for CI validation.
+- [x] Add CI validation for the upstream archive, driver INF/catalog presence, and Windows catalog signature.
+- [ ] Confirm exact x64 driver package contents, signer identity, and binary redistribution permissions before bundling.
+- [ ] Replace Bridge-specific driver IOCTL control with a supported VDD lifecycle/control integration.
+- [ ] Identify the VDD virtual output reliably through Windows display topology APIs.
+- [ ] Prototype DXGI Desktop Duplication capture of the VDD virtual output; evaluate Windows Graphics Capture if needed.
+- [ ] Route captured frames into the existing Bridge Media Foundation H.264 and authenticated Android pipeline.
+- [ ] Implement elevated, rollback-capable installation/uninstallation of the vendor-signed VDD package; no Bridge driver signing or test-signing.
+- [ ] Validate Windows Extend mode on a physical Windows machine: move ordinary application windows onto the Android display.
 
 ### Real-time desktop media pipeline
 - [ ] Receive IddCx Direct3D swap-chain frames without blocking display composition.
