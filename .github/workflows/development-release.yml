@@ -31,22 +31,15 @@ jobs:
         run: |
           cargo test -p bridge-display-service
           cargo build --release --manifest-path apps/windows-service/Cargo.toml --features service-bin --target x86_64-pc-windows-msvc
-      - name: Sign desktop and service binaries and generate publisher pin
-        if: github.event_name != 'pull_request'
+      - name: Generate exact desktop executable SHA-256 pin
         shell: pwsh
-        env:
-          BRIDGE_DRIVER_SIGNING_PFX_BASE64: ${{ secrets.BRIDGE_DRIVER_SIGNING_PFX_BASE64 }}
-          BRIDGE_DRIVER_SIGNING_PFX_PASSWORD: ${{ secrets.BRIDGE_DRIVER_SIGNING_PFX_PASSWORD }}
-          BRIDGE_DRIVER_CERT_THUMBPRINT: ${{ secrets.BRIDGE_DRIVER_CERT_THUMBPRINT }}
         run: |
-          ./scripts/windows/Sign-BridgeBinaries.ps1 -Files @(
-            "target/release/bridge-desktop.exe",
-            "target/x86_64-pc-windows-msvc/release/bridge-display-service.exe"
-          ) -PublisherPinOutput "$PWD\bridge-desktop-publisher.sha256"
-      - name: Create non-publishable placeholder pin for pull-request packaging checks
-        if: github.event_name == 'pull_request'
-        shell: pwsh
-        run: Set-Content -LiteralPath "bridge-desktop-publisher.sha256" -Value ("0" * 64) -NoNewline
+          $desktop = "target/release/bridge-desktop.exe"
+          if (-not (Test-Path -LiteralPath $desktop -PathType Leaf)) { throw "Bridge desktop executable was not built." }
+          $hash = (Get-FileHash -LiteralPath $desktop -Algorithm SHA256).Hash.ToUpperInvariant()
+          if ($hash -notmatch '^[0-9A-F]{64}$') { throw "Could not calculate the desktop executable SHA-256 pin." }
+          [IO.File]::WriteAllText("$PWD\bridge-desktop-publisher.sha256", $hash + [Environment]::NewLine, [Text.Encoding]::ASCII)
+          Write-Host "Generated exact desktop executable SHA-256 pin."
       - name: Install NSIS
         shell: pwsh
         run: choco install nsis --yes --no-progress
@@ -62,17 +55,6 @@ jobs:
           if ($null -eq $makensis) { throw "NSIS makensis.exe was not found after installation." }
           & $makensis.FullName "/DPRODUCT_VERSION=$version" "/DPUBLISH_DIR=$PWD\target\release" "/DSERVICE_DIR=$PWD\target\x86_64-pc-windows-msvc\release" "/DSCRIPTS_DIR=$PWD\scripts\windows" "/DPUBLISHER_PIN=$PWD\bridge-desktop-publisher.sha256" installer/windows/Bridge.nsi
           if ($LASTEXITCODE -ne 0) { throw "NSIS packaging failed with exit code $LASTEXITCODE." }
-      - name: Sign and verify Windows NSIS installer
-        if: github.event_name != 'pull_request'
-        shell: pwsh
-        env:
-          BRIDGE_DRIVER_SIGNING_PFX_BASE64: ${{ secrets.BRIDGE_DRIVER_SIGNING_PFX_BASE64 }}
-          BRIDGE_DRIVER_SIGNING_PFX_PASSWORD: ${{ secrets.BRIDGE_DRIVER_SIGNING_PFX_PASSWORD }}
-          BRIDGE_DRIVER_CERT_THUMBPRINT: ${{ secrets.BRIDGE_DRIVER_CERT_THUMBPRINT }}
-        run: |
-          $installer = Get-ChildItem -LiteralPath "$PWD\installer\windows" -Filter "Bridge-*-Setup-x64.exe" | Select-Object -First 1
-          if ($null -eq $installer) { throw "Packaged Bridge NSIS installer was not found." }
-          ./scripts/windows/Sign-BridgeBinaries.ps1 -Files @($installer.FullName)
       - uses: actions/upload-artifact@v4
         with:
           name: bridge-windows-installer
