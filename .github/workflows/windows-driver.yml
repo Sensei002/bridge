@@ -35,8 +35,10 @@ jobs:
           $url = "https://github.com/VirtualDrivers/Virtual-Display-Driver/releases/download/25.7.23/VirtualDisplayDriver-x86.Driver.Only.zip"
           $archive = Join-Path $env:RUNNER_TEMP "VirtualDisplayDriver-x86.Driver.Only.zip"
           Invoke-WebRequest -Uri $url -OutFile $archive
+          $expected = "e24210692b442b39af763536330ce78b423f19342b7a7792c26de3944e418b3a"
           $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-          Write-Host "VIRTUALDRIVERS DRIVER-ONLY ARCHIVE SHA256: $actual"
+          if ($actual -ne $expected) { throw "VirtualDrivers driver-only archive SHA-256 mismatch. Expected $expected, received $actual." }
+          Write-Host "Verified pinned VirtualDrivers driver-only archive SHA256: $actual"
           $root = Join-Path $env:RUNNER_TEMP "virtualdrivers-vdd-driver-only"
           Expand-Archive -LiteralPath $archive -DestinationPath $root -Force
           "VDD_ARCHIVE=$archive" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
