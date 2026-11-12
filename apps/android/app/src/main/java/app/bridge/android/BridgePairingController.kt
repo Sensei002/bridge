@@ -73,6 +73,9 @@ internal class BridgePairingController(
         .put("attestation_public_key", attestationPublicKey)
     private val activeSessions = ConcurrentHashMap<String, Long>()
     private val pendingSessions = ConcurrentHashMap<Long, Boolean>()
+    // Prevent discovery/reconnect from opening a second transport while a first
+    // session for the same peer is awaiting approval or being established.
+    private val pendingApprovalDevices = ConcurrentHashMap.newKeySet<String>()
     @Volatile private var stopped = false
 
     fun start() {
@@ -93,7 +96,9 @@ internal class BridgePairingController(
     private val connectingDevices = ConcurrentHashMap.newKeySet<String>()
 
     fun pair(peer: BridgePeer, expectedFingerprint: String? = null) {
-        if (!connectingDevices.add(peer.deviceId)) return
+        if (activeSessions.containsKey(peer.deviceId) ||
+            pendingApprovalDevices.contains(peer.deviceId) ||
+            !connectingDevices.add(peer.deviceId)) return
         Thread({
             try {
                 val trusted = trustedDevices().firstOrNull { it.deviceId == peer.deviceId }
@@ -130,6 +135,7 @@ internal class BridgePairingController(
         activeSessions.clear()
         pendingSessions.keys.toList().forEach(BridgeNative::sessionClose)
         pendingSessions.clear()
+        pendingApprovalDevices.clear()
         postStatus("Wi-Fi disconnected. Trusted devices will reconnect automatically when the network returns.")
     }
 
@@ -164,6 +170,7 @@ internal class BridgePairingController(
             return false
         }
         pendingSessions.remove(pending.handle)
+        pendingApprovalDevices.remove(pending.deviceId)
         activeSessions.put(pending.deviceId, pending.handle)?.let(BridgeNative::sessionClose)
         onSessionReady?.invoke(pending.deviceId, pending.handle)
         postStatus("${pending.name} is now connected and trusted.")
@@ -172,12 +179,14 @@ internal class BridgePairingController(
 
     fun reject(pending: BridgePendingPairing) {
         pendingSessions.remove(pending.handle)
+        pendingApprovalDevices.remove(pending.deviceId)
         BridgeNative.sessionSend(pending.handle, """{"type":"pairing_decision","decision":"rejected"}""")
         BridgeNative.sessionClose(pending.handle)
         postStatus("Pairing request rejected.")
     }
 
     private fun awaitRemoteApproval(handle: Long, remote: JSONObject, fingerprint: String) {
+        val peerId = remote.getString("id")
         try {
             val response = JSONObject(BridgeNative.sessionReceive(handle))
             if (!response.optBoolean("ok")) error(response.optString("error", "The other device did not respond."))
@@ -198,6 +207,8 @@ internal class BridgePairingController(
         } catch (error: Exception) {
             BridgeNative.sessionClose(handle)
             postStatus("Pairing was not approved: ${error.message}")
+        } finally {
+            pendingApprovalDevices.remove(peerId)
         }
     }
 
@@ -261,6 +272,7 @@ internal class BridgePairingController(
         activeSessions.clear()
         pendingSessions.keys.toList().forEach(BridgeNative::sessionClose)
         pendingSessions.clear()
+        pendingApprovalDevices.clear()
     }
 
     private fun handleResult(response: JSONObject) {
@@ -326,9 +338,17 @@ internal class BridgePairingController(
             return
         }
         if (response.optString("role") == "initiator") {
+            if (!pendingApprovalDevices.add(peerId)) {
+                BridgeNative.sessionClose(handle)
+                return
+            }
             postStatus("Request sent to ${remote.getString("display_name")}. Waiting for approval on that device…")
             Thread({ awaitRemoteApproval(handle, remote, remoteFingerprint) }, "BridgePairApproval")
                 .apply { isDaemon = true; start() }
+            return
+        }
+        if (!pendingApprovalDevices.add(peerId)) {
+            BridgeNative.sessionClose(handle)
             return
         }
         pendingSessions[handle] = true
@@ -343,6 +363,7 @@ internal class BridgePairingController(
         mainHandler.post {
             if (!stopped) onPending(pending) else {
                 pendingSessions.remove(handle)
+                pendingApprovalDevices.remove(peerId)
                 BridgeNative.sessionClose(handle)
             }
         }
