@@ -9,7 +9,7 @@ Keep changes focused, documented, and testable.
 - Platform features must respect operating-system permission models.
 
 ## CI checks
-The GitHub Actions pipeline builds the Rust core, Windows desktop client, Android API 37 APK, and iOS Simulator app on pushes and pull requests.
+The GitHub Actions pipeline builds and tests the Rust workspace, native Windows desktop client, and Android APK on pushes and pull requests. Linux support is planned; iOS is not a supported target.
 
 ## Pull requests
 Describe the user-visible change, affected platforms, test commands/results, and protocol or security implications.
