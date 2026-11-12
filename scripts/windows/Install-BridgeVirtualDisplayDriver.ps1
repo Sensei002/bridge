@@ -65,7 +65,7 @@ if ($existingPackages.Count -gt 0) {
     Write-Host "Verified upstream VDD package is already in the Windows Driver Store."
     Write-Host "Published package(s): $($existingPackages.Driver -join ', ')"
 } else {
-    $pnputil = Join-Path $env:SystemRoot "System32\\pnputil.exe"
+    $pnputil = Join-Path (Join-Path $env:SystemRoot "System32") "pnputil.exe"
     & $pnputil /add-driver $infs[0].FullName
     $exitCode = $LASTEXITCODE
     if ($exitCode -notin @(0, 3010)) { throw "Windows rejected the signed VDD package (pnputil exit code $exitCode)." }
