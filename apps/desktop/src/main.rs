@@ -666,21 +666,33 @@ fn start_display_frame_stream(
                 });
             }
             let _com_apartment = com_apartment;
-            let mut capture = match vdd_capture::VddCapture::open() {
-                Ok(capture) => {
-                    let (width, height) = capture.dimensions();
-                    let _ = events.send(DisplayLeaseEvent::Status {
-                        session_key: session_key.clone(),
-                        message: format!("DXGI is capturing the upstream VDD output at {width}×{height}."),
-                    });
-                    capture
-                }
-                Err(error) => {
-                    let _ = events.send(DisplayLeaseEvent::Status {
-                        session_key: session_key.clone(),
-                        message: format!("Could not start DXGI capture for the upstream VDD output: {error}"),
-                    });
-                    return;
+            let capture_deadline = Instant::now() + Duration::from_secs(15);
+            let mut capture = loop {
+                match vdd_capture::VddCapture::open() {
+                    Ok(capture) => {
+                        let (width, height) = capture.dimensions();
+                        let _ = events.send(DisplayLeaseEvent::Status {
+                            session_key: session_key.clone(),
+                            message: format!("DXGI is capturing the upstream VDD output at {width}×{height}."),
+                        });
+                        break capture;
+                    }
+                    Err(error) if Instant::now() < capture_deadline
+                        && !stop.load(Ordering::Acquire) && session.is_alive() =>
+                    {
+                        let _ = events.send(DisplayLeaseEvent::Status {
+                            session_key: session_key.clone(),
+                            message: format!("Waiting for Windows to enumerate the upstream VDD monitor: {error}"),
+                        });
+                        thread::sleep(Duration::from_millis(250));
+                    }
+                    Err(error) => {
+                        let _ = events.send(DisplayLeaseEvent::Status {
+                            session_key: session_key.clone(),
+                            message: format!("Could not start DXGI capture for the upstream VDD output: {error}"),
+                        });
+                        return;
+                    }
                 }
             };
             // Create the encoder only after the first real frame reveals the active
