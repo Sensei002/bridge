@@ -116,13 +116,15 @@ internal class BridgePairingController(
                     } catch (error: Exception) {
                         if (!stopped) postStatus("Secure connection attempt failed: ${error.message}")
                     }
-                    if (expected == null || stopped || activeSessions.containsKey(peer.deviceId)) break
+                    if (expected == null || stopped || activeSessions.containsKey(peer.deviceId) ||
+                        pendingApprovalDevices.contains(peer.deviceId)) break
                     // Trusted-device reconnect is persistent while this discovered
                     // peer remains the pinned identity. A bounded backoff avoids
                     // waiting for another multicast discovery event after failure.
                     try { Thread.sleep(retryDelayMs) } catch (_: InterruptedException) { break }
                     retryDelayMs = (retryDelayMs * 2).coerceAtMost(15_000L)
-                } while (!stopped && !activeSessions.containsKey(peer.deviceId) && attempts < 8)
+                } while (!stopped && !activeSessions.containsKey(peer.deviceId) &&
+                    !pendingApprovalDevices.contains(peer.deviceId) && attempts < 8)
             } finally {
                 connectingDevices.remove(peer.deviceId)
             }
