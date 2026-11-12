@@ -28,20 +28,27 @@ jobs:
     name: Verify Parsec signed x64 VDD candidate
     runs-on: windows-latest
     steps:
-      - name: Download Parsec VDD 0.45.1 portable package
+      - name: Download and pin Parsec VDD 0.45.1 package
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           $url = "https://github.com/nomi-san/parsec-vdd/releases/download/v0.45.1/ParsecVDisplay-v0.45-portable.zip"
+          $expected = "9792e4121d85ed3e4c40c2d8ba36ec8657e13227a8357d719d923e801238ccdd"
           $archive = Join-Path $env:RUNNER_TEMP "ParsecVDisplay-v0.45-portable.zip"
           Invoke-WebRequest -Uri $url -OutFile $archive
           $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-          Write-Host "PARSEC VDD ARCHIVE SHA256: $actual"
+          if ($actual -ne $expected) { throw "Parsec VDD archive SHA-256 mismatch. Expected $expected, received $actual." }
           $root = Join-Path $env:RUNNER_TEMP "parsec-vdd"
           Expand-Archive -LiteralPath $archive -DestinationPath $root -Force
+          $installer = Join-Path $root "parsec-vdd-0.45.0.0.exe"
+          if (-not (Test-Path -LiteralPath $installer)) { throw "The Parsec VDD driver installer was not found in the pinned archive." }
+          $sevenZip = Get-Command "7z.exe" -ErrorAction Stop
+          $driverRoot = Join-Path $env:RUNNER_TEMP "parsec-vdd-extracted"
+          New-Item -ItemType Directory -Force -Path $driverRoot | Out-Null
+          & $sevenZip.Source x -y "-o$driverRoot" $installer | Out-Host
+          if ($LASTEXITCODE -ne 0) { throw "Could not extract the Parsec VDD setup package with 7-Zip (exit $LASTEXITCODE)." }
           "VDD_ARCHIVE=$archive" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "VDD_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "VDD_SHA256=$actual" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "VDD_ROOT=$driverRoot" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Verify x64 driver package and vendor catalog signature
         shell: pwsh
@@ -50,9 +57,9 @@ jobs:
           $infs = @(Get-ChildItem -LiteralPath $env:VDD_ROOT -Recurse -File -Filter "*.inf")
           $cats = @(Get-ChildItem -LiteralPath $env:VDD_ROOT -Recurse -File -Filter "*.cat")
           $dlls = @(Get-ChildItem -LiteralPath $env:VDD_ROOT -Recurse -File -Filter "*.dll")
-          Write-Host "Extracted file inventory:"
+          Write-Host "Extracted driver file inventory:"
           Get-ChildItem -LiteralPath $env:VDD_ROOT -Recurse -File | ForEach-Object { Write-Host ($_.FullName.Substring($env:VDD_ROOT.Length)) }
-          if ($infs.Count -eq 0 -or $cats.Count -eq 0 -or $dlls.Count -eq 0) { throw "The portable archive is missing an INF, catalog, or driver DLL." }
+          if ($infs.Count -eq 0 -or $cats.Count -eq 0 -or $dlls.Count -eq 0) { throw "The extracted Parsec VDD setup is missing an INF, catalog, or driver DLL." }
           $validCatalogs = @()
           foreach ($catalog in $cats) {
             $signature = Get-AuthenticodeSignature -LiteralPath $catalog.FullName
@@ -67,11 +74,10 @@ jobs:
           if ($validCatalogs.Count -eq 0) { throw "No Parsec VDD catalog has a valid Authenticode signature on this Windows runner." }
           $infText = Get-Content -LiteralPath $infs[0].FullName -Raw
           if ($infText -notmatch "NTamd64|NTx64|NT\s*\=\s*amd64") { throw "The driver INF does not declare a recognizable x64/AMD64 install section." }
-          Write-Host "Candidate archive SHA-256: $env:VDD_SHA256"
           Write-Host "Found $($infs.Count) INF file(s), $($cats.Count) catalog file(s), and $($dlls.Count) DLL file(s)."
           Write-Host "Valid signed catalog(s): $($validCatalogs.Count)"
 
-      - name: Upload candidate package for inspection
+      - name: Upload pinned candidate archive for inspection
         uses: actions/upload-artifact@v4
         with:
           name: parsec-vdd-0.45.1-candidate
