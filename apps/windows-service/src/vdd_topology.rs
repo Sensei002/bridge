@@ -5,7 +5,7 @@
 //! list so Bridge never reports a successful monitor connection from pipe-write
 //! success alone.
 
-use std::{io, mem::{size_of, zeroed}};
+use std::{mem::{size_of, zeroed}};
 use windows_sys::Win32::Graphics::Gdi::{
     EnumDisplayDevicesW, DISPLAY_DEVICEW, DISPLAY_DEVICE_ATTACHED_TO_DESKTOP,
 };
@@ -30,7 +30,7 @@ fn is_vdd_device_id(value: &str) -> bool {
 
 /// Enumerate display adapters and match the exact hardware ID from the pinned
 /// upstream INF (Root\MttVDD), never a display index or friendly-name guess.
-pub fn query() -> io::Result<VddTopology> {
+pub fn query() -> VddTopology {
     let mut topology = VddTopology { present: false, attached_to_desktop: false };
 
     for index in 0..MAX_DISPLAY_ADAPTERS {
@@ -48,7 +48,7 @@ pub fn query() -> io::Result<VddTopology> {
         }
     }
 
-    Ok(topology)
+    topology
 }
 
 #[cfg(test)]
