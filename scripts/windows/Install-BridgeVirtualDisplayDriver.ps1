@@ -20,8 +20,13 @@ function Get-InstalledBridgeVddPackages {
     @(Get-WindowsDriver -Online -All | Where-Object { $_.OriginalFileName -match '(?i)\\MttVDD\.inf$' })
 }
 function Get-BridgeVddDevices {
-    @(Get-PnpDevice -PresentOnly:$false -ErrorAction SilentlyContinue |
-        Where-Object { $_.InstanceId -match '(?i)^ROOT\\MTTVDD\\' })
+    # Root-enumerated devices are exposed by Windows as ROOT\DISPLAY\####.
+    # Root\MttVDD is their hardware ID, not their PnP instance ID.
+    @(Get-PnpDevice -Class Display -PresentOnly:$false -ErrorAction SilentlyContinue |
+        Where-Object {
+            $hardwareIds = (Get-PnpDeviceProperty -InstanceId $_.InstanceId -KeyName 'DEVPKEY_Device_HardwareIds' -ErrorAction SilentlyContinue).Data
+            @($hardwareIds) -contains 'Root\MttVDD'
+        })
 }
 
 Assert-Administrator
