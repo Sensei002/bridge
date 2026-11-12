@@ -73,8 +73,9 @@ impl VddCapture {
                     Ok(output) => output,
                     Err(_) => break,
                 };
-                let output_desc = unsafe { output.GetDesc() }
-                    .map_err(|error| format!("could not read DXGI output description: {error}"))?;
+                let output1: IDXGIOutput1 = output.cast()
+                    .map_err(|error| format!("VDD output does not expose IDXGIOutput1: {error}"))?;
+                let output_desc = unsafe { output1.GetDesc() };
                 let device_name = wide_field(&output_desc.DeviceName);
                 if device_name.is_empty() || !is_upstream_vdd_output(&device_name) {
                     continue;
@@ -83,8 +84,6 @@ impl VddCapture {
                     return Err(format!("upstream VDD output {device_name} exists but is not attached to the Windows desktop; select Extend in Display Settings"));
                 }
 
-                let output1: IDXGIOutput1 = output.cast()
-                    .map_err(|error| format!("VDD output does not expose IDXGIOutput1: {error}"))?;
                 let mut device: Option<ID3D11Device> = None;
                 let mut context: Option<ID3D11DeviceContext> = None;
                 let feature_levels = [D3D_FEATURE_LEVEL_11_0];
@@ -105,8 +104,7 @@ impl VddCapture {
                 let context = context.ok_or_else(|| "D3D11CreateDevice returned no immediate context".to_string())?;
                 let duplication = unsafe { output1.DuplicateOutput(&device) }
                     .map_err(|error| format!("DXGI could not duplicate upstream VDD output {device_name}: {error}"))?;
-                let mut duplication_desc = DXGI_OUTDUPL_DESC::default();
-                unsafe { duplication.GetDesc(&mut duplication_desc) };
+                let duplication_desc = unsafe { duplication.GetDesc() };
                 let width = duplication_desc.ModeDesc.Width;
                 let height = duplication_desc.ModeDesc.Height;
                 if width == 0 || height == 0 || width > MAX_DIMENSION || height > MAX_DIMENSION {
