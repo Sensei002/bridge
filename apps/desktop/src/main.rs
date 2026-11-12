@@ -44,6 +44,32 @@ use std::time::Duration;
 #[cfg(windows)]
 use std::time::Instant;
 
+#[cfg(windows)]
+fn launch_windows_installer(installer: &std::path::Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let verb: Vec<u16> = "runas".encode_utf16().chain(std::iter::once(0)).collect();
+    let file: Vec<u16> = installer.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let result = unsafe {
+        ShellExecuteW(
+            None,
+            PCWSTR(verb.as_ptr()),
+            PCWSTR(file.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    if result.0 as isize > 32 {
+        Ok(())
+    } else {
+        Err(format!("Windows ShellExecute error {}", result.0 as isize))
+    }
+}
+
 const BG: egui::Color32 = egui::Color32::from_rgb(10, 11, 15);
 const SIDEBAR: egui::Color32 = egui::Color32::from_rgb(13, 15, 19);
 const PANEL: egui::Color32 = egui::Color32::from_rgb(20, 24, 29);
@@ -2669,14 +2695,13 @@ impl eframe::App for BridgeApp {
                                 muted(ui, &self.update_status);
                                 if let Some((version, installer)) = self.update_available.clone() {
                                     if primary_button(ui, &format!("Install Bridge {version} and restart")) {
-                                        // NSIS embeds RequestExecutionLevel admin, so Windows shows
-                                        // the standard UAC consent prompt for machine-wide updates.
-                                        let launched = std::process::Command::new(&installer)
-                                            .spawn().is_ok();
-                                        if launched {
-                                            std::process::exit(0);
-                                        } else {
-                                            self.update_status = "Could not launch the Windows installer.".into();
+                                        // Use ShellExecuteW with the "runas" verb so Windows
+                                        // performs the UAC elevation handshake for the NSIS installer.
+                                        match launch_windows_installer(&installer) {
+                                            Ok(()) => std::process::exit(0),
+                                            Err(error) => {
+                                                self.update_status = format!("Could not launch the Windows installer: {error}");
+                                            }
                                         }
                                     }
                                 }
