@@ -25,25 +25,25 @@ concurrency:
 
 jobs:
   verify-upstream-vdd:
-    name: Verify upstream signed x64 VDD package
+    name: Verify Parsec signed x64 VDD candidate
     runs-on: windows-latest
     steps:
-      - name: Download pinned x64 driver-only release
+      - name: Download Parsec VDD 0.45.1 portable package
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $url = "https://github.com/VirtualDrivers/Virtual-Display-Driver/releases/download/24.10.27/VirtualDisplayDriver-x64.zip"
-          $archive = Join-Path $env:RUNNER_TEMP "VirtualDisplayDriver-x64.zip"
+          $url = "https://github.com/nomi-san/parsec-vdd/releases/download/v0.45.1/ParsecVDisplay-v0.45-portable.zip"
+          $archive = Join-Path $env:RUNNER_TEMP "ParsecVDisplay-v0.45-portable.zip"
           Invoke-WebRequest -Uri $url -OutFile $archive
           $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-          Write-Host "UPSTREAM VDD ARCHIVE SHA256: $actual"
-          $root = Join-Path $env:RUNNER_TEMP "vdd-x64"
+          Write-Host "PARSEC VDD ARCHIVE SHA256: $actual"
+          $root = Join-Path $env:RUNNER_TEMP "parsec-vdd"
           Expand-Archive -LiteralPath $archive -DestinationPath $root -Force
           "VDD_ARCHIVE=$archive" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "VDD_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "VDD_SHA256=$actual" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      - name: Require x64 driver files and verify catalog signature
+      - name: Verify x64 driver package and vendor catalog signature
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -52,9 +52,7 @@ jobs:
           $dlls = @(Get-ChildItem -LiteralPath $env:VDD_ROOT -Recurse -File -Filter "*.dll")
           Write-Host "Extracted file inventory:"
           Get-ChildItem -LiteralPath $env:VDD_ROOT -Recurse -File | ForEach-Object { Write-Host ($_.FullName.Substring($env:VDD_ROOT.Length)) }
-          if ($infs.Count -eq 0) { throw "The upstream x64 archive contains no driver INF." }
-          if ($cats.Count -eq 0) { throw "The upstream x64 archive contains no driver catalog." }
-          if ($dlls.Count -eq 0) { throw "The upstream x64 archive contains no UMDF driver DLL." }
+          if ($infs.Count -eq 0 -or $cats.Count -eq 0 -or $dlls.Count -eq 0) { throw "The portable archive is missing an INF, catalog, or driver DLL." }
           $validCatalogs = @()
           foreach ($catalog in $cats) {
             $signature = Get-AuthenticodeSignature -LiteralPath $catalog.FullName
@@ -64,17 +62,19 @@ jobs:
               Write-Host "Signer subject: $($signature.SignerCertificate.Subject)"
               Write-Host "Signer thumbprint: $($signature.SignerCertificate.Thumbprint)"
             }
-            if ($signature.Status -eq "Valid" -and $signature.SignerCertificate.Subject -match "SignPath Foundation") { $validCatalogs += $catalog }
+            if ($signature.Status -eq "Valid") { $validCatalogs += $catalog }
           }
-          if ($validCatalogs.Count -eq 0) { throw "No catalog has a valid Authenticode signature from SignPath Foundation." }
-          Write-Host "Verified x64 driver archive SHA-256: $env:VDD_SHA256"
-          Write-Host "Found $($infs.Count) INF file(s), $($cats.Count) catalog file(s), and $($dlls.Count) driver DLL(s)."
-          Write-Host "Valid SignPath Foundation catalog(s): $($validCatalogs.Count)"
+          if ($validCatalogs.Count -eq 0) { throw "No Parsec VDD catalog has a valid Authenticode signature on this Windows runner." }
+          $infText = Get-Content -LiteralPath $infs[0].FullName -Raw
+          if ($infText -notmatch "NTamd64|NTx64|NT\s*\=\s*amd64") { throw "The driver INF does not declare a recognizable x64/AMD64 install section." }
+          Write-Host "Candidate archive SHA-256: $env:VDD_SHA256"
+          Write-Host "Found $($infs.Count) INF file(s), $($cats.Count) catalog file(s), and $($dlls.Count) DLL file(s)."
+          Write-Host "Valid signed catalog(s): $($validCatalogs.Count)"
 
-      - name: Upload verified x64 driver archive for inspection
+      - name: Upload candidate package for inspection
         uses: actions/upload-artifact@v4
         with:
-          name: upstream-vdd-x64-24.10.27
+          name: parsec-vdd-0.45.1-candidate
           path: ${{ env.VDD_ARCHIVE }}
           if-no-files-found: error
           retention-days: 7
