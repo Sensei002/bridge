@@ -13,7 +13,7 @@ Bridge will **reuse the upstream VirtualDrivers Virtual Display Driver (VDD)**. 
 - Initial candidate: **Parsec Virtual Display Driver 0.45** via the MIT-licensed `nomi-san/parsec-vdd` integration project.
 - The newer VirtualDrivers package was rejected for Bridge's x64 target: its 25.7.23 bundle contained only ARM64 and x86 driver packages, while its older x64 ZIP contained a catalog that Windows reported as `NotSigned` and a certificate-install batch file. Bridge will not install that self-signed certificate.
 - Parsec VDD's upstream project documents Windows 10/11 64-bit support and a signed driver package. Its companion ParsecDisplay application is unsigned; Bridge will not bundle or execute that companion app.
-- The Parsec VDD driver must remain unmodified. CI must verify the x64 INF, catalog signature, archive hash, and signer before the dependency can be accepted.
+- The Parsec VDD driver must remain unmodified. CI verified the x64 INF/DLL/catalog and a valid catalog signature from Microsoft Windows Hardware Compatibility Publisher. The pinned portable archive SHA-256 is `9792e4121d85ed3e4c40c2d8ba36ec8657e13227a8357d719d923e801238ccdd`.
 - No test-signing mode, Secure Boot change, Bridge-owned driver certificate, or certificate-root import is permitted.
 
 ### Required Bridge integration
