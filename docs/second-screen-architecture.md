@@ -11,7 +11,7 @@ This is not desktop mirroring, a remote-control window, Miracast casting, or a v
 Bridge will **reuse the upstream VirtualDrivers Virtual Display Driver (VDD)**. Bridge will not maintain, compile, or sign its own IddCx/UMDF driver.
 
 - Upstream project: https://github.com/VirtualDrivers/Virtual-Display-Driver
-- Upstream release selected for the first integration prototype: **24.10.27** (`VDD.Control.24.10.27.zip`).
+- Upstream release selected for the first integration prototype: **24.10.27** (`VirtualDisplayDriver-x64.zip`).
 - The upstream project publishes a signed x64 driver-only package (release 24.10.27) and identifies its source repository as MIT-licensed. The newer 25.7.23 control archive was tested in CI but contains only ARM64 and x86 driver folders, so it is not suitable for Bridge's x64 Windows target. The selected release archive is pinned by SHA-256 in the Windows driver validation workflow.
 - The official package is treated as a third-party dependency: Bridge must not modify its driver binaries, INF, catalog, or signatures.
 - Bridge must verify the upstream archive hash and Windows catalog signature before packaging or installing it. If verification fails, installation must stop; no test-signing mode, Secure Boot change, or Bridge-owned driver certificate is permitted.
@@ -46,15 +46,15 @@ Introduce separate components:
 
 1. **Bridge desktop UI (existing Rust/egui app):** normal interactive user-session app. Owns device selection, permissions, display settings, connect/disconnect actions, status, and diagnostics.
 2. **Bridge Display Service (Windows service):** privileged boundary for driver lifecycle, authenticated session coordination, media transport, encoder orchestration, recovery, and Windows service startup/shutdown. Expose a narrow, ACL-protected named-pipe API to the desktop UI. Run with the least privilege compatible with driver communication; do not default to LocalSystem without a demonstrated need.
-3. **Bridge Indirect Display Driver (C++/UMDF/IddCx):** owns the virtual display adapter, monitor PnP lifecycle, mode negotiation, and Direct3D swap-chain acquisition. It must not own UI, pairing consent, or Android application logic.
+3. **Upstream Virtual Display Driver (third-party signed package):** owns the virtual display adapter, monitor PnP lifecycle, and mode negotiation. Bridge does not build or sign this driver. Bridge's capture adapter reads the resulting virtual output through Windows display/capture APIs.
 
 Driver installation and device configuration require elevation. Normal use of the desktop UI should not require running the whole app as administrator. Package the driver and service with the Windows installer only after installation, upgrade, rollback, and uninstall behaviour are defined.
 
-### Display service control boundary (implemented development path)
+### Display service control boundary (migration in progress)
 
 The Rust service in `apps/windows-service` exposes a versioned local named-pipe protocol (`\\.\pipe\BridgeDisplayService`). The unprivileged desktop client uses that pipe for Android attestation, short-lived lease renewal, driver connect/disconnect, frame reads, and read-only driver status queries. The service attributes each pipe client to a live process image, verifies the configured desktop publisher, verifies the Android signature against the pairing-pinned key, and binds the resulting 15-second lease to that process and Android fingerprint. Driver mutations and frame reads require the exact active lease. The pipe is local-only and ACL-protected; the driver interface remains restricted to LocalSystem and local administrators.
 
-The desktop Second Screen panel now exposes a read-only **Refresh monitor status** action. It reports whether the IddCx driver currently has a virtual monitor connected and how many modes the driver advertises. It does not bypass attestation or change driver state.
+The desktop Second Screen panel currently exposes a read-only **Refresh monitor status** action for the legacy Bridge driver. It must be updated to report the upstream VDD device and actual Windows display topology. It does not bypass attestation or change driver state.
 
 The service is packaged with the per-user MSI as an executable and administrator-run setup scripts. The MSI does not silently register a privileged service. Installation remains an explicit elevated action, with Authenticode verification enabled by default. This is still a development integration path: successful CI builds do not establish that a physical Windows machine has the driver and service correctly installed or that a monitor appears in Windows Display Settings. The detailed publisher-verification, one-time Noise-session challenge, ephemeral attestation, lease-renewal, replay-protection, and fail-closed requirements remain documented in [Windows Display Service Authentication Design](windows-service-authentication.md).
 
