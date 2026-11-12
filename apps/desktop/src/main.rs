@@ -2218,7 +2218,7 @@ impl eframe::App for BridgeApp {
                                 ui.add_space(16.0);
                                 feature_row(ui, "◇", "Your permission, always", "Capabilities are opt-in.", "CONTROL");
                                 ui.add_space(16.0);
-                                feature_row(ui, "↔", "Made for every screen", "Windows, Android and iOS.", "CROSS-PLATFORM");
+                                feature_row(ui, "↔", "Made for every screen", "Windows, Android and Linux.", "CROSS-PLATFORM");
                             });
                         });
                     }
@@ -2479,7 +2479,7 @@ impl eframe::App for BridgeApp {
                         panel(ui, |ui| {
                             ui.vertical_centered(|ui| {
                                 ui.label(egui::RichText::new("File transfer is available in the Windows build").strong());
-                                muted(ui, "Android and iOS transfer workflows are being connected next.");
+                                muted(ui, "Linux transfer workflows are planned next.");
                             });
                         });
                     }
