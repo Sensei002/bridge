@@ -35,6 +35,18 @@ internal data class BridgeTrustedDevice(
     val attestationPublicKey: String? = null
 )
 
+/** Parse the optional Ed25519 pin without allowing corrupt legacy data to crash startup. */
+internal fun parseOptionalAttestationPublicKey(raw: String?, recordIndex: Int): String? {
+    val key = raw?.trim()?.takeIf { it.isNotEmpty() && !it.equals("null", ignoreCase = true) }
+        ?: return null
+    if (key.matches(Regex("[0-9a-fA-F]{64}"))) return key
+    BridgeDiagnostics.record(
+        "pairing",
+        "Ignoring malformed attestation key in trusted-device record $recordIndex; Noise fingerprint trust remains intact."
+    )
+    return null
+}
+
 /**
  * Owns the native Noise pairing lifecycle. The six-digit code is only accepted
  * after the shared Rust Noise XX handshake has authenticated the peer key.
@@ -222,10 +234,10 @@ internal class BridgePairingController(
             require(fingerprint.matches(Regex("[0-9a-fA-F]{64}"))) {
                 "Trusted-device record $index has an invalid fingerprint"
             }
-            val attestationPublicKey = item.optString("attestation_public_key").takeIf { it.isNotBlank() }
-            require(attestationPublicKey == null || attestationPublicKey.matches(Regex("[0-9a-fA-F]{64}"))) {
-                "Trusted-device record $index has an invalid attestation public key"
-            }
+            // Check isNull before optString because JSONObject.NULL can stringify as "null".
+            val rawAttestationKey = if (item.isNull("attestation_public_key")) null
+                else item.optString("attestation_public_key", "")
+            val attestationPublicKey = parseOptionalAttestationPublicKey(rawAttestationKey, index)
             BridgeTrustedDevice(deviceId, name, platform, fingerprint, item.optLong("paired_at"), attestationPublicKey)
         }
 
