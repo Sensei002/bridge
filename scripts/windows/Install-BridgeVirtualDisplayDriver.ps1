@@ -19,6 +19,17 @@ function Get-InstalledBridgeVddPackages {
 Assert-Administrator
 if (-not [Environment]::Is64BitOperatingSystem) { throw "Bridge Second Screen currently requires 64-bit Windows." }
 if (-not $PSCmdlet.ShouldProcess("VirtualDrivers VDD 25.7.23", "Download, verify, and install signed AMD64 display driver")) { return }
+
+# NSIS can invoke this script more than once across installer retries. If the
+# pinned upstream VDD is already in the Driver Store, treat that as success
+# instead of reinstalling it and potentially failing on an already-staged INF.
+$existingPackages = @(Get-InstalledBridgeVddPackages)
+if ($existingPackages.Count -gt 0) {
+    Write-Host "VirtualDrivers VDD is already present in the Windows Driver Store; skipping reinstall."
+    Write-Host "Published package(s): $($existingPackages.Driver -join ', ')"
+    exit 0
+}
+
 New-Item -ItemType Directory -Path $DownloadDirectory -Force | Out-Null
 $archive = Join-Path $DownloadDirectory "VirtualDisplayDriver-x86.Driver.Only.zip"
 $extract = Join-Path $DownloadDirectory "package"
