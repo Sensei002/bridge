@@ -24,7 +24,8 @@ $archive = Join-Path $DownloadDirectory "VirtualDisplayDriver-x86.Driver.Only.zi
 $extract = Join-Path $DownloadDirectory "package"
 if (Test-Path -LiteralPath $extract) { Remove-Item -LiteralPath $extract -Recurse -Force }
 Write-Host "Downloading the official VirtualDrivers 25.7.23 driver-only package..."
-Invoke-WebRequest -Uri $releaseUrl -OutFile $archive
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+Invoke-WebRequest -Uri $releaseUrl -OutFile $archive -UseBasicParsing
 $actualHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($actualHash -ne $expectedArchiveSha256) { throw "Upstream VDD archive SHA-256 mismatch. Expected $expectedArchiveSha256; received $actualHash. Nothing was installed." }
 Expand-Archive -LiteralPath $archive -DestinationPath $extract -Force

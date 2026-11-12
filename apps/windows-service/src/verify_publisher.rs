@@ -1,21 +1,21 @@
 //! Fail-closed Authenticode verification for the privileged display service.
 //!
-//! The expected desktop publisher is configured independently from the driver
-//! signing certificate through the machine-level BRIDGE_DESKTOP_SIGNER_SHA256
-//! environment variable. The value is the signer's SHA-256 certificate hash
-//! (64 hexadecimal characters). No driver certificate is implicitly trusted.
+//! The expected Bridge desktop publisher is provisioned by the elevated installer
+//! beside this service executable in Program Files. The file is protected by the
+//! service-directory ACL (SYSTEM/Administrators write; Users read-only). It contains
+//! the SHA-256 hash of the desktop signer's leaf certificate, not the driver signer.
 
-use std::{io, os::windows::ffi::OsStrExt, path::Path};
+use std::{fs, io, os::windows::ffi::OsStrExt, path::Path};
+
 use windows_sys::Win32::{
     Foundation::{CloseHandle, HANDLE},
     Security::{
-        Cryptography::{
-            CertGetCertificateContextProperty, CERT_CONTEXT, CERT_SHA256_HASH_PROP_ID,
-        },
+        Cryptography::{CertGetCertificateContextProperty, CERT_CONTEXT, CERT_SHA256_HASH_PROP_ID},
         WinTrust::{
             WinVerifyTrust, WTHelperGetProvCertFromChain, WTHelperGetProvSignerFromChain,
-            WTHelperProvDataFromStateData, CRYPT_PROVIDER_CERT, CRYPT_PROVIDER_SGNR, WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA,
-            WINTRUST_DATA_0, WINTRUST_FILE_INFO, WTD_CHOICE_FILE, WTD_REVOKE_WHOLECHAIN,
+            WTHelperProvDataFromStateData, CRYPT_PROVIDER_CERT, CRYPT_PROVIDER_SGNR,
+            WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA, WINTRUST_DATA_0,
+            WINTRUST_FILE_INFO, WTD_CHOICE_FILE, WTD_REVOKE_WHOLECHAIN,
             WTD_REVOCATION_CHECK_CHAIN, WTD_STATEACTION_CLOSE, WTD_STATEACTION_VERIFY,
             WTD_UI_NONE,
         },
@@ -39,15 +39,20 @@ impl Drop for OwnedFile {
 }
 
 /// Verify the process image's Authenticode trust chain and pin its leaf
-/// certificate to the independently configured Bridge desktop publisher.
+/// certificate to the publisher hash installed beside the privileged service.
 pub fn verify_client_publisher(image_path: &Path) -> io::Result<()> {
-    let expected = std::env::var("BRIDGE_DESKTOP_SIGNER_SHA256").map_err(|_| {
+    let service_path = std::env::current_exe()?;
+    let service_directory = service_path.parent().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::NotFound, "Bridge Display Service directory is unavailable")
+    })?;
+    let pin_path = service_directory.join("bridge-desktop-publisher.sha256");
+    let pin_contents = fs::read_to_string(&pin_path).map_err(|error| {
         io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "Bridge desktop publisher pin is not configured",
+            format!("Bridge desktop publisher pin is unavailable: {error}"),
         )
     })?;
-    let expected = normalize_sha256(&expected)?;
+    let expected = normalize_sha256(&pin_contents)?;
 
     let path: Vec<u16> = image_path.as_os_str()
         .encode_wide()
@@ -117,7 +122,7 @@ pub fn verify_client_publisher(image_path: &Path) -> io::Result<()> {
     if !constant_time_eq(&actual, &expected) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "desktop executable signer does not match the configured Bridge publisher",
+            "desktop executable signer does not match the installed Bridge publisher pin",
         ));
     }
     Ok(())
@@ -163,11 +168,13 @@ fn signer_sha256(state: HANDLE) -> io::Result<String> {
 }
 
 fn normalize_sha256(value: &str) -> io::Result<String> {
-    let normalized: String = value.chars().filter(|character| *character != ':' && !character.is_ascii_whitespace()).collect();
+    let normalized: String = value.chars()
+        .filter(|character| *character != ':' && !character.is_ascii_whitespace())
+        .collect();
     if normalized.len() != 64 || !normalized.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "BRIDGE_DESKTOP_SIGNER_SHA256 must contain exactly 64 hexadecimal characters",
+            "installed Bridge desktop publisher pin must contain exactly 64 hexadecimal characters",
         ));
     }
     Ok(normalized.to_ascii_uppercase())

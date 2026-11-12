@@ -2669,9 +2669,9 @@ impl eframe::App for BridgeApp {
                                 muted(ui, &self.update_status);
                                 if let Some((version, installer)) = self.update_available.clone() {
                                     if primary_button(ui, &format!("Install Bridge {version} and restart")) {
-                                        let launched = std::process::Command::new("msiexec")
-                                            .arg("/i").arg(&installer)
-                                            .args(["/passive", "/norestart"])
+                                        // NSIS embeds RequestExecutionLevel admin, so Windows shows
+                                        // the standard UAC consent prompt for machine-wide updates.
+                                        let launched = std::process::Command::new(&installer)
                                             .spawn().is_ok();
                                         if launched {
                                             std::process::exit(0);

@@ -14,8 +14,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  windows-msi:
-    name: Build Windows MSI
+  windows-installer:
+    name: Build Windows NSIS installer
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -31,10 +31,26 @@ jobs:
         run: |
           cargo test -p bridge-display-service
           cargo build --release --manifest-path apps/windows-service/Cargo.toml --features service-bin --target x86_64-pc-windows-msvc
-      - name: Install WiX Toolset
+      - name: Sign desktop and service binaries and generate publisher pin
+        if: github.event_name != 'pull_request'
         shell: pwsh
-        run: dotnet tool install --global wix --version 6.0.2
-      - name: Package per-user MSI
+        env:
+          BRIDGE_DRIVER_SIGNING_PFX_BASE64: ${{ secrets.BRIDGE_DRIVER_SIGNING_PFX_BASE64 }}
+          BRIDGE_DRIVER_SIGNING_PFX_PASSWORD: ${{ secrets.BRIDGE_DRIVER_SIGNING_PFX_PASSWORD }}
+          BRIDGE_DRIVER_CERT_THUMBPRINT: ${{ secrets.BRIDGE_DRIVER_CERT_THUMBPRINT }}
+        run: |
+          ./scripts/windows/Sign-BridgeBinaries.ps1 -Files @(
+            "target/release/bridge-desktop.exe",
+            "target/x86_64-pc-windows-msvc/release/bridge-display-service.exe"
+          ) -PublisherPinOutput "$PWD\bridge-desktop-publisher.sha256"
+      - name: Create non-publishable placeholder pin for pull-request packaging checks
+        if: github.event_name == 'pull_request'
+        shell: pwsh
+        run: Set-Content -LiteralPath "bridge-desktop-publisher.sha256" -Value ("0" * 64) -NoNewline
+      - name: Install NSIS
+        shell: pwsh
+        run: choco install nsis --yes --no-progress
+      - name: Package elevated per-machine NSIS installer
         shell: pwsh
         run: |
           $workspace = Get-Content Cargo.toml -Raw
@@ -42,11 +58,25 @@ jobs:
             throw "Could not read workspace version from Cargo.toml"
           }
           $version = "$($Matches[1]).${{ github.run_number }}"
-          wix build installer/windows/Package.wxs -d ProductVersion=$version -d PublishDir="$PWD\target\release" -d ServicePublishDir="$PWD\target\x86_64-pc-windows-msvc\release" -d ScriptsDir="$PWD\scripts\windows" -o "Bridge-$version-x64.msi"
+          $makensis = Get-ChildItem "$env:ProgramFiles\NSIS\makensis.exe", "${env:ProgramFiles(x86)}\NSIS\makensis.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($null -eq $makensis) { throw "NSIS makensis.exe was not found after installation." }
+          & $makensis.FullName "/DPRODUCT_VERSION=$version" "/DPUBLISH_DIR=$PWD\target\release" "/DSERVICE_DIR=$PWD\target\x86_64-pc-windows-msvc\release" "/DSCRIPTS_DIR=$PWD\scripts\windows" "/DPUBLISHER_PIN=$PWD\bridge-desktop-publisher.sha256" installer/windows/Bridge.nsi
+          if ($LASTEXITCODE -ne 0) { throw "NSIS packaging failed with exit code $LASTEXITCODE." }
+      - name: Sign and verify Windows NSIS installer
+        if: github.event_name != 'pull_request'
+        shell: pwsh
+        env:
+          BRIDGE_DRIVER_SIGNING_PFX_BASE64: ${{ secrets.BRIDGE_DRIVER_SIGNING_PFX_BASE64 }}
+          BRIDGE_DRIVER_SIGNING_PFX_PASSWORD: ${{ secrets.BRIDGE_DRIVER_SIGNING_PFX_PASSWORD }}
+          BRIDGE_DRIVER_CERT_THUMBPRINT: ${{ secrets.BRIDGE_DRIVER_CERT_THUMBPRINT }}
+        run: |
+          $installer = Get-ChildItem -LiteralPath "$PWD\installer\windows" -Filter "Bridge-*-Setup-x64.exe" | Select-Object -First 1
+          if ($null -eq $installer) { throw "Packaged Bridge NSIS installer was not found." }
+          ./scripts/windows/Sign-BridgeBinaries.ps1 -Files @($installer.FullName)
       - uses: actions/upload-artifact@v4
         with:
-          name: bridge-windows-msi
-          path: Bridge-*.msi
+          name: bridge-windows-installer
+          path: installer/windows/Bridge-*-Setup-x64.exe
           if-no-files-found: error
 
   android-apk:
@@ -111,12 +141,12 @@ jobs:
   publish-release:
     name: Publish channel release and update manifest
     if: github.event_name == 'push' && (github.ref == 'refs/heads/development' || github.ref == 'refs/heads/stable')
-    needs: [windows-msi, android-apk]
+    needs: [windows-installer, android-apk]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: bridge-windows-msi
+          name: bridge-windows-installer
       - uses: actions/download-artifact@v4
         with:
           name: bridge-android-apk
@@ -134,7 +164,7 @@ jobs:
           version = f"0.2.{build}"
           tag = ("stable-" if channel == "stable" else "dev-") + build
           root = pathlib.Path(".")
-          msi = next(root.glob("Bridge-*.msi"))
+          installer = next(root.glob("Bridge-*-Setup-x64.exe"))
           def sha(path):
               h = hashlib.sha256()
               with path.open("rb") as stream:
@@ -149,9 +179,9 @@ jobs:
               "commit": os.environ["COMMIT_SHA"],
               "windows": {
                   "version": version,
-                  "asset": msi.name,
-                  "sha256": sha(msi),
-                  "download_url": base + msi.name
+                  "asset": installer.name,
+                  "sha256": sha(installer),
+                  "download_url": base + installer.name
               }
           }
           apk = root / "Bridge-android.apk"
@@ -178,6 +208,6 @@ jobs:
           prerelease: ${{ github.ref == 'refs/heads/development' }}
           generate_release_notes: true
           files: |
-            Bridge-*.msi
+            Bridge-*-Setup-x64.exe
             Bridge-android.apk
             bridge-update.json

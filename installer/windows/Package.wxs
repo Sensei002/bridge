@@ -41,6 +41,9 @@
       <Component Id="BridgeDisplayServiceExecutableComponent" Guid="*">
         <File Id="BridgeDisplayServiceExecutable" Source="$(var.ServicePublishDir)\bridge-display-service.exe" KeyPath="yes" />
       </Component>
+      <Component Id="BridgeDesktopPublisherPinComponent" Guid="*">
+        <File Id="BridgeDesktopPublisherPin" Source="$(var.PublisherPinPath)" KeyPath="yes" />
+      </Component>
       <Component Id="BridgeDisplayServiceInstallScriptComponent" Guid="*">
         <File Id="BridgeDisplayServiceInstallScript" Source="$(var.ScriptsDir)\Install-BridgeDisplayService.ps1" KeyPath="yes" />
       </Component>

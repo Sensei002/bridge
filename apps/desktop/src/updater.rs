@@ -92,17 +92,17 @@ fn check_and_download(channel: &str) -> Result<Option<(String, PathBuf)>, String
     if compare_versions(&version, option_env!("BRIDGE_BUILD_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")))? != std::cmp::Ordering::Greater {
         return Ok(None);
     }
-    let download_url = windows["download_url"].as_str().ok_or("MSI download URL is missing")?;
+    let download_url = windows["download_url"].as_str().ok_or("Windows installer download URL is missing")?;
     if !download_url.starts_with(&format!("{RELEASE_PREFIX}{tag}/")) {
-        return Err("MSI URL is not an asset from the selected official Bridge release".into());
+        return Err("Windows installer URL is not an asset from the selected official Bridge release".into());
     }
-    let expected_hash = windows["sha256"].as_str().ok_or("MSI checksum is missing")?.to_ascii_lowercase();
+    let expected_hash = windows["sha256"].as_str().ok_or("Windows installer checksum is missing")?.to_ascii_lowercase();
     if expected_hash.len() != 64 || !expected_hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err("MSI checksum is invalid".into());
+        return Err("Windows installer checksum is invalid".into());
     }
-    let asset = windows["asset"].as_str().ok_or("MSI asset name is missing")?;
-    if asset.contains('/') || asset.contains('\\') || !asset.to_ascii_lowercase().ends_with(".msi") {
-        return Err("MSI asset filename is invalid".into());
+    let asset = windows["asset"].as_str().ok_or("Windows installer asset name is missing")?;
+    if asset.contains('/') || asset.contains('\\') || !asset.to_ascii_lowercase().ends_with(".exe") {
+        return Err("Windows installer asset filename is invalid".into());
     }
 
     let bytes = client.get(download_url).send()
@@ -111,7 +111,7 @@ fn check_and_download(channel: &str) -> Result<Option<(String, PathBuf)>, String
         .bytes().map_err(|error| error.to_string())?;
     let actual_hash = format!("{:x}", Sha256::digest(&bytes));
     if actual_hash != expected_hash {
-        return Err("MSI SHA-256 verification failed; installation was blocked".into());
+        return Err("Windows installer SHA-256 verification failed; installation was blocked".into());
     }
 
     let directory = std::env::temp_dir().join("Bridge").join("Updates");

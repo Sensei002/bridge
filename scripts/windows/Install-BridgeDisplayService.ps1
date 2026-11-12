@@ -5,11 +5,23 @@ param(
     [string]$ServiceExecutable,
     [switch]$AllowUnsignedDevelopmentBuild
 )
+
 $ErrorActionPreference = "Stop"
 $serviceName = "BridgeDisplayService"
 $displayName = "Bridge Display Service"
 $installDirectory = Join-Path $env:ProgramFiles "Bridge\DisplayService"
 $installedExecutable = Join-Path $installDirectory "bridge-display-service.exe"
+$installedPublisherPin = Join-Path $installDirectory "bridge-desktop-publisher.sha256"
+
+function Get-CertificateSha256 {
+    param([Parameter(Mandatory = $true)][Security.Cryptography.X509Certificates.X509Certificate2]$Certificate)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        return ([Convert]::ToHexString($sha.ComputeHash($Certificate.RawData))).ToUpperInvariant()
+    } finally {
+        $sha.Dispose()
+    }
+}
 function Assert-Administrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = [Security.Principal.WindowsPrincipal]::new($identity)
@@ -28,29 +40,63 @@ function Set-ProtectedInstallAcl {
     & "$env:SystemRoot\System32\icacls.exe" $Path /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)(F)" "*S-1-5-32-544:(OI)(CI)(F)" "*S-1-5-32-545:(OI)(CI)(RX)" | Out-Host
     if ($LASTEXITCODE -ne 0) { throw "Could not apply the protected Bridge service directory ACL (icacls exit code $LASTEXITCODE)." }
 }
+
 Assert-Administrator
 $resolvedExecutable = (Resolve-Path -LiteralPath $ServiceExecutable -ErrorAction Stop).Path
 if ([IO.Path]::GetExtension($resolvedExecutable) -ne ".exe" -or [IO.Path]::GetFileName($resolvedExecutable) -ne "bridge-display-service.exe") {
     throw "ServiceExecutable must point to bridge-display-service.exe."
 }
+
 $signature = Get-AuthenticodeSignature -LiteralPath $resolvedExecutable
-if ($signature.Status -ne "Valid" -and -not $AllowUnsignedDevelopmentBuild) {
-    throw "The service executable is not Authenticode-valid. Use a properly signed build, or explicitly pass -AllowUnsignedDevelopmentBuild for a trusted local development artifact."
+if ($signature.Status -ne "Valid" -or $null -eq $signature.SignerCertificate) {
+    if ($AllowUnsignedDevelopmentBuild) {
+        throw "Unsigned development services cannot establish the publisher pin required for authenticated Second Screen. Install a signed Bridge release instead."
+    }
+    throw "The service executable is not Authenticode-valid. Use a properly signed Bridge release."
 }
-if ($signature.Status -ne "Valid") { Write-Warning "Installing an unsigned development service build. Only use binaries built from trusted Bridge source." }
+
+$setupDirectory = Split-Path -Parent $resolvedExecutable
+$desktopExecutable = Join-Path (Split-Path -Parent $setupDirectory) "bridge-desktop.exe"
+$publisherPinSource = Join-Path $setupDirectory "bridge-desktop-publisher.sha256"
+if (-not (Test-Path -LiteralPath $desktopExecutable -PathType Leaf)) {
+    throw "The matching Bridge desktop executable was not found beside DisplayServiceSetup."
+}
+if (-not (Test-Path -LiteralPath $publisherPinSource -PathType Leaf)) {
+    throw "The signed Bridge publisher pin is missing from DisplayServiceSetup."
+}
+$publisherPin = (Get-Content -LiteralPath $publisherPinSource -Raw).Trim().ToUpperInvariant()
+if ($publisherPin -notmatch '^[0-9A-F]{64}$') {
+    throw "The Bridge desktop publisher pin must contain exactly 64 hexadecimal characters."
+}
+
+$desktopSignature = Get-AuthenticodeSignature -LiteralPath $desktopExecutable
+if ($desktopSignature.Status -ne "Valid" -or $null -eq $desktopSignature.SignerCertificate) {
+    throw "The Bridge desktop executable does not have a trusted Authenticode signature (status: $($desktopSignature.Status))."
+}
+$serviceSignerHash = Get-CertificateSha256 -Certificate $signature.SignerCertificate
+$desktopSignerHash = Get-CertificateSha256 -Certificate $desktopSignature.SignerCertificate
+if ($serviceSignerHash -ne $publisherPin -or $desktopSignerHash -ne $publisherPin) {
+    throw "The desktop executable, service executable, and packaged publisher pin do not all match the same trusted signing certificate."
+}
+
 $existing = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
 if ($null -ne $existing -and $existing.Status -eq "Running") {
     Stop-Service -Name $serviceName -Force
     $existing.WaitForStatus([ServiceProcess.ServiceControllerStatus]::Stopped, [TimeSpan]::FromSeconds(20))
 }
+
 New-Item -ItemType Directory -Path $installDirectory -Force | Out-Null
 Set-ProtectedInstallAcl -Path (Split-Path -Parent $installDirectory)
 Set-ProtectedInstallAcl -Path $installDirectory
-# LocalSystem must never execute a service binary from a user-writable Downloads/AppData directory.
+# LocalSystem must never execute a service binary or trust pin from a user-writable directory.
 Copy-Item -LiteralPath $resolvedExecutable -Destination $installedExecutable -Force
+Copy-Item -LiteralPath $publisherPinSource -Destination $installedPublisherPin -Force
 $sourceHash = (Get-FileHash -LiteralPath $resolvedExecutable -Algorithm SHA256).Hash
 $installedHash = (Get-FileHash -LiteralPath $installedExecutable -Algorithm SHA256).Hash
 if ($sourceHash -ne $installedHash) { throw "The installed service executable does not match the verified source file." }
+$installedPin = (Get-Content -LiteralPath $installedPublisherPin -Raw).Trim().ToUpperInvariant()
+if ($installedPin -ne $publisherPin) { throw "The installed Bridge publisher pin does not match the verified package pin." }
+
 $binaryPath = '"' + $installedExecutable + '"'
 if ($null -eq $existing) {
     Invoke-Sc -Arguments @("create", $serviceName, "binPath=", $binaryPath, "start=", "auto", "obj=", "LocalSystem", "DisplayName=", $displayName)
@@ -63,7 +109,9 @@ Invoke-Sc -Arguments @("failure", $serviceName, "reset=", "86400", "actions=", "
 Start-Service -Name $serviceName
 $service = Get-Service -Name $serviceName
 $service.WaitForStatus([ServiceProcess.ServiceControllerStatus]::Running, [TimeSpan]::FromSeconds(20))
+
 Write-Host "Bridge Display Service installed and running."
 Write-Host "Executable: $installedExecutable"
 Write-Host "Directory ACL: SYSTEM/Administrators full control; Users read/execute."
+Write-Host "Desktop publisher SHA-256 pin: $publisherPin"
 Write-Host "Account: LocalSystem | Startup: Automatic"
