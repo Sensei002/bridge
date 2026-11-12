@@ -202,7 +202,6 @@ fn run_pipe_server(shutdown: &mpsc::Receiver<()>) -> io::Result<()> {
                         .collect::<Vec<_>>();
                     for process_id in exited {
                         challenges.revoke_process(process_id);
-                        leases.revoke_process(process_id);
                         if leases.revoke_process(process_id) {
                             disconnect_driver_if_connected("desktop process exited");
                         }
