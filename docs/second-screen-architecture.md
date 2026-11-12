@@ -11,7 +11,7 @@ This is not desktop mirroring, a remote-control window, Miracast casting, or a v
 Bridge will **reuse the upstream VirtualDrivers Virtual Display Driver (VDD)**. Bridge will not maintain, compile, or sign its own IddCx/UMDF driver.
 
 - Selected dependency: **VirtualDrivers Virtual Display Driver 25.7.23**.
-- CI verified that `SignedDrivers\\x86\\VDD\\MttVDD.dll` is actually an **AMD64** PE image (`0x8664`), despite the folder name.
+- CI verified that the driver-only archive's `MttVDD.dll` is an **AMD64** PE image (`0x8664`), despite the archive's `x86` label.
 - CI verified the driver catalog is valid and signed by **SignPath Foundation** (thumbprint `3CF8CF26D8BA266C3A483AB7D26D4A818E317D76`).
 - Bridge will consume the upstream driver-only archive `VirtualDisplayDriver-x86.Driver.Only.zip`; its pinned SHA-256 is `e24210692b442b39af763536330ce78b423f19342b7a7792c26de3944e418b3a`.
 - The older 24.10.27 x64-only ZIP was rejected because Windows reported its catalog as `NotSigned`; use the 25.7.23 package instead.
