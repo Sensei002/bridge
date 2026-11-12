@@ -103,8 +103,8 @@ if ($devices.Count -eq 0) {
     # NefCon performs its own hardware-ID check with --no-duplicates. This is
     # the final safety barrier if Windows' CIM/PnP enumeration misses an
     # existing instance: never create another ROOT\MttVDD node on upgrade.
-    $nefconOperationLog = Join-Path $DownloadDirectory "nefcon-operation.log"
-    $nefconConsoleLog = Join-Path $DownloadDirectory "nefcon-console.log"
+    $nefconOperationLog = Join-Path $logDirectory "nefcon-operation.log"
+    $nefconConsoleLog = Join-Path $logDirectory "nefcon-console.log"
     $nefconArguments = @(
         "install",
         $infs[0].FullName,
@@ -133,7 +133,7 @@ do {
 if ($devices.Count -eq 0) {
     throw "The driver package is staged, but Windows did not enumerate ROOT\MttVDD after NefCon installation. Check Device Manager for a driver start error."
 }
-$devices | Format-Table Status,Class,FriendlyName,InstanceId -AutoSize
+$devices | Select-Object Status,PNPClass,Name,DeviceID | Format-Table -AutoSize
 
 $pipeDeadline = (Get-Date).AddSeconds(30)
 do {
