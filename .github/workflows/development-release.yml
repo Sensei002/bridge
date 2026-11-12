@@ -70,13 +70,13 @@ jobs:
           BRIDGE_DRIVER_SIGNING_PFX_PASSWORD: ${{ secrets.BRIDGE_DRIVER_SIGNING_PFX_PASSWORD }}
           BRIDGE_DRIVER_CERT_THUMBPRINT: ${{ secrets.BRIDGE_DRIVER_CERT_THUMBPRINT }}
         run: |
-          $installer = Get-ChildItem -LiteralPath $PWD -Filter "Bridge-*-Setup-x64.exe" | Select-Object -First 1
+          $installer = Get-ChildItem -LiteralPath "$PWD\installer\windows" -Filter "Bridge-*-Setup-x64.exe" | Select-Object -First 1
           if ($null -eq $installer) { throw "Packaged Bridge NSIS installer was not found." }
           ./scripts/windows/Sign-BridgeBinaries.ps1 -Files @($installer.FullName)
       - uses: actions/upload-artifact@v4
         with:
           name: bridge-windows-installer
-          path: Bridge-*-Setup-x64.exe
+          path: installer/windows/Bridge-*-Setup-x64.exe
           if-no-files-found: error
 
   android-apk:
