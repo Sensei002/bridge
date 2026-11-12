@@ -12,7 +12,7 @@ This is the privileged Windows service boundary for Bridge Second Screen. It is 
 - Pipe DACL grants full access to LocalSystem and Administrators, and read/write access to interactive users. Remote network clients are not granted access.
 - Captures the connected pipe client's process ID using the Windows named-pipe API and resolves its executable image path from the process handle.
 - Upstream driver-control client connects to `\\.\\pipe\\MTTVirtualDisplayPipe` and sends only the vendor protocol's UTF-16 `SETDISPLAYCOUNT 0` or `SETDISPLAYCOUNT 1` command. It does not forward arbitrary driver commands or expose the vendor pipe to Android/network peers.
-- The vendor pipe accepts one command per connection and does not acknowledge display-count changes. Bridge reports connect/disconnect as a request; Windows display-topology verification is a separate migration step. The legacy query/frame-read adapter is not yet migrated.
+- The vendor pipe accepts one command per connection and does not acknowledge display-count changes. Bridge reports connect/disconnect as a request, then independently enumerates Windows display adapters and matches the exact upstream INF hardware ID Root\\MttVDD. The topology query distinguishes driver presence from attachment to the Windows desktop. The legacy frame-read adapter remains temporarily present and is not used as evidence of VDD capture.
 - Portable protocol parser and response tests run in the Rust workspace.
 - Windows x64 executable is built by GitHub Actions and uploaded as an unsigned development artifact.
 
@@ -31,7 +31,7 @@ The SCM installer/account configuration, service recovery policy, production sig
 Requests are one message per named-pipe connection, UTF-8, at most 256 bytes:
 
 - `BRIDGE_DISPLAY/1 PING`
-- `BRIDGE_DISPLAY/1 QUERY`
+- `BRIDGE_DISPLAY/1 QUERY` → `BRIDGE_DISPLAY/1 OK vdd_present=0|1 attached=0|1` (actual Windows adapter enumeration; `attached=1` requires `vdd_present=1`)
 - `BRIDGE_DISPLAY/1 CHALLENGE` → `BRIDGE_DISPLAY/1 CHALLENGE nonce=<64 hex chars>`
 - `BRIDGE_DISPLAY/1 CHALLENGE_RESPONSE <64 hex chars>` → `BRIDGE_DISPLAY/1 OK challenge_verified`
 - `BRIDGE_DISPLAY/1 CONNECT lease=<uuid> fingerprint=<64 hex>` → `BRIDGE_DISPLAY/1 OK connect_requested`
