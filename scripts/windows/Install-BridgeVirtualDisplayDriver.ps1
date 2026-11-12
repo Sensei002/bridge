@@ -54,7 +54,7 @@ $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
 if ($peOffset -lt 0 -or ($peOffset + 6) -gt $bytes.Length -or [BitConverter]::ToUInt16($bytes, $peOffset + 4) -ne 0x8664) {
     throw "The pinned VDD package does not contain the expected AMD64 driver. Nothing was installed."
 }
-$pnputil = Join-Path $env:SystemRoot "System32\\pnputil.exe"
+$pnputil = Join-Path $env:SystemRoot "System32\pnputil.exe"
 & $pnputil /add-driver $infs[0].FullName /install
 $exitCode = $LASTEXITCODE
 if ($exitCode -notin @(0, 3010)) { throw "Windows rejected the signed VDD package (pnputil exit code $exitCode)." }
