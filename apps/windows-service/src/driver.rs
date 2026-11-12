@@ -13,8 +13,6 @@ use windows_sys::{
     },
 };
 
-const IOCTL_CONNECT: u32 = (0x22 << 16) | (0x800 << 2) | (2 << 14);
-const IOCTL_DISCONNECT: u32 = (0x22 << 16) | (0x801 << 2) | (2 << 14);
 const IOCTL_QUERY: u32 = (0x22 << 16) | (0x802 << 2) | (1 << 14);
 const IOCTL_READ_FRAME: u32 = (0x22 << 16) | (0x803 << 2) | (2 << 14) | (1 << 14);
 const IOCTL_QUERY_FRAME: u32 = (0x22 << 16) | (0x804 << 2) | (1 << 14);
@@ -124,20 +122,6 @@ pub fn query() -> io::Result<DriverStatus> {
     })
 }
 
-pub fn set_connected(connected: bool) -> io::Result<()> {
-    with_driver(|handle| {
-        let mut returned = 0_u32;
-        let code = if connected { IOCTL_CONNECT } else { IOCTL_DISCONNECT };
-        let ok = unsafe {
-            DeviceIoControl(handle, code, null(), 0, null_mut(), 0, &mut returned, null_mut())
-        };
-        if ok == 0 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(())
-        }
-    })
-}
 
 
 /// Metadata for one complete BGRA8 frame captured by the IddCx swap-chain worker.
