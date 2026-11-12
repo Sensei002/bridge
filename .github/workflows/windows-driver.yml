@@ -193,10 +193,12 @@ jobs:
             $rootStore = [Security.Cryptography.X509Certificates.X509Store]::new([Security.Cryptography.X509Certificates.StoreName]::Root, [Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser)
             $publicCertificate = [Security.Cryptography.X509Certificates.X509Certificate2]::new($cerPath)
             try {
+              Write-Host "SIGNING CHECKPOINT: opening CurrentUser\\Root certificate store"
               $rootStore.Open([Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+              Write-Host "SIGNING CHECKPOINT: CurrentUser\\Root store opened; adding temporary publisher certificate"
               $rootStore.Add($publicCertificate)
+              Write-Host "SIGNING CHECKPOINT: temporary publisher certificate added to CurrentUser\\Root"
               $rootThumbprint = $publicCertificate.Thumbprint
-              Write-Host "SIGNING CHECKPOINT: temporary root trust added through .NET X509Store"
             } finally {
               $rootStore.Close()
             }
