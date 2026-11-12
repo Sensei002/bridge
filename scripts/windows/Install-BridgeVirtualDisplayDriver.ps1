@@ -5,8 +5,8 @@ $releaseUrl = "https://github.com/VirtualDrivers/Virtual-Display-Driver/releases
 $expectedArchiveSha256 = "e24210692b442b39af763536330ce78b423f19342b7a7792c26de3944e418b3a"
 $expectedSignerThumbprint = "3CF8CF26D8BA266C3A483AB7D26D4A818E317D76"
 $expectedSignerName = "SignPath Foundation"
-$nefconUrl = "https://github.com/nefarius/nefcon/releases/download/v1.14.0/nefcon_v1.14.0.zip"
-$expectedNefconSha256 = "a15557da24a9efca203158de3b43b0eaf982db231f0194031f1ed428bc13e669"
+$nefconUrl = "https://github.com/nefarius/nefcon/releases/download/v1.15.31/nefcon_x86_amd64_arm64.zip"
+$expectedNefconSha256 = "80497179699810ec346649292cbbf66d57f7ef11d0c9ad8c24b86b777d4c93d8"
 $logDirectory = Join-Path $env:ProgramData "Bridge\Logs"
 $transcriptPath = Join-Path $logDirectory "installer-vdd.log"
 New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
@@ -46,7 +46,7 @@ if (-not $PSCmdlet.ShouldProcess("VirtualDrivers VDD 25.7.23", "Download, verify
 New-Item -ItemType Directory -Path $DownloadDirectory -Force | Out-Null
 $archive = Join-Path $DownloadDirectory "VirtualDisplayDriver-x86.Driver.Only.zip"
 $extract = Join-Path $DownloadDirectory "package"
-$nefconArchive = Join-Path $DownloadDirectory "nefcon_v1.14.0.zip"
+$nefconArchive = Join-Path $DownloadDirectory "nefcon_x86_amd64_arm64.zip"
 $nefconExtract = Join-Path $DownloadDirectory "nefcon"
 if (Test-Path -LiteralPath $extract) { Remove-Item -LiteralPath $extract -Recurse -Force }
 if (Test-Path -LiteralPath $nefconExtract) { Remove-Item -LiteralPath $nefconExtract -Recurse -Force }
@@ -89,7 +89,7 @@ if ($existingPackages.Count -gt 0) {
 
 # NefCon is the open-source DevCon-compatible root-device installer used by
 # the upstream VDD project's own silent-install instructions. Pin its release.
-Write-Host "Downloading the pinned NefCon root-device installer..."
+Write-Host "Downloading the pinned NefCon v1.15.31 root-device installer..."
 Invoke-WebRequest -Uri $nefconUrl -OutFile $nefconArchive -UseBasicParsing
 $nefconHash = (Get-FileHash -LiteralPath $nefconArchive -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($nefconHash -ne $expectedNefconSha256) { throw "NefCon archive SHA-256 mismatch. Expected $expectedNefconSha256; received $nefconHash. Nothing was executed." }
