@@ -222,10 +222,23 @@ internal class BridgePairingController(
             require(fingerprint.matches(Regex("[0-9a-fA-F]{64}"))) {
                 "Trusted-device record $index has an invalid fingerprint"
             }
-            val attestationPublicKey = item.optString("attestation_public_key").takeIf { it.isNotBlank() }
-            require(attestationPublicKey == null || attestationPublicKey.matches(Regex("[0-9a-fA-F]{64}"))) {
-                "Trusted-device record $index has an invalid attestation public key"
+            // JSONObject.NULL is not an empty string: optString() may turn it into
+            // the literal "null". Older Bridge builds persisted nullable keys this way.
+            // A malformed optional attestation pin must never crash service startup.
+            val rawAttestationKey = if (item.isNull("attestation_public_key")) {
+                ""
+            } else {
+                item.optString("attestation_public_key", "")
             }
+            val attestationPublicKey = rawAttestationKey
+                .takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
+                ?.takeIf { key ->
+                    val valid = key.matches(Regex("[0-9a-fA-F]{64}"))
+                    if (!valid) {
+                        BridgeDiagnostics.record("pairing", "Ignoring malformed attestation key in trusted-device record $index; Noise fingerprint trust remains intact.")
+                    }
+                    valid
+                }
             BridgeTrustedDevice(deviceId, name, platform, fingerprint, item.optLong("paired_at"), attestationPublicKey)
         }
 
