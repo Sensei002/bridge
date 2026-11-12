@@ -49,7 +49,8 @@ Architecture and acceptance gates: [docs/second-screen-architecture.md](second-s
 
 ### Windows virtual display foundation
 - [x] Select upstream VirtualDrivers Virtual Display Driver (VDD) as Bridge's Windows virtual-monitor dependency; stop developing/signing a Bridge-owned IddCx driver.
-- [x] Select upstream x64 driver-only release 24.10.27 after the newer 25.7.23 package failed the x64 architecture gate; pin its archive digest after CI verification.
+- [x] Select upstream x64 driver-only release 24.10.27 after the newer 25.7.23 package failed the x64 architecture gate.
+- [ ] Pin and enforce the x64 archive SHA-256 after the first Windows CI verification run.
 - [x] Add CI validation for the upstream archive, driver INF/catalog presence, and Windows catalog signature.
 - [ ] Confirm exact x64 driver package contents, signer identity, and binary redistribution permissions before bundling.
 - [ ] Replace Bridge-specific driver IOCTL control with a supported VDD lifecycle/control integration.
@@ -60,7 +61,7 @@ Architecture and acceptance gates: [docs/second-screen-architecture.md](second-s
 - [ ] Validate Windows Extend mode on a physical Windows machine: move ordinary application windows onto the Android display.
 
 ### Real-time desktop media pipeline
-- [ ] Receive IddCx Direct3D swap-chain frames without blocking display composition.
+- [ ] Capture the selected VDD virtual output through DXGI Desktop Duplication or Windows Graphics Capture without blocking display composition.
 - [ ] Add GPU-assisted H.264 hardware encoding and bounded frame queues.
 - [ ] Add a dedicated low-latency media transport authenticated to the trusted Bridge device identity.
 - [ ] Add adaptive bitrate, frame pacing, timestamps, and packet-loss recovery.
