@@ -4,25 +4,17 @@
 
 Bridge will use an existing signed x64 VDD package instead of maintaining a Bridge-specific IddCx/UMDF driver.
 
-### Preferred candidate under inspection: VirtualDrivers VDD 25.7.23
+## Selected driver: VirtualDrivers VDD 25.7.23
 
 - Upstream: https://github.com/VirtualDrivers/Virtual-Display-Driver
 - Package: `VDD.Control.25.7.23.zip`
 - Archive SHA-256: `a701f2272e9fcf382849b24f913c6dd07597b3b1116525f2e90182f019609154`
-- CI confirms the catalog is signed by SignPath Foundation.
-- The archive stores the package under an `x86` folder. CI now reads the PE machine field from `MttVDD.dll` to determine whether the binary is AMD64; the folder label alone is not enough to decide.
+- Driver path in the package: `SignedDrivers\\x86\\VDD\\`
+- The DLL at that path is verified as AMD64 (PE machine `0x8664`); the folder name is misleading.
+- Catalog signer: SignPath Foundation; thumbprint `3CF8CF26D8BA266C3A483AB7D26D4A818E317D76`.
+- CI verifies the archive hash, AMD64 PE architecture, and catalog signature. A further gate verifies the INF and DLL using Windows kernel-mode catalog policy (`signtool verify /kp`).
 
-### Signed x64 fallback: Parsec VDD 0.45.1
-
-- Integration project: https://github.com/nomi-san/parsec-vdd
-- Package: `ParsecVDisplay-v0.45-portable.zip`
-- Archive SHA-256: `9792e4121d85ed3e4c40c2d8ba36ec8657e13227a8357d719d923e801238ccdd`
-- CI extracts its driver package and verifies the x64 INF/DLL and Microsoft Windows Hardware Compatibility Publisher catalog signature.
-- Its companion ParsecDisplay application is unsigned and will not be bundled or executed.
-- Parsec VDD requires a keepalive ping about every 100 ms (never more than 200 ms apart); if pings stop for about one second, the virtual display is removed.
-- Parsec owns the driver binary; confirm redistribution terms before bundling. Prefer the VirtualDrivers MIT-licensed driver if the PE architecture check confirms AMD64.
-
-Bridge must use the selected vendor-supplied driver package unchanged. Do not build, modify, catalog-sign, or certificate-sign a Bridge-owned display driver. Do not install a Bridge-owned root certificate or ask users to enable test signing / disable Secure Boot. Do not build, modify, catalog-sign, or certificate-sign a Bridge-owned display driver. Do not install a Bridge-owned root certificate or ask users to enable test signing / disable Secure Boot. Do not build, modify, catalog-sign, or certificate-sign a Bridge-owned display driver. Do not install a Bridge-owned root certificate or ask users to enable test signing / disable Secure Boot.
+Bridge must use the selected vendor-supplied driver package unchanged. Do not build, modify, catalog-sign, or certificate-sign a Bridge-owned display driver. Do not install a Bridge-owned root certificate or ask users to enable test signing / disable Secure Boot. Do not build, modify, catalog-sign, or certificate-sign a Bridge-owned display driver. Do not install a Bridge-owned root certificate or ask users to enable test signing / disable Secure Boot. Do not build, modify, catalog-sign, or certificate-sign a Bridge-owned display driver. Do not install a Bridge-owned root certificate or ask users to enable test signing / disable Secure Boot. Do not build, modify, catalog-sign, or certificate-sign a Bridge-owned display driver. Do not install a Bridge-owned root certificate or ask users to enable test signing / disable Secure Boot.
 
 ## Important integration boundary
 
