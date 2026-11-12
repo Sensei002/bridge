@@ -213,9 +213,7 @@ fn platform_name(platform: &Platform) -> &'static str {
     match platform {
         Platform::Windows => "windows",
         Platform::Android => "android",
-        Platform::Ios => "ios",
         Platform::Linux => "linux",
-        Platform::Macos => "macos",
         Platform::Unknown => "unknown",
     }
 }
@@ -224,9 +222,7 @@ fn parse_platform(value: &str) -> Option<Platform> {
     match value {
         "windows" => Some(Platform::Windows),
         "android" => Some(Platform::Android),
-        "ios" => Some(Platform::Ios),
         "linux" => Some(Platform::Linux),
-        "macos" => Some(Platform::Macos),
         "unknown" => Some(Platform::Unknown),
         _ => None,
     }

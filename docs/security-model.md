@@ -6,16 +6,16 @@ Bridge is local-first and permission-first. Discovery is never proof of identity
 
 - Device descriptors are version-validated and exchanged only inside an authenticated encrypted session.
 - The shared Rust network layer uses Noise XX with Curve25519, ChaChaPoly, SHA-256 fingerprints, bounded length-prefixed TCP frames, socket timeouts, and replay-resistant transport counters.
-- Windows, Android, and iOS persist per-installation static identity keys in Windows Credential Manager, Android Keystore-wrapped storage, and iOS Keychain respectively.
-- Windows advertises DNS-SD; Android publishes/browses through NSD; iOS publishes/browses through Bonjour. Discovery metadata remains untrusted.
-- All three native clients can initiate or accept the shared Rust Noise XX handshake and exchange authenticated device descriptors. A new incoming peer appears as a receiver-side approval popup. Accept/reject is sent back inside the encrypted session; the initiating client does not save trust until it receives acceptance.
+- Windows and Android persist per-installation static identity keys in Windows Credential Manager and Android Keystore-wrapped storage.
+- Windows advertises DNS-SD and Android publishes/browses through NSD. Discovery metadata remains untrusted.
+- Both supported native clients can initiate or accept the shared Rust Noise XX handshake and exchange authenticated device descriptors. A new incoming peer appears as a receiver-side approval popup. Accept/reject is sent back inside the encrypted session; the initiating client does not save trust until it receives acceptance.
 - Reconnection to an existing trusted device pins its stored fingerprint. A changed fingerprint is rejected.
-- Trusted-device records and revocation persist on each platform: Windows stores public fingerprints in an app-local trust registry; Android encrypts the registry with an Android Keystore AES-GCM key; iOS stores it in Keychain with device-only accessibility. Revocation closes active sessions.
-- The Rust mobile FFI has loopback integration tests covering pairing and encrypted message exchange. CI builds the native Windows app, Android APK, iOS Simulator app, and shared Rust workspace.
+- Trusted-device records and revocation persist on both supported platforms: Windows stores public fingerprints in an app-local trust registry; Android encrypts the registry with an Android Keystore AES-GCM key. Revocation closes active sessions.
+- The Rust mobile FFI has loopback integration tests covering pairing and encrypted message exchange. CI builds the native Windows app, Android APK, and shared Rust workspace.
 
 ## Milestone 1 validation status
 
-The Windows + Android target has passed user-reported physical-device testing for discovery, bidirectional pairing, receiver approval, trusted reconnection, app restart/reconnection, Wi-Fi disconnect/reconnect, and firewall/network permissions. iOS Simulator CI builds pass, but iOS physical-device interoperability is unverified. Linux desktop testing is deferred until a Linux environment is available.
+The Windows + Android target has passed user-reported physical-device testing for discovery, bidirectional pairing, receiver approval, trusted reconnection, app restart/reconnection, Wi-Fi disconnect/reconnect, and firewall/network permissions. Linux desktop testing is planned for a future milestone.
 
 The following remain recommended follow-up work before a broad public release: broader router/AP-isolation and IPv6 coverage, lifecycle/resource-limit stress testing, and an independent security review of discovery parsing, first-use trust approval, Noise identity pinning, trust persistence, and revocation.
 

@@ -49,28 +49,10 @@ jobs:
             apps/android/app/build/outputs/apk/release/*.apk
             apps/android/app/build/outputs/bundle/release/*.aab
 
-  ios:
-    name: iOS device archive (unsigned)
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: brew install xcodegen
-      - working-directory: apps/ios
-        run: xcodegen generate
-      - name: Archive for iOS device
-        working-directory: apps/ios
-        run: xcodebuild -project Bridge.xcodeproj -scheme Bridge -destination 'generic/platform=iOS' -archivePath Bridge.xcarchive CODE_SIGNING_ALLOWED=NO archive
-      - name: Zip archive
-        working-directory: apps/ios
-        run: zip -r Bridge-iOS-unsigned.xcarchive.zip Bridge.xcarchive
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ios-unsigned-archive
-          path: apps/ios/Bridge-iOS-unsigned.xcarchive.zip
 
   publish:
     name: Publish GitHub Release
-    needs: [windows, android, ios]
+    needs: [windows, android]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
