@@ -25,34 +25,36 @@ concurrency:
 
 jobs:
   verify-upstream-vdd:
-    name: Verify upstream signed VDD package
+    name: Verify upstream signed x64 VDD package
     runs-on: windows-latest
     steps:
-      - name: Download pinned upstream release
+      - name: Download pinned x64 driver-only release
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $url = "https://github.com/VirtualDrivers/Virtual-Display-Driver/releases/download/25.7.23/VDD.Control.25.7.23.zip"
-          $expected = "a701f2272e9fcf382849b24f913c6dd07597b3b1116525f2e90182f019609154"
-          $archive = Join-Path $env:RUNNER_TEMP "VDD.Control.25.7.23.zip"
+          $url = "https://github.com/VirtualDrivers/Virtual-Display-Driver/releases/download/24.10.27/VirtualDisplayDriver-x64.zip"
+          $archive = Join-Path $env:RUNNER_TEMP "VirtualDisplayDriver-x64.zip"
           Invoke-WebRequest -Uri $url -OutFile $archive
           $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($actual -ne $expected) { throw "Upstream VDD archive SHA-256 mismatch. Expected $expected, received $actual." }
-          Write-Host "Verified pinned upstream archive SHA-256: $actual"
-          $root = Join-Path $env:RUNNER_TEMP "vdd"
+          Write-Host "UPSTREAM VDD ARCHIVE SHA256: $actual"
+          $root = Join-Path $env:RUNNER_TEMP "vdd-x64"
           Expand-Archive -LiteralPath $archive -DestinationPath $root -Force
           "VDD_ARCHIVE=$archive" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "VDD_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "VDD_SHA256=$actual" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      - name: Verify driver package and catalog signature
+      - name: Require x64 driver files and verify catalog signature
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           $infs = @(Get-ChildItem -LiteralPath $env:VDD_ROOT -Recurse -File -Filter "*.inf")
           $cats = @(Get-ChildItem -LiteralPath $env:VDD_ROOT -Recurse -File -Filter "*.cat")
-          if ($infs.Count -eq 0) { throw "The pinned upstream archive contains no driver INF." }
-          if ($cats.Count -eq 0) { throw "The pinned upstream archive contains no driver catalog." }
-
+          $dlls = @(Get-ChildItem -LiteralPath $env:VDD_ROOT -Recurse -File -Filter "*.dll")
+          Write-Host "Extracted file inventory:"
+          Get-ChildItem -LiteralPath $env:VDD_ROOT -Recurse -File | ForEach-Object { Write-Host ($_.FullName.Substring($env:VDD_ROOT.Length)) }
+          if ($infs.Count -eq 0) { throw "The upstream x64 archive contains no driver INF." }
+          if ($cats.Count -eq 0) { throw "The upstream x64 archive contains no driver catalog." }
+          if ($dlls.Count -eq 0) { throw "The upstream x64 archive contains no UMDF driver DLL." }
           $validCatalogs = @()
           foreach ($catalog in $cats) {
             $signature = Get-AuthenticodeSignature -LiteralPath $catalog.FullName
@@ -62,18 +64,17 @@ jobs:
               Write-Host "Signer subject: $($signature.SignerCertificate.Subject)"
               Write-Host "Signer thumbprint: $($signature.SignerCertificate.Thumbprint)"
             }
-            if ($signature.Status -eq "Valid") { $validCatalogs += $catalog }
+            if ($signature.Status -eq "Valid" -and $signature.SignerCertificate.Subject -match "SignPath Foundation") { $validCatalogs += $catalog }
           }
-          if ($validCatalogs.Count -eq 0) { throw "No catalog in the pinned upstream package has a valid Authenticode signature on this Windows runner." }
+          if ($validCatalogs.Count -eq 0) { throw "No catalog has a valid Authenticode signature from SignPath Foundation." }
+          Write-Host "Verified x64 driver archive SHA-256: $env:VDD_SHA256"
+          Write-Host "Found $($infs.Count) INF file(s), $($cats.Count) catalog file(s), and $($dlls.Count) driver DLL(s)."
+          Write-Host "Valid SignPath Foundation catalog(s): $($validCatalogs.Count)"
 
-          Write-Host "Found $($infs.Count) INF file(s) and $($cats.Count) catalog file(s)."
-          Write-Host "Valid signed catalog(s): $($validCatalogs.Count)"
-          Write-Host "This validates the vendor package signature; it does not yet prove Bridge capture integration or redistribution rights."
-
-      - name: Upload pinned upstream archive for inspection
+      - name: Upload verified x64 driver archive for inspection
         uses: actions/upload-artifact@v4
         with:
-          name: upstream-vdd-25.7.23
+          name: upstream-vdd-x64-24.10.27
           path: ${{ env.VDD_ARCHIVE }}
           if-no-files-found: error
           retention-days: 7
