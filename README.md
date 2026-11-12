@@ -65,7 +65,7 @@ Every push to `main` and every pull request validates Rust and builds:
 
 Push a version tag such as `v0.2.0` to build release assets and publish a GitHub Release automatically.
 
-**Windows driver note:** Bridge is evaluating the signed upstream VirtualDrivers VDD 25.7.23 package first; CI verifies its SignPath catalog and inspects the PE architecture of its x86-labeled DLL. Parsec VDD 0.45.1 is the verified x64 fallback. Bridge will not build or sign its own IddCx driver. Driver bundling remains gated on confirming redistribution permissions. Bridge's Windows desktop/MSI/service binaries may still need their own application code-signing strategy, which is separate from display-driver signing. See [Second Screen architecture](docs/second-screen-architecture.md).
+**Windows driver note:** Bridge uses the signed upstream VirtualDrivers VDD 25.7.23 package (AMD64 driver binary verified by CI, despite its `x86` folder name). CI verifies the SignPath catalog and is adding a Windows kernel-mode signature-policy check. Bridge will not build or sign its own IddCx driver. Driver bundling remains gated on confirming redistribution permissions. Bridge's Windows desktop/MSI/service binaries may still need their own application code-signing strategy, which is separate from display-driver signing. See [Second Screen architecture](docs/second-screen-architecture.md).
 
 ## Windows desktop technology
 
