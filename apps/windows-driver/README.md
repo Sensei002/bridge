@@ -1,32 +1,39 @@
-# Bridge Windows Indirect Display Driver
+# Bridge Windows virtual display integration
 
-This directory contains Bridge's development IddCx/UMDF virtual-display driver.
+## Driver decision
 
-## Current implementation
+Bridge will use an existing signed x64 VDD package instead of maintaining a Bridge-specific IddCx/UMDF driver.
 
-- Based on Microsoft's pinned IddSampleDriver reference implementation.
-- Uses a Bridge-specific root hardware ID and UMDF DeviceGroupId.
-- Builds the x64 UMDF driver package in GitHub Actions with a matched Windows SDK/WDK toolchain.
-- Exposes one Bridge-branded, EDID-less virtual monitor only on explicit service request.
-- Provides a versioned IddCx IOCTL contract for connect, disconnect, and status queries.
-- Restricts the driver interface to LocalSystem and local administrators.
-- Advertises an initial portrait mode profile: 1080x2340@60, 720x1560@60, and 540x1170@60.
-- Uploads an unsigned package for pull-request validation; trusted release builds will sign the catalog with the protected Bridge certificate once the signing secrets are configured.
+## Selected driver: VirtualDrivers VDD 25.7.23
 
-## Scope and limitations
+- Upstream: https://github.com/VirtualDrivers/Virtual-Display-Driver
+- Package: `VirtualDisplayDriver-x86.Driver.Only.zip`
+- Archive SHA-256: `e24210692b442b39af763536330ce78b423f19342b7a7792c26de3944e418b3a`
+- Driver-only archive contains `MttVDD.dll`, `MttVDD.inf`, and `mttvdd.cat` without the companion VDD Control app.
+- The DLL in this archive is verified as AMD64 (PE machine `0x8664`); the archive's `x86` label is misleading.
+- Catalog signer: SignPath Foundation; thumbprint `3CF8CF26D8BA266C3A483AB7D26D4A818E317D76`.
+- CI verifies the archive hash, AMD64 PE architecture, and catalog signature. CI verifies the INF and DLL using Windows PnP package policy (`signtool verify /pa`). This is a UMDF user-mode driver; kernel-mode `/kp` is not applicable. Physical installation and driver loading still need hardware validation.
 
-- The adapter initializes without a monitor. The privileged Bridge Display Service uses the control interface to request monitor arrival and departure.
-- The service executable, service installer, authenticated-session binding, and service-side watchdog are not implemented in this milestone.
-- The modes are an initial driver-side capability list, not a guarantee that the current Android decoder/network path can sustain them. Runtime capability negotiation must gate production use.
-- The Bridge-specific swap-chain loop acquires IddCx Direct3D surfaces, performs bounded BGRA8 staging readback, and publishes the latest frame through the Bridge frame sink. H.264 encoding and authenticated delivery are owned by the Windows service/desktop pipeline, not by the driver.
-- The current CI artifact is unsigned and is not ready for installation. The target signing design uses a stable Bridge-owned certificate stored as protected GitHub Actions secrets. The signed catalog and public certificate will be packaged only from trusted release builds. A self-signed certificate does not guarantee acceptance under every Windows security configuration; validate on clean Windows machines without disabling Secure Boot or Memory Integrity. Do not install the current unsigned package on a daily-use PC.
+Bridge must use the selected vendor-supplied driver package unchanged. Do not build, modify, catalog-sign, or certificate-sign a Bridge-owned display driver. Do not install a Bridge-owned root certificate or ask users to enable test signing / disable Secure Boot. Do not build, modify, catalog-sign, or certificate-sign a Bridge-owned display driver. Do not install a Bridge-owned root certificate or ask users to enable test signing / disable Secure Boot. Do not build, modify, catalog-sign, or certificate-sign a Bridge-owned display driver. Do not install a Bridge-owned root certificate or ask users to enable test signing / disable Secure Boot. Do not build, modify, catalog-sign, or certificate-sign a Bridge-owned display driver. Do not install a Bridge-owned root certificate or ask users to enable test signing / disable Secure Boot.
 
-## Upstream source and license
+## Important integration boundary
 
-- Repository: https://github.com/microsoft/Windows-driver-samples
-- Sample: `video/IndirectDisplay/IddSampleDriver`
-- Pinned commit: `d49bb7d72f3651952b2b6e4ad28d14fe2247eb69`
-- License: Microsoft Public License (MS-PL), reproduced in [THIRD_PARTY_LICENSE.txt](IddSampleDriver/THIRD_PARTY_LICENSE.txt)
+VDD is responsible for creating a real Windows virtual monitor. Bridge remains responsible for:
 
-Bridge-specific monitor configuration, INF identity, and project metadata are maintained separately from the upstream sample. Upstream copyright and license notices are retained.
-\n\n## Why Bridge keeps its own IddCx implementation\n\nThe VirtualDrivers Virtual Display Driver is a useful reference for monitor configuration, but its current upstream swap-chain loop explicitly leaves frame processing as a TODO and releases acquired surfaces without publishing desktop frames. Its signed binary is therefore not a drop-in replacement for Bridge: Bridge requires a frame source connected to its authenticated Windows service and Android H.264 pipeline. Replacing the Bridge driver with that unmodified binary would create a monitor but would not complete Second Screen. Keep the Bridge-specific IddCx driver and improve its installer/signing path; reuse upstream code only after a concrete, tested integration proves equivalent frame delivery and lifecycle behavior.\n
+1. Selecting the VDD output in Windows display topology.
+2. Capturing that specific output with DXGI Desktop Duplication or Windows Graphics Capture.
+3. Feeding captured frames to Bridge's existing H.264 encoder and authenticated Android stream.
+4. Tying capture and monitor lifecycle to the trusted Android session.
+5. Installing/updating/removing VDD safely from the Bridge installer.
+
+A monitor appearing in Windows is not enough: Second Screen is complete only when the user can select **Extend** and move ordinary windows onto the Android display, with those windows rendered on the phone.
+
+## CI and packaging
+
+`.github/workflows/windows-driver.yml` validates the candidate x64 archive, extracted INF/catalog/DLL files, and catalog signature on Windows. The package is not accepted until its archive hash and signer are pinned and its redistribution conditions are reviewed. The workflow does not compile or sign a Bridge driver.
+
+The upstream release archive is a third-party dependency. Before distributing it inside Bridge, verify the exact x64 package contents and redistribution rights for every bundled component, and preserve all upstream notices. Source-code MIT licensing does not automatically settle every binary/companion-app redistribution question.
+
+## Migration status
+
+The old `IddSampleDriver` source remains temporarily in this repository as a migration reference. It is no longer the selected product driver and must not be used for release builds or installation. Remove the legacy project and its signing secrets/workflows after the upstream capture/control integration is proven.

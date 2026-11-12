@@ -8,15 +8,37 @@ This is not desktop mirroring, a remote-control window, Miracast casting, or a v
 
 ## Windows display architecture
 
-Use Microsoft's **Indirect Display Driver (IDD) model through IddCx**.
+Bridge will **reuse the upstream VirtualDrivers Virtual Display Driver (VDD)**. Bridge will not maintain, compile, or sign its own IddCx/UMDF driver.
 
-- Build a dedicated Windows Indirect Display Driver using the Windows Driver Kit (WDK), C++, UMDF, and IddCx.
-- The driver creates the indirect display adapter without an attached monitor. A restricted IddCx IOCTL control plane accepts connect, disconnect, and status operations from the privileged Bridge Display Service; the service will issue arrival only for a trusted Android display session and departure on disconnect.
-- Consume the IddCx swap-chain frames using Direct3D. Keep frame processing bounded and non-blocking; do not perform network waits or expensive encoding work on the swap-chain callback thread.
-- The driver is a **user-mode UMDF driver**, not a custom kernel-mode graphics driver. Microsoft explicitly documents that IDD uses UMDF and does not support kernel-mode components. It receives the desktop image as a DirectX surface suitable for processing/encoding.
-- Do not inject into DWM, hook games, scrape the desktop with GDI, or implement a display miniport from scratch.
+- Selected dependency: **VirtualDrivers Virtual Display Driver 25.7.23**.
+- CI verified that the driver-only archive's `MttVDD.dll` is an **AMD64** PE image (`0x8664`), despite the archive's `x86` label.
+- CI verified the driver catalog is valid and signed by **SignPath Foundation** (thumbprint `3CF8CF26D8BA266C3A483AB7D26D4A818E317D76`).
+- Bridge will consume the upstream driver-only archive `VirtualDisplayDriver-x86.Driver.Only.zip`; its pinned SHA-256 is `e24210692b442b39af763536330ce78b423f19342b7a7792c26de3944e418b3a`.
+- The older 24.10.27 x64-only ZIP was rejected because Windows reported its catalog as `NotSigned`; use the 25.7.23 package instead.
+- This is a UMDF user-mode driver, so CI verifies the INF and driver DLL against Windows PnP package-signing policy with SignTool `/pa`. Kernel-mode `/kp` is not the applicable policy for this UMDF DLL.
+- No test-signing mode, Secure Boot change, Bridge-owned driver certificate, or Bridge root-certificate import is permitted.
 
-The official Microsoft IddSampleDriver is the starting reference for adapter/monitor lifecycle, mode negotiation, swap-chain assignment, and frame processing. It is a sample, not production-ready code; its INF and frame-processing loop need real implementation and review.\n\n### Driver reuse decision\n\nBridge retains its Bridge-specific IddCx/UMDF driver for the initial Second Screen release. The upstream VirtualDrivers Virtual Display Driver is MIT-licensed and has a signed published package, but its current swap-chain processor still marks frame processing as a TODO and releases the acquired surface without exporting frames. Its unmodified package can create a virtual monitor but cannot feed Bridge's authenticated frame pipeline. Adopting it would not remove the frame-integration work and would split monitor control from Bridge's existing service/IOCTL contract. Re-evaluate upstream reuse only if a tested adapter preserves Bridge frame delivery, authenticated lifecycle control, and reliable uninstall/upgrade behavior.\n\n### One-installer product requirement\n\nThe Windows distribution must be a single Bridge installer that installs the desktop app, Bridge Display Service, and the signed Bridge IddCx driver package. The installer must request administrator approval once for machine-wide service/driver setup, verify package signatures and hashes before staging, install the service with a protected Program Files binary and recovery policy, and support upgrade, rollback, and clean removal. The normal Bridge UI remains unprivileged; users must not need a separate virtual-display control application, manual Device Manager steps, test-signing mode, Secure Boot changes, or a separately downloaded driver. Do not ship a driver package until its signing/distribution path is valid on clean Windows 10/11 systems.\n
+### Required Bridge integration
+
+VDD creates and manages the Windows virtual monitor. It does **not** automatically deliver frames into Bridge's authenticated video pipeline. Bridge must implement a separate capture adapter:
+
+1. Identify the VDD-created display using Windows display topology APIs (not a hard-coded display index).
+2. Capture only that virtual output using a supported Windows capture API. Prototype DXGI Desktop Duplication first; evaluate Windows Graphics Capture if the virtual output is not exposed reliably.
+3. Convert/crop/scale captured frames into the existing bounded frame pipeline and Media Foundation H.264 encoder.
+4. Send encoded frames through the existing authenticated Bridge session to Android's MediaCodec renderer.
+5. Keep capture tied to the active, attested Android session; stop capture and disable/remove the virtual output on disconnect or lease expiry.
+6. Validate monitor hotplug, mode changes, GPU reset, sleep/resume, multi-monitor layouts, and capture recovery.
+
+**No mirror-only fallback counts as completion.** The acceptance gate remains: Windows Settings > System > Display lists the VDD monitor, the user selects Extend, and ordinary application windows can be moved onto the Android display.
+
+### Third-party driver lifecycle and licensing
+
+- Pin the upstream release and its archive hash; do not download an unpinned "latest" package at install time.
+- Preserve upstream copyright and license notices in Bridge's third-party notices.
+- Verify the selected release's redistribution terms and exact signed package contents before embedding it in Bridge's installer. MIT licensing of the source repository does not, by itself, prove that every bundled binary or companion application can be redistributed.
+- Install the vendor-supplied signed driver package through an elevated, rollback-capable installer. Do not install it by importing a Bridge-generated certificate or re-signing the catalog.
+- Provide clean uninstall and recovery if driver installation fails. The upstream VDD exposes a local named-pipe control endpoint (`\\.\\pipe\\MTTVirtualDisplayPipe`) with `SETDISPLAYCOUNT` and `PING` commands. Bridge must implement a narrow client, validate Windows display topology after changes, and account for the pipe's broad local ACL. Never forward this pipe to Android or expose it over the network.
+- Keep the current Bridge IddCx implementation only as a temporary migration reference. It must not be built, signed, installed, or shipped in the new path.
 
 ## Windows application and service split
 
@@ -26,15 +48,15 @@ Introduce separate components:
 
 1. **Bridge desktop UI (existing Rust/egui app):** normal interactive user-session app. Owns device selection, permissions, display settings, connect/disconnect actions, status, and diagnostics.
 2. **Bridge Display Service (Windows service):** privileged boundary for driver lifecycle, authenticated session coordination, media transport, encoder orchestration, recovery, and Windows service startup/shutdown. Expose a narrow, ACL-protected named-pipe API to the desktop UI. Run with the least privilege compatible with driver communication; do not default to LocalSystem without a demonstrated need.
-3. **Bridge Indirect Display Driver (C++/UMDF/IddCx):** owns the virtual display adapter, monitor PnP lifecycle, mode negotiation, and Direct3D swap-chain acquisition. It must not own UI, pairing consent, or Android application logic.
+3. **Selected upstream Virtual Display Driver (third-party signed package):** owns the virtual display adapter, monitor PnP lifecycle, and mode negotiation. Bridge does not build or sign this driver. Bridge's capture adapter reads the resulting virtual output through Windows display/capture APIs.
 
 Driver installation and device configuration require elevation. Normal use of the desktop UI should not require running the whole app as administrator. Package the driver and service with the Windows installer only after installation, upgrade, rollback, and uninstall behaviour are defined.
 
-### Display service control boundary (implemented development path)
+### Display service control boundary (migration in progress)
 
 The Rust service in `apps/windows-service` exposes a versioned local named-pipe protocol (`\\.\pipe\BridgeDisplayService`). The unprivileged desktop client uses that pipe for Android attestation, short-lived lease renewal, driver connect/disconnect, frame reads, and read-only driver status queries. The service attributes each pipe client to a live process image, verifies the configured desktop publisher, verifies the Android signature against the pairing-pinned key, and binds the resulting 15-second lease to that process and Android fingerprint. Driver mutations and frame reads require the exact active lease. The pipe is local-only and ACL-protected; the driver interface remains restricted to LocalSystem and local administrators.
 
-The desktop Second Screen panel now exposes a read-only **Refresh monitor status** action. It reports whether the IddCx driver currently has a virtual monitor connected and how many modes the driver advertises. It does not bypass attestation or change driver state.
+The desktop Second Screen panel currently exposes a read-only **Refresh monitor status** action for the legacy Bridge driver. It must be updated to report the upstream VDD device and actual Windows display topology. It does not bypass attestation or change driver state.
 
 The service is packaged with the per-user MSI as an executable and administrator-run setup scripts. The MSI does not silently register a privileged service. Installation remains an explicit elevated action, with Authenticode verification enabled by default. This is still a development integration path: successful CI builds do not establish that a physical Windows machine has the driver and service correctly installed or that a monitor appears in Windows Display Settings. The detailed publisher-verification, one-time Noise-session challenge, ephemeral attestation, lease-renewal, replay-protection, and fail-closed requirements remain documented in [Windows Display Service Authentication Design](windows-service-authentication.md).
 
@@ -43,7 +65,7 @@ The service is packaged with the per-user MSI as an executable and administrator
 Target a low-latency hardware-assisted pipeline:
 
 1. Windows composes the extended desktop onto the virtual monitor.
-2. IddCx supplies Direct3D swap-chain surfaces.
+2. Windows exposes the VDD-created monitor as a display output; Bridge identifies it through display topology APIs and captures only that output with DXGI Desktop Duplication (or Windows Graphics Capture if required).
 3. A dedicated frame pipeline uses GPU surfaces and hardware video encoding where available (Media Foundation hardware MFT first; vendor-specific paths only if justified). Avoid CPU readback/copy on every frame.
 4. Send timestamped, sequenced video frames over a dedicated real-time media transport, separate from file-transfer traffic. Do not put a continuous high-frame-rate video stream behind the existing TCP file-transfer queue.
 5. Authenticate the media peer against the already trusted Bridge device identity. Reuse established cryptographic primitives or a standard authenticated transport; do not invent a new encryption scheme.

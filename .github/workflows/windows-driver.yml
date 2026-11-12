@@ -1,301 +1,96 @@
-name: Windows Indirect Display Driver
+name: Windows Virtual Display Driver (upstream)
 
-# CI queue recovery: harmless comment-only change to request a fresh run.
 on:
   pull_request:
     paths:
-      - "apps/windows-driver/**"
-      - "scripts/windows/Install-BridgeIddCxDriver.ps1"
       - ".github/workflows/windows-driver.yml"
+      - "apps/windows-driver/**"
+      - "docs/second-screen-architecture.md"
+      - "apps/windows-driver/README.md"
   push:
     branches: [development, stable]
     paths:
-      - "apps/windows-driver/**"
-      - "scripts/windows/Install-BridgeIddCxDriver.ps1"
       - ".github/workflows/windows-driver.yml"
+      - "apps/windows-driver/**"
+      - "docs/second-screen-architecture.md"
+      - "apps/windows-driver/README.md"
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: bridge-windows-driver-${{ github.ref }}
+  group: bridge-upstream-vdd-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  build-iddcx:
-    name: Build x64 IddCx UMDF package
-    runs-on: windows-2025-vs2026
+  verify-upstream-vdd:
+    name: Verify signed VirtualDrivers AMD64 driver-only package
+    runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Validate driver installation script syntax
+      - name: Download VirtualDrivers 25.7.23 driver-only package
         shell: pwsh
-        run: |
-          $path = "scripts/windows/Install-BridgeIddCxDriver.ps1"
-          if (-not (Test-Path -LiteralPath $path)) { throw "Missing driver installer: $path" }
-          [void][scriptblock]::Create((Get-Content -LiteralPath $path -Raw))
-          Write-Host "PowerShell syntax valid: $path"
-
-      - name: Reject manual runs from untrusted branches
-        if: github.event_name == 'workflow_dispatch'
-        shell: pwsh
-        run: |
-          $trustedRefs = @("refs/heads/development", "refs/heads/stable")
-          if ($env:GITHUB_REF -notin $trustedRefs) {
-            throw "Manual driver builds are permitted only from development or stable."
-          }
-
-      - uses: microsoft/setup-msbuild@v2
-        with:
-          msbuild-architecture: x64
-
-      - name: Set up NuGet
-        uses: NuGet/setup-nuget@v2
-
-      - name: Restore Microsoft Windows SDK and WDK packages
-        shell: pwsh
-        run: |
-          nuget restore apps/windows-driver/packages.config -PackagesDirectory apps/windows-driver/packages
-          if ($LASTEXITCODE -ne 0) { throw "Windows SDK/WDK NuGet restore failed (exit $LASTEXITCODE)." }
-
-      - name: Locate StampInf from restored WDK tools
-        shell: pwsh
-        run: |
-          $roots = @(
-            "apps/windows-driver/packages",
-            "${env:ProgramFiles(x86)}\Windows Kits\10",
-            "${env:ProgramFiles}\Windows Kits\10"
-          ) | Where-Object { $_ -and (Test-Path $_) }
-
-          $stampInf = Get-ChildItem -Path $roots -Recurse -File -Filter "stampinf.exe" -ErrorAction SilentlyContinue |
-            Where-Object { $_.FullName -match "\\(x86|x64)\\stampinf\.exe$" } |
-            Select-Object -First 1
-
-          if (-not $stampInf) {
-            throw "stampinf.exe is missing from the restored WDK package and installed Windows Kits."
-          }
-
-          $stampInfDirectory = $stampInf.DirectoryName
-          Write-Host "Using StampInf: $($stampInf.FullName)"
-          Add-Content -Path $env:GITHUB_PATH -Value $stampInfDirectory
-          Add-Content -Path $env:GITHUB_ENV -Value "STAMPINF_TOOL_PATH=$stampInfDirectory"
-
-      - name: Build IddCx driver and package
-        shell: pwsh
-        run: |
-          msbuild apps/windows-driver/IddSampleDriver/IddSampleDriver.vcxproj /m /t:Build /p:Configuration=Release /p:Platform=x64 /p:SignMode=Off /p:StampInfToolPath="$env:STAMPINF_TOOL_PATH" /p:WindowsTargetPlatformVersion=10.0.28000.0 /p:TargetPlatformVersion=10.0.28000.0 /v:minimal
-          if ($LASTEXITCODE -ne 0) { throw "IddCx driver build failed (exit $LASTEXITCODE)." }
-
-      - name: Verify and stage unsigned driver package
-        shell: pwsh
-        run: |
-          $root = "apps/windows-driver/IddSampleDriver"
-          $dll = Get-ChildItem $root -Recurse -File -Filter "IddSampleDriver.dll" | Select-Object -First 1
-          $inf = Get-ChildItem $root -Recurse -File -Filter "IddSampleDriver.inf" | Select-Object -First 1
-          $cat = Get-ChildItem $root -Recurse -File -Filter "IddSampleDriver.cat" | Select-Object -First 1
-
-          if (-not $dll) { throw "UMDF driver DLL was not produced." }
-          if (-not $inf) { throw "Driver INF was not produced." }
-          if (-not $cat) { throw "Driver catalog was not produced." }
-
-          $package = "bridge-iddcx-package"
-          New-Item -ItemType Directory -Force -Path $package | Out-Null
-          Copy-Item $dll.FullName, $inf.FullName, $cat.FullName -Destination $package
-
-      - name: Upload unsigned driver package for the signing job
-        uses: actions/upload-artifact@v4
-        with:
-          name: bridge-iddcx-unsigned-x64
-          path: bridge-iddcx-package/*
-          if-no-files-found: error
-          retention-days: 1
-
-  sign-iddcx:
-    name: Approve, sign, and verify driver package
-    timeout-minutes: 12
-    needs: build-iddcx
-    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/development' || github.ref == 'refs/heads/stable'))
-    runs-on: windows-2025-vs2026
-    environment:
-      name: bridge-driver-signing
-    steps:
-      - name: Download unsigned driver package
-        uses: actions/download-artifact@v4
-        with:
-          name: bridge-iddcx-unsigned-x64
-          path: bridge-iddcx-package
-
-      - name: Sign and verify driver catalog with Bridge certificate
-        timeout-minutes: 8
-        shell: pwsh
-        env:
-          BRIDGE_DRIVER_SIGNING_PFX_BASE64: ${{ secrets.BRIDGE_DRIVER_SIGNING_PFX_BASE64 }}
-          BRIDGE_DRIVER_SIGNING_PFX_PASSWORD: ${{ secrets.BRIDGE_DRIVER_SIGNING_PFX_PASSWORD }}
-          BRIDGE_DRIVER_CERT_THUMBPRINT: ${{ vars.BRIDGE_DRIVER_CERT_THUMBPRINT }}
         run: |
           $ErrorActionPreference = "Stop"
-          foreach ($name in @("BRIDGE_DRIVER_SIGNING_PFX_BASE64", "BRIDGE_DRIVER_SIGNING_PFX_PASSWORD", "BRIDGE_DRIVER_CERT_THUMBPRINT")) {
-            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
-              throw "Required signing configuration is missing: $name"
-            }
-          }
+          $url = "https://github.com/VirtualDrivers/Virtual-Display-Driver/releases/download/25.7.23/VirtualDisplayDriver-x86.Driver.Only.zip"
+          $archive = Join-Path $env:RUNNER_TEMP "VirtualDisplayDriver-x86.Driver.Only.zip"
+          Invoke-WebRequest -Uri $url -OutFile $archive
+          $expected = "e24210692b442b39af763536330ce78b423f19342b7a7792c26de3944e418b3a"
+          $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "VirtualDrivers driver-only archive SHA-256 mismatch. Expected $expected, received $actual." }
+          Write-Host "Verified pinned VirtualDrivers driver-only archive SHA256: $actual"
+          $root = Join-Path $env:RUNNER_TEMP "virtualdrivers-vdd-driver-only"
+          Expand-Archive -LiteralPath $archive -DestinationPath $root -Force
+          "VDD_ARCHIVE=$archive" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "VDD_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-          $expectedThumbprint = ($env:BRIDGE_DRIVER_CERT_THUMBPRINT -replace "\s", "").ToUpperInvariant()
-          $pfxPath = Join-Path $env:RUNNER_TEMP "bridge-driver-signing.pfx"
-          $package = "bridge-iddcx-package"
-          $catPath = Join-Path $package "IddSampleDriver.cat"
-          $infPath = Join-Path $package "IddSampleDriver.inf"
-          $cerPath = Join-Path $package "Bridge-Driver-CodeSigning.cer"
-          $imported = $null
-          $rootThumbprint = $null
+      - name: Verify AMD64 binary and SignPath catalog
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $dlls = @(Get-ChildItem -LiteralPath $env:VDD_ROOT -Recurse -File -Filter "MttVDD.dll")
+          if ($dlls.Count -ne 1) { throw "Expected exactly one MttVDD.dll in driver-only package; found $($dlls.Count)." }
+          $driver = $dlls[0].DirectoryName
+          $dll = $dlls[0].FullName
+          $inf = Join-Path $driver "MttVDD.inf"
+          $cat = Join-Path $driver "mttvdd.cat"
+          foreach ($path in @($inf, $cat)) { if (-not (Test-Path -LiteralPath $path)) { throw "Expected VDD package file missing: $path" } }
+          $bytes = [IO.File]::ReadAllBytes($dll)
+          if ($bytes.Length -lt 256 -or [BitConverter]::ToUInt16($bytes, 0) -ne 0x5A4D) { throw "MttVDD.dll is not a valid PE image." }
+          $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+          if ($peOffset -lt 0 -or ($peOffset + 6) -gt $bytes.Length) { throw "Invalid PE header offset." }
+          $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+          if ($machine -ne 0x8664) { throw "Expected AMD64 driver (0x8664), found PE machine 0x$('{0:X4}' -f $machine)." }
+          Write-Host "Verified MttVDD.dll is AMD64 (PE machine 0x8664)."
+          $signature = Get-AuthenticodeSignature -LiteralPath $cat
+          Write-Host "Catalog signature: $($signature.Status)"
+          if ($signature.SignerCertificate) { Write-Host "Signer: $($signature.SignerCertificate.Subject)"; Write-Host "Thumbprint: $($signature.SignerCertificate.Thumbprint)" }
+          if ($signature.Status -ne "Valid" -or $signature.SignerCertificate.Subject -notmatch "SignPath Foundation" -or $signature.SignerCertificate.Thumbprint -ne "3CF8CF26D8BA266C3A483AB7D26D4A818E317D76") { throw "VirtualDrivers catalog signature is not the expected valid SignPath Foundation signature." }
+          Write-Host "Driver INF declarations:"
+          Select-String -LiteralPath $inf -Pattern "NTamd64|NTx64|NTarm64|NTx86|CatalogFile|Manufacturer|HardwareID" | ForEach-Object { Write-Host $_.Line }
 
-          function Invoke-BoundedCertUtil {
-            param(
-              [Parameter(Mandatory = $true)][string[]]$Arguments,
-              [Parameter(Mandatory = $true)][string]$Operation
-            )
+      - name: Verify UMDF package signature with Windows PnP policy
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $dll = Get-ChildItem -LiteralPath $env:VDD_ROOT -Recurse -File -Filter "MttVDD.dll" | Select-Object -First 1
+          $driver = $dll.DirectoryName
+          $cat = Join-Path $driver "mttvdd.cat"
+          $inf = Join-Path $driver "MttVDD.inf"
+          $kits = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\bin"
+          $signtool = Get-ChildItem -LiteralPath $kits -Recurse -File -Filter "signtool.exe" | Where-Object { $_.FullName -match "\\x64\\signtool\.exe$" } | Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $signtool) { throw "Windows SDK x64 SignTool was not found." }
+          Write-Host "This is an UMDF user-mode display driver. Verify PnP package signing with /pa, not kernel-mode /kp."
+          & $signtool.FullName verify /pa /v /c $cat $inf
+          if ($LASTEXITCODE -ne 0) { throw "Driver INF failed Windows PnP catalog verification (exit $LASTEXITCODE)." }
+          & $signtool.FullName verify /pa /v /c $cat $dll.FullName
+          if ($LASTEXITCODE -ne 0) { throw "Driver DLL failed Windows PnP catalog verification (exit $LASTEXITCODE)." }
+          Write-Host "INF and AMD64 UMDF DLL pass Windows PnP package-signing policy."
 
-            $certutilPath = Join-Path $env:WINDIR "System32\\certutil.exe"
-            Write-Host "SIGNING CHECKPOINT: starting certutil for $Operation (30-second limit; stdin closed; stdout/stderr captured)"
-            $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
-            $startInfo.FileName = $certutilPath
-            $startInfo.UseShellExecute = $false
-            $startInfo.CreateNoWindow = $true
-            $startInfo.RedirectStandardInput = $true
-            $startInfo.RedirectStandardOutput = $true
-            $startInfo.RedirectStandardError = $true
-            foreach ($argument in $Arguments) {
-              [void]$startInfo.ArgumentList.Add($argument)
-            }
-
-            $process = [System.Diagnostics.Process]::new()
-            $process.StartInfo = $startInfo
-            if (-not $process.Start()) {
-              throw "Could not start certutil during $Operation."
-            }
-            $stdoutTask = $process.StandardOutput.ReadToEndAsync()
-            $stderrTask = $process.StandardError.ReadToEndAsync()
-            # A closed stdin distinguishes a hidden confirmation prompt from a
-            # certificate-store operation that is blocked independently of input.
-            $process.StandardInput.Close()
-
-            if (-not $process.WaitForExit(30000)) {
-              try { $process.Kill() } catch { }
-              $process.WaitForExit()
-              $stdout = $stdoutTask.GetAwaiter().GetResult()
-              $stderr = $stderrTask.GetAwaiter().GetResult()
-              Write-Host "CERTUTIL STDOUT ($Operation):"
-              Write-Host $stdout
-              Write-Host "CERTUTIL STDERR ($Operation):"
-              Write-Host $stderr
-              throw "certutil timed out during $Operation after 30 seconds. Full output was captured above."
-            }
-
-            $stdout = $stdoutTask.GetAwaiter().GetResult()
-            $stderr = $stderrTask.GetAwaiter().GetResult()
-            Write-Host "CERTUTIL STDOUT ($Operation):"
-            Write-Host $stdout
-            Write-Host "CERTUTIL STDERR ($Operation):"
-            Write-Host $stderr
-            if ($process.ExitCode -ne 0) {
-              throw "certutil failed during $Operation (exit $($process.ExitCode))."
-            }
-            Write-Host "SIGNING CHECKPOINT: certutil completed $Operation"
-          }
-
-          try {
-            Write-Host "SIGNING CHECKPOINT: starting PFX decode and file write"
-            $pfxBytes = [Convert]::FromBase64String($env:BRIDGE_DRIVER_SIGNING_PFX_BASE64)
-            [IO.File]::WriteAllBytes($pfxPath, $pfxBytes)
-            Write-Host "SIGNING CHECKPOINT: PFX file written; preparing password"
-            $securePassword = ConvertTo-SecureString $env:BRIDGE_DRIVER_SIGNING_PFX_PASSWORD -AsPlainText -Force
-            Write-Host "SIGNING CHECKPOINT: importing PFX into CurrentUser\\My"
-            $imported = Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation "Cert:\CurrentUser\My" -Password $securePassword
-            Write-Host "SIGNING CHECKPOINT: PFX import returned"
-            if (-not $imported) { throw "The signing PFX did not import a certificate." }
-
-            $signingCert = @($imported) | Where-Object { $_.HasPrivateKey } | Select-Object -First 1
-            if (-not $signingCert) { throw "The imported PFX does not contain an accessible private key." }
-            $actualThumbprint = $signingCert.Thumbprint.ToUpperInvariant()
-            if ($actualThumbprint -ne $expectedThumbprint) {
-              throw "Imported certificate thumbprint does not match BRIDGE_DRIVER_CERT_THUMBPRINT."
-            }
-
-            Write-Host "SIGNING CHECKPOINT: certificate identity and thumbprint validated"
-            Export-Certificate -Cert $signingCert -FilePath $cerPath -Type CERT | Out-Null
-            Write-Host "SIGNING CHECKPOINT: public certificate exported; importing temporary root trust"
-            Invoke-BoundedCertUtil -Arguments @("-user", "-addstore", "-f", "Root", $cerPath) -Operation "temporary root trust import"
-            Write-Host "SIGNING CHECKPOINT: temporary root trust import returned"
-            $rootThumbprint = $signingCert.Thumbprint
-
-            Write-Host "SIGNING CHECKPOINT: locating Windows SDK SignTool"
-            $kitRoots = @(
-              "${env:ProgramFiles(x86)}\Windows Kits\10\bin",
-              "${env:ProgramFiles}\Windows Kits\10\bin"
-            ) | Where-Object { $_ -and (Test-Path $_) }
-            $signtoolCandidates = foreach ($kitRoot in $kitRoots) {
-              Get-ChildItem -LiteralPath $kitRoot -Directory -ErrorAction SilentlyContinue |
-                Sort-Object Name -Descending |
-                ForEach-Object { Join-Path $_.FullName "x64\\signtool.exe" }
-              Join-Path $kitRoot "x64\\signtool.exe"
-            }
-            $signtoolPath = $signtoolCandidates |
-              Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
-              Select-Object -First 1
-            if (-not $signtoolPath) { throw "The x64 Windows SDK SignTool was not found in the expected SDK version directories." }
-            $signtool = Get-Item -LiteralPath $signtoolPath
-            Write-Host "Using Windows SDK SignTool: $($signtool.FullName)"
-
-            Write-Host "SIGNING CHECKPOINT: SignTool located; starting catalog signing"
-            Write-Host "Signing catalog with Bridge certificate $actualThumbprint"
-            & $signtool.FullName sign /v /fd SHA256 /f $pfxPath /p $env:BRIDGE_DRIVER_SIGNING_PFX_PASSWORD /d "Bridge Indirect Display Driver" $catPath
-            if ($LASTEXITCODE -ne 0) { throw "SignTool catalog signing failed (exit $LASTEXITCODE)." }
-
-            Write-Host "SIGNING CHECKPOINT: catalog signing returned; starting signature verification"
-            & $signtool.FullName verify /pa /v $catPath
-            if ($LASTEXITCODE -ne 0) { throw "SignTool could not verify the signed catalog." }
-
-            & $signtool.FullName verify /pa /v /c $catPath $infPath
-            if ($LASTEXITCODE -ne 0) { throw "The INF does not verify against the signed driver catalog." }
-
-            $signature = Get-AuthenticodeSignature -FilePath $catPath
-            if ($signature.Status -ne "Valid") { throw "Catalog Authenticode status is $($signature.Status), not Valid." }
-            if (-not $signature.SignerCertificate -or $signature.SignerCertificate.Thumbprint.ToUpperInvariant() -ne $expectedThumbprint) {
-              throw "The catalog signer identity does not match the configured Bridge certificate."
-            }
-
-            $manifest = Get-ChildItem $package -File | Where-Object { $_.Name -ne "SHA256SUMS.txt" } | Sort-Object Name
-            $lines = foreach ($file in $manifest) {
-              $hash = (Get-FileHash -Algorithm SHA256 -Path $file.FullName).Hash.ToLowerInvariant()
-              "$hash  $($file.Name)"
-            }
-            $lines | Set-Content -Path (Join-Path $package "SHA256SUMS.txt") -Encoding ascii
-
-            Write-Host "Self-signed test package signed and verified. This is not a Microsoft production signature."
-          }
-          finally {
-            if ($rootThumbprint) {
-              try {
-                Invoke-BoundedCertUtil -Arguments @("-user", "-delstore", "Root", $rootThumbprint) -Operation "temporary root trust cleanup"
-              } catch {
-                Write-Warning "Could not remove temporary root trust: $($_.Exception.Message)"
-              }
-            }
-            if ($imported) {
-              foreach ($cert in @($imported)) {
-                Remove-Item -Path "Cert:\CurrentUser\My\$($cert.Thumbprint)" -ErrorAction SilentlyContinue
-              }
-            }
-            if (Test-Path $pfxPath) { Remove-Item -Path $pfxPath -Force }
-            Remove-Variable securePassword -ErrorAction SilentlyContinue
-            Remove-Variable pfxBytes -ErrorAction SilentlyContinue
-          }
-
-      - name: Upload signed driver package
+      - name: Upload pinned driver-only archive for inspection
         uses: actions/upload-artifact@v4
         with:
-          name: bridge-iddcx-self-signed-test-x64
-          path: bridge-iddcx-package/*
+          name: virtualdrivers-vdd-amd64-driver-only-25.7.23
+          path: ${{ env.VDD_ARCHIVE }}
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 7
