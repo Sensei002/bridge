@@ -59,6 +59,7 @@ Architecture and acceptance gates: [docs/second-screen-architecture.md](second-s
 - [x] Route captured frames into the existing Bridge Media Foundation H.264 and authenticated Android pipeline.
 - [x] Remove the obsolete Bridge-owned driver IOCTL frame-read path; the privileged service now handles lifecycle and topology only, while DXGI capture stays in the desktop process.
 - [x] Add bounded DXGI capture-session recovery with exponential backoff and resource recreation.
+- [x] Validate each acquired DXGI texture against the active mode and force a bounded reopen when dimensions, orientation, or pixel format changes.
 - [ ] Implement elevated, rollback-capable installation/uninstallation of the vendor-signed VDD package; no Bridge driver signing or test-signing.
 - [ ] Validate Windows Extend mode on a physical Windows machine: move ordinary application windows onto the Android display.
 
