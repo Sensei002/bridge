@@ -140,6 +140,9 @@ internal class BridgePairingController(
     }
 
     fun approve(pending: BridgePendingPairing): Boolean {
+        // The user has resolved this pending request; keep discovery from racing
+        // approval while this method validates, persists, and activates the session.
+        pendingApprovalDevices.remove(pending.deviceId)
         val currentTrusted = try { trustedDevices() } catch (error: Exception) {
             pendingSessions.remove(pending.handle)
             BridgeNative.sessionClose(pending.handle)
