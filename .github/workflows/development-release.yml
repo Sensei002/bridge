@@ -58,7 +58,7 @@ jobs:
             throw "Could not read workspace version from Cargo.toml"
           }
           $version = "$($Matches[1]).${{ github.run_number }}"
-          wix build installer/windows/Package.wxs -d ProductVersion=$version -d PublishDir="$PWD\target\release" -d ServicePublishDir="$PWD\target\x86_64-pc-windows-msvc\release" -d ScriptsDir="$PWD\scripts\windows" -o "Bridge-$version-x64.msi"
+          wix build installer/windows/Package.wxs -d ProductVersion=$version -d PublishDir="$PWD\target\release" -d ServicePublishDir="$PWD\target\x86_64-pc-windows-msvc\release" -d ScriptsDir="$PWD\scripts\windows" -d PublisherPinPath="$PWD\bridge-desktop-publisher.sha256" -o "Bridge-$version-x64.msi"
       - name: Sign and verify Windows MSI
         if: github.event_name != 'pull_request'
         shell: pwsh
