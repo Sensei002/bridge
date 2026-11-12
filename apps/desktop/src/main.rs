@@ -23,7 +23,7 @@ use bridge_core::trust::{SasConfirmation, TrustStore};
 #[cfg(windows)]
 use bridge_protocol::{DeviceDescriptor, DeviceId, Platform, PROTOCOL_VERSION};
 #[cfg(windows)]
-use bridge_transfer::{decode_packet, encode_packet, fragment_display_frame, fragment_encoded_video_frame, offer_for_file, DisplayFrame, EncodedVideoFrame, DisplayInputAction, DisplayInputEvent, FileOffer, IncomingFile, OutgoingFile, TransferControl, TransferPacket};
+use bridge_transfer::{decode_packet, encode_packet, fragment_display_frame, fragment_encoded_video_frame, offer_for_file, EncodedVideoFrame, DisplayInputAction, DisplayInputEvent, FileOffer, IncomingFile, OutgoingFile, TransferControl, TransferPacket};
 #[cfg(windows)]
 use std::net::TcpListener;
 #[cfg(windows)]
