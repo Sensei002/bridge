@@ -31,6 +31,22 @@ jobs:
         run: |
           cargo test -p bridge-display-service
           cargo build --release --manifest-path apps/windows-service/Cargo.toml --features service-bin --target x86_64-pc-windows-msvc
+      - name: Sign desktop and service binaries and generate publisher pin
+        if: github.event_name != 'pull_request'
+        shell: pwsh
+        env:
+          BRIDGE_DRIVER_SIGNING_PFX_BASE64: ${{ secrets.BRIDGE_DRIVER_SIGNING_PFX_BASE64 }}
+          BRIDGE_DRIVER_SIGNING_PFX_PASSWORD: ${{ secrets.BRIDGE_DRIVER_SIGNING_PFX_PASSWORD }}
+          BRIDGE_DRIVER_CERT_THUMBPRINT: ${{ secrets.BRIDGE_DRIVER_CERT_THUMBPRINT }}
+        run: |
+          ./scripts/windows/Sign-BridgeBinaries.ps1 -Files @(
+            "target/release/bridge-desktop.exe",
+            "target/x86_64-pc-windows-msvc/release/bridge-display-service.exe"
+          ) -PublisherPinOutput "$PWD\\bridge-desktop-publisher.sha256"
+      - name: Create non-publishable placeholder pin for pull-request packaging checks
+        if: github.event_name == 'pull_request'
+        shell: pwsh
+        run: Set-Content -LiteralPath "bridge-desktop-publisher.sha256" -Value ("0" * 64) -NoNewline
       - name: Install WiX Toolset
         shell: pwsh
         run: dotnet tool install --global wix --version 6.0.2
@@ -43,6 +59,17 @@ jobs:
           }
           $version = "$($Matches[1]).${{ github.run_number }}"
           wix build installer/windows/Package.wxs -d ProductVersion=$version -d PublishDir="$PWD\target\release" -d ServicePublishDir="$PWD\target\x86_64-pc-windows-msvc\release" -d ScriptsDir="$PWD\scripts\windows" -o "Bridge-$version-x64.msi"
+      - name: Sign and verify Windows MSI
+        if: github.event_name != 'pull_request'
+        shell: pwsh
+        env:
+          BRIDGE_DRIVER_SIGNING_PFX_BASE64: ${{ secrets.BRIDGE_DRIVER_SIGNING_PFX_BASE64 }}
+          BRIDGE_DRIVER_SIGNING_PFX_PASSWORD: ${{ secrets.BRIDGE_DRIVER_SIGNING_PFX_PASSWORD }}
+          BRIDGE_DRIVER_CERT_THUMBPRINT: ${{ secrets.BRIDGE_DRIVER_CERT_THUMBPRINT }}
+        run: |
+          $msi = Get-ChildItem -LiteralPath $PWD -Filter "Bridge-*-x64.msi" | Select-Object -First 1
+          if ($null -eq $msi) { throw "Packaged Bridge MSI was not found." }
+          ./scripts/windows/Sign-BridgeBinaries.ps1 -Files @($msi.FullName)
       - uses: actions/upload-artifact@v4
         with:
           name: bridge-windows-msi
