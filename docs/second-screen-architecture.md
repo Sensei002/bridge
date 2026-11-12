@@ -15,7 +15,7 @@ Bridge will **reuse the upstream VirtualDrivers Virtual Display Driver (VDD)**. 
 - CI verified the driver catalog is valid and signed by **SignPath Foundation** (thumbprint `3CF8CF26D8BA266C3A483AB7D26D4A818E317D76`).
 - The pinned `VDD.Control.25.7.23.zip` archive SHA-256 is `a701f2272e9fcf382849b24f913c6dd07597b3b1116525f2e90182f019609154`.
 - The older 24.10.27 x64-only ZIP was rejected because Windows reported its catalog as `NotSigned`; use the 25.7.23 package instead.
-- This is an UMDF user-mode driver, so CI verifies the INF and driver DLL against Windows PnP package-signing policy with SignTool `/pa` and stages the package with `pnputil /add-driver`. Kernel-mode `/kp` is not the applicable policy for this UMDF DLL.
+- This is a UMDF user-mode driver, so CI verifies the INF and driver DLL against Windows PnP package-signing policy with SignTool `/pa`. Kernel-mode `/kp` is not the applicable policy for this UMDF DLL.
 - No test-signing mode, Secure Boot change, Bridge-owned driver certificate, or Bridge root-certificate import is permitted.
 
 ### Required Bridge integration
@@ -37,7 +37,7 @@ VDD creates and manages the Windows virtual monitor. It does **not** automatical
 - Preserve upstream copyright and license notices in Bridge's third-party notices.
 - Verify the selected release's redistribution terms and exact signed package contents before embedding it in Bridge's installer. MIT licensing of the source repository does not, by itself, prove that every bundled binary or companion application can be redistributed.
 - Install the vendor-supplied signed driver package through an elevated, rollback-capable installer. Do not install it by importing a Bridge-generated certificate or re-signing the catalog.
-- Provide clean uninstall and recovery if driver installation fails. The Parsec VDD API requires a keepalive ping roughly once per second or the virtual display is removed. Bridge's service must own that watchdog and stop it cleanly. The upstream Rust client reference is https://github.com/rohitsangwan01/parsec-vdd-rust; review its API/unsafe code before reuse rather than assuming it is production-ready. Bridge must also document safe recovery and known limitations, including no HDR.
+- Provide clean uninstall and recovery if driver installation fails. The upstream VDD exposes a local named-pipe control endpoint (`\\.\\pipe\\MTTVirtualDisplayPipe`) with `SETDISPLAYCOUNT` and `PING` commands. Bridge must implement a narrow client, validate Windows display topology after changes, and account for the pipe's broad local ACL. Never forward this pipe to Android or expose it over the network.
 - Keep the current Bridge IddCx implementation only as a temporary migration reference. It must not be built, signed, installed, or shipped in the new path.
 
 ## Windows application and service split
