@@ -7,7 +7,7 @@
 use std::{io, thread, time::Duration};
 
 use windows_sys::Win32::{
-    Foundation::{CloseHandle, GetLastError, ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY, HANDLE, INVALID_HANDLE_VALUE},
+    Foundation::{CloseHandle, ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY, HANDLE, INVALID_HANDLE_VALUE},
     Storage::FileSystem::{CreateFileW, WriteFile, FILE_ATTRIBUTE_NORMAL, OPEN_EXISTING},
     System::Pipes::WaitNamedPipeW,
 };
