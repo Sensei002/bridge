@@ -11,7 +11,8 @@ This is the privileged Windows service boundary for Bridge Second Screen. It is 
 - The Windows desktop client now requests a challenge when its first live authenticated Android Noise session becomes active, relays the nonce over that encrypted session, and submits the echoed response over a second named-pipe connection. The relay is bounded by the service's 10-second challenge lifetime and an 8-second desktop wait.
 - Pipe DACL grants full access to LocalSystem and Administrators, and read/write access to interactive users. Remote network clients are not granted access.
 - Captures the connected pipe client's process ID using the Windows named-pipe API and resolves its executable image path from the process handle.
-- Driver client enumerates the Bridge device-interface GUID and sends the driver's versioned QUERY/CONNECT/DISCONNECT IOCTLs.
+- Upstream driver-control client connects to `\\.\\pipe\\MTTVirtualDisplayPipe` and sends only the vendor protocol's UTF-16 `SETDISPLAYCOUNT 0` or `SETDISPLAYCOUNT 1` command. It does not forward arbitrary driver commands or expose the vendor pipe to Android/network peers.
+- The vendor pipe accepts one command per connection and does not acknowledge display-count changes. Bridge reports connect/disconnect as a request; Windows display-topology verification is a separate migration step. The legacy query/frame-read adapter is not yet migrated.
 - Portable protocol parser and response tests run in the Rust workspace.
 - Windows x64 executable is built by GitHub Actions and uploaded as an unsigned development artifact.
 
@@ -19,9 +20,9 @@ This is the privileged Windows service boundary for Bridge Second Screen. It is 
 
 The client PID and image path are **attribution metadata, not authorization**. A path does not prove that a binary was published by Bridge, and a process identity does not prove that an authenticated Android Second Screen session is alive. The service validates the pinned Authenticode publisher for challenge commands, but does not yet bind the caller to the active Windows logon or receive a cryptographically verifiable session lease.
 
-The current interactive-user pipe ACL is intentionally a development boundary only. CONNECT and DISCONNECT remain fail-closed and are rejected. PING and read-only QUERY remain available without publisher authentication; challenge issuance/consumption additionally requires a valid pinned publisher signature. A successful challenge response proves only that the signed desktop client completed its Noise-session relay step with the selected active Android peer; it does not issue a lease or authorize driver operations. The desktop relay remains fail-closed when the service is absent or the configured publisher pin does not match. Do not enable monitor lifecycle operations until the service has a verified Bridge desktop-client identity and a live authenticated-session binding with expiry/revocation handling.
+For Bridge's own service pipe, the service verifies the pinned desktop publisher, validates the attested desktop process and paired Android fingerprint, and requires the exact active 15-second lease for CONNECT/DISCONNECT. Lease renewal, expiry, process exit, peer replacement, and service shutdown trigger fail-safe monitor removal requests. The service's lease registry is not exposed directly over IPC.
 
-The service library now contains a bounded single-device lease state machine: 15-second maximum TTL, desktop process-ID binding, peer-fingerprint binding, renewal, expiry, replacement, and process/lease revocation. Unit tests cover these transitions. The registry is not exposed over IPC and is not yet wired to a live Noise session; issuance must only happen after independent client authentication and a cryptographically verifiable assertion from the paired Android peer. CONNECT/DISCONNECT remain rejected.
+**Residual upstream-driver limitation:** the selected vendor VDD creates `\\.\\pipe\\MTTVirtualDisplayPipe` with a broad local ACL that permits any local user to connect. Bridge uses only the fixed display-count commands and never forwards arbitrary input, but it cannot narrow the vendor pipe's ACL without modifying and re-signing the upstream driver. Other local processes may therefore also request display-count changes. This is a documented local attack surface; the pipe is never exposed to Android or the network.
 
 The SCM installer/account configuration, service recovery policy, production signing, and driver signing are not complete. The service must be installed under an identity authorized by the driver's INF security descriptor (currently LocalSystem or an administrator), while the desktop UI remains unprivileged. Do not install the unsigned driver/service on a daily-use machine.
 
@@ -33,8 +34,8 @@ Requests are one message per named-pipe connection, UTF-8, at most 256 bytes:
 - `BRIDGE_DISPLAY/1 QUERY`
 - `BRIDGE_DISPLAY/1 CHALLENGE` → `BRIDGE_DISPLAY/1 CHALLENGE nonce=<64 hex chars>`
 - `BRIDGE_DISPLAY/1 CHALLENGE_RESPONSE <64 hex chars>` → `BRIDGE_DISPLAY/1 OK challenge_verified`
-- `BRIDGE_DISPLAY/1 CONNECT` (currently rejected)
-- `BRIDGE_DISPLAY/1 DISCONNECT` (currently rejected)
+- `BRIDGE_DISPLAY/1 CONNECT lease=<uuid> fingerprint=<64 hex>` → `BRIDGE_DISPLAY/1 OK connect_requested`
+- `BRIDGE_DISPLAY/1 DISCONNECT lease=<uuid> fingerprint=<64 hex>` → `BRIDGE_DISPLAY/1 OK disconnect_requested`
 
 The service responds with a versioned status or error line. Unknown versions, malformed UTF-8, empty messages, and oversized requests are rejected.
 
@@ -65,4 +66,4 @@ To remove the service registration:
 .\scripts\windows\Uninstall-BridgeDisplayService.ps1
 ```
 
-Disconnect the virtual display in Bridge before uninstalling. The uninstall script removes only the Windows service registration; it deliberately does not remove the IddCx driver package. Driver installation, signing/trust provisioning, MSI integration, and full rollback remain separate work. Do not install the development driver on a daily-use machine.
+The uninstall script removes only the Windows service registration; upstream VDD package installation/removal and installer rollback are not yet integrated. Do not treat the current development scripts as the finished one-installer setup.

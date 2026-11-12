@@ -38,6 +38,7 @@ use windows_sys::Win32::{
 
 mod driver;
 mod pipe_client;
+mod vdd_control;
 mod verify_publisher;
 
 const SERVICE_NAME: &str = "BridgeDisplayService";
@@ -93,18 +94,13 @@ fn run_service() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 
-/// Best-effort fail-safe: remove the IddCx connection whenever its authorization
-/// is no longer valid. Cleanup must never prevent the service from revoking a lease.
+/// Best-effort fail-safe: ask upstream VDD to remove its virtual monitor whenever
+/// the authorization is no longer valid. The VDD pipe has no command acknowledgement,
+/// so this confirms delivery only; Windows topology is verified by the display query path.
 fn disconnect_driver_if_connected(reason: &str) {
-    match driver::query() {
-        Ok(status) if status.is_connected != 0 => {
-            match driver::set_connected(false) {
-                Ok(()) => eprintln!("Bridge display disconnected ({reason})"),
-                Err(error) => eprintln!("Bridge display disconnect failed ({reason}): {error}"),
-            }
-        }
-        Ok(_) => {}
-        Err(error) => eprintln!("Bridge display status unavailable during cleanup ({reason}): {error}"),
+    match vdd_control::set_display_count(0) {
+        Ok(()) => eprintln!("Upstream virtual display removal requested ({reason})"),
+        Err(error) => eprintln!("Upstream virtual display removal failed ({reason}): {error}"),
     }
 }
 
@@ -423,21 +419,21 @@ fn handle_request(
                 validate_lease_owner(caller, &device_fingerprint, pinned_clients, lease_fingerprints)?;
                 leases.authorize_operation(lease_id, caller.process_id, &device_fingerprint)
                     .map_err(|message| io::Error::new(io::ErrorKind::PermissionDenied, message))?;
-                driver::set_connected(true)
-                    .map(|_| b"BRIDGE_DISPLAY/1 OK connected\n".to_vec())
+                vdd_control::set_display_count(1)
+                    .map(|_| b"BRIDGE_DISPLAY/1 OK connect_requested\n".to_vec())
             }),
         Request::Disconnect { lease_id, device_fingerprint } =>
             verify_publisher::verify_client_publisher(&caller.image_path).and_then(|_| {
                 validate_lease_owner(caller, &device_fingerprint, pinned_clients, lease_fingerprints)?;
                 leases.authorize_operation(lease_id, caller.process_id, &device_fingerprint)
                     .map_err(|message| io::Error::new(io::ErrorKind::PermissionDenied, message))?;
-                driver::set_connected(false)?;
+                vdd_control::set_display_count(0)?;
                 // A successful disconnect consumes the lease. A fresh attestation
                 // is required before the next connection can be authorized.
                 leases.revoke(lease_id);
                 lease_fingerprints.remove(&caller.process_id);
                 pinned_clients.remove(&caller.process_id);
-                Ok(b"BRIDGE_DISPLAY/1 OK disconnected\n".to_vec())
+                Ok(b"BRIDGE_DISPLAY/1 OK disconnect_requested\n".to_vec())
             }),
         Request::ReadFrame { lease_id, device_fingerprint } =>
             verify_publisher::verify_client_publisher(&caller.image_path).and_then(|_| {
