@@ -7,7 +7,7 @@ This is the privileged Windows service boundary for Bridge Second Screen. It is 
 - Windows Service Control Manager entry point and clean stop/shutdown handling.
 - Local named pipe: `\\.\pipe\BridgeDisplayService`.
 - Versioned, bounded text protocol: `BRIDGE_DISPLAY/1 PING|QUERY|CHALLENGE|CHALLENGE_RESPONSE|CONNECT|DISCONNECT`.
-- `CHALLENGE` and `CHALLENGE_RESPONSE <64-hex-nonce>` require the configured Authenticode publisher pin. The service retains the original client process handle between requests, expires challenges after 10 seconds, and consumes each challenge once.
+- `CHALLENGE` and `CHALLENGE_RESPONSE <64-hex-nonce>` require the exact desktop executable SHA-256 pin provisioned by the elevated installer in the protected Program Files service directory. The service hashes the actual client image for each privileged request, retains the original client process handle between requests, expires challenges after 10 seconds, and consumes each challenge once.
 - The Windows desktop client now requests a challenge when its first live authenticated Android Noise session becomes active, relays the nonce over that encrypted session, and submits the echoed response over a second named-pipe connection. The relay is bounded by the service's 10-second challenge lifetime and an 8-second desktop wait.
 - Pipe DACL grants full access to LocalSystem and Administrators, and read/write access to interactive users. Remote network clients are not granted access.
 - Captures the connected pipe client's process ID using the Windows named-pipe API and resolves its executable image path from the process handle.
@@ -18,13 +18,13 @@ This is the privileged Windows service boundary for Bridge Second Screen. It is 
 
 ## Security and installation boundary
 
-The client PID and image path are **attribution metadata, not authorization**. A path does not prove that a binary was published by Bridge, and a process identity does not prove that an authenticated Android Second Screen session is alive. The service validates the pinned Authenticode publisher for challenge commands, but does not yet bind the caller to the active Windows logon or receive a cryptographically verifiable session lease.
+The client PID and image path are **attribution metadata, not authorization**. A path does not prove that a binary was published by Bridge, and a process identity does not prove that an authenticated Android Second Screen session is alive. The service validates the pinned desktop executable hash for challenge commands, and binds the caller to the paired Android device through a cryptographically verifiable attestation and short-lived session lease.
 
 For Bridge's own service pipe, the service verifies the pinned desktop publisher, validates the attested desktop process and paired Android fingerprint, and requires the exact active 15-second lease for CONNECT/DISCONNECT. Lease renewal, expiry, process exit, peer replacement, and service shutdown trigger fail-safe monitor removal requests. The service's lease registry is not exposed directly over IPC.
 
 **Residual upstream-driver limitation:** the selected vendor VDD creates `\\.\\pipe\\MTTVirtualDisplayPipe` with a broad local ACL that permits any local user to connect. Bridge uses only the fixed display-count commands and never forwards arbitrary input, but it cannot narrow the vendor pipe's ACL without modifying and re-signing the upstream driver. Other local processes may therefore also request display-count changes. This is a documented local attack surface; the pipe is never exposed to Android or the network.
 
-The SCM installer/account configuration, service recovery policy, production signing, and driver signing are not complete. The service must be installed under an identity authorized by the driver's INF security descriptor (currently LocalSystem or an administrator), while the desktop UI remains unprivileged. Do not install the unsigned driver/service on a daily-use machine.
+The service is installed by the elevated per-machine NSIS installer under LocalSystem with a protected Program Files directory and automatic recovery. The desktop UI remains unprivileged. The desktop/service/installer do not have a publicly trusted Authenticode signature, so Windows may display an Unknown Publisher warning; the release manifest provides a SHA-256 download-integrity check. The upstream VDD driver's own signature verification remains separate and mandatory.
 
 ## Local protocol
 
