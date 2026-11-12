@@ -22,7 +22,6 @@ Name "Bridge"
 Caption "Bridge Setup"
 OutFile "Bridge-${PRODUCT_VERSION}-Setup-x64.exe"
 InstallDir "$PROGRAMFILES64\Bridge"
-InstallDirRegKey HKLM "Software\Bridge" "InstallDir"
 RequestExecutionLevel admin
 Unicode true
 SetCompressor /SOLID lzma
@@ -34,7 +33,6 @@ ShowUnInstDetails show
 !define APP_REG_KEY "Software\Bridge"
 
 !insertmacro MUI_PAGE_WELCOME
-!insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
 !insertmacro MUI_PAGE_FINISH
 !insertmacro MUI_UNPAGE_CONFIRM
