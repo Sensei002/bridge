@@ -295,7 +295,7 @@ fn handle_request(
     leases: &mut bridge_display_service::SessionLeaseRegistry,
     lease_fingerprints: &mut HashMap<u32, String>,
 ) -> Vec<u8> {
-    use bridge_display_service::{DisplayStatus, Request};
+    use bridge_display_service::Request;
     let request = match Request::parse(bytes) {
         Ok(request) => request,
         Err(error) => return format!("BRIDGE_DISPLAY/1 ERROR {error}\n").into_bytes(),
@@ -305,7 +305,7 @@ fn handle_request(
         Request::Ping => Ok(b"BRIDGE_DISPLAY/1 PONG\n".to_vec()),
         Request::Query => vdd_topology::query().map(|status| {
             format!(
-                "BRIDGE_DISPLAY/1 OK vdd_present={} attached={}\\n",
+                "BRIDGE_DISPLAY/1 OK vdd_present={} attached={}\n",
                 u8::from(status.present),
                 u8::from(status.attached_to_desktop),
             ).into_bytes()
