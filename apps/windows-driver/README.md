@@ -7,7 +7,7 @@ Bridge uses the upstream **VirtualDrivers Virtual Display Driver (VDD)** instead
 - Upstream: https://github.com/VirtualDrivers/Virtual-Display-Driver
 - Initial x64 integration candidate: **24.10.27** (older than the latest upstream control bundle because the 25.7.23 archive tested by CI contained no x64 driver)
 - Package: `VirtualDisplayDriver-x64.zip`
-- Archive SHA-256: to be pinned from the first Windows CI verification run
+- Archive SHA-256: pending first Windows CI verification run; it must be pinned before this dependency is accepted
 - The upstream project identifies its source repository as MIT-licensed and release 24.10.27 publishes a separate x64 driver ZIP, and its catalog signature will be verified in Windows CI.
 
 Bridge must use the vendor-supplied driver package unchanged. Do not build, modify, catalog-sign, or certificate-sign a Bridge-owned display driver. Do not install a Bridge-owned root certificate or ask users to enable test signing / disable Secure Boot.
