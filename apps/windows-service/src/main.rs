@@ -39,6 +39,7 @@ use windows_sys::Win32::{
 mod driver;
 mod pipe_client;
 mod vdd_control;
+mod vdd_topology;
 mod verify_publisher;
 
 const SERVICE_NAME: &str = "BridgeDisplayService";
@@ -294,7 +295,7 @@ fn handle_request(
     leases: &mut bridge_display_service::SessionLeaseRegistry,
     lease_fingerprints: &mut HashMap<u32, String>,
 ) -> Vec<u8> {
-    use bridge_display_service::{DisplayStatus, Request};
+    use bridge_display_service::Request;
     let request = match Request::parse(bytes) {
         Ok(request) => request,
         Err(error) => return format!("BRIDGE_DISPLAY/1 ERROR {error}\n").into_bytes(),
@@ -302,14 +303,14 @@ fn handle_request(
 
     let result = match request {
         Request::Ping => Ok(b"BRIDGE_DISPLAY/1 PONG\n".to_vec()),
-        Request::Query => driver::query().map(|status| {
-            DisplayStatus {
-                connected: status.is_connected != 0,
-                supported_mode_count: status.supported_mode_count,
-            }
-            .encode()
-            .into_bytes()
-        }),
+        Request::Query => {
+            let status = vdd_topology::query();
+            Ok(format!(
+                "BRIDGE_DISPLAY/1 OK vdd_present={} attached={}\n",
+                u8::from(status.present),
+                u8::from(status.attached_to_desktop),
+            ).into_bytes())
+        },
         Request::Challenge => verify_publisher::verify_client_publisher(&caller.image_path)
             .and_then(|_| {
                 // The legacy unsigned challenge path must never retain an attested lease.

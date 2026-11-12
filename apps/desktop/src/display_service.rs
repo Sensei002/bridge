@@ -101,35 +101,35 @@ fn decode_frame_packet(packet: &[u8]) -> Result<ServiceFrame, String> {
 }
 
 
-/// Current IddCx virtual-monitor state reported by the privileged service.
+/// Actual upstream VDD presence and Windows desktop-attachment state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DriverStatus {
-    pub connected: bool,
-    pub supported_mode_count: u32,
+pub struct VddTopologyStatus {
+    pub present: bool,
+    pub attached_to_desktop: bool,
 }
 
-/// Query the driver without changing monitor or lease state.
-pub fn query_status() -> Result<DriverStatus, String> {
-    parse_driver_status(&request("QUERY")?)
+/// Query Windows display topology without changing monitor or lease state.
+pub fn query_status() -> Result<VddTopologyStatus, String> {
+    parse_vdd_topology(&request("QUERY")?)
 }
 
-fn parse_driver_status(response: &str) -> Result<DriverStatus, String> {
+fn parse_vdd_topology(response: &str) -> Result<VddTopologyStatus, String> {
     let value = response.trim()
-        .strip_prefix("BRIDGE_DISPLAY/1 OK connected=")
+        .strip_prefix("BRIDGE_DISPLAY/1 OK vdd_present=")
         .ok_or_else(|| service_response_error(response))?;
-    let (connected, modes) = value.split_once(" modes=")
-        .ok_or_else(|| "display service returned malformed driver status".to_string())?;
-    let connected = match connected {
-        "0" => false,
-        "1" => true,
-        _ => return Err("display service returned an invalid connected flag".into()),
+    let (present, attached) = value.split_once(" attached=")
+        .ok_or_else(|| "display service returned malformed VDD topology".to_string())?;
+    let parse_flag = |value: &str| match value {
+        "0" => Ok(false),
+        "1" => Ok(true),
+        _ => Err("display service returned an invalid topology flag".to_string()),
     };
-    let supported_mode_count: u32 = modes.parse()
-        .map_err(|_| "display service returned an invalid supported-mode count".to_string())?;
-    if supported_mode_count == 0 || supported_mode_count > 64 {
-        return Err("display service returned an out-of-policy supported-mode count".into());
+    let present = parse_flag(present)?;
+    let attached_to_desktop = parse_flag(attached)?;
+    if attached_to_desktop && !present {
+        return Err("display service reported an attached VDD that is not present".into());
     }
-    Ok(DriverStatus { connected, supported_mode_count })
+    Ok(VddTopologyStatus { present, attached_to_desktop })
 }
 
 /// Ask the service for a fresh process-pinned challenge.
@@ -212,12 +212,12 @@ pub fn renew_with_lease(lease: &ServiceLease, device_fingerprint: &str) -> Resul
 
 /// Request a driver connection using the exact service-issued lease identity.
 pub fn connect_with_lease(lease: &ServiceLease, device_fingerprint: &str) -> Result<(), String> {
-    mutate_with_lease("CONNECT", "connected", lease, device_fingerprint)
+    mutate_with_lease("CONNECT", "connect_requested", lease, device_fingerprint)
 }
 
 /// Request a driver disconnection using the exact service-issued lease identity.
 pub fn disconnect_with_lease(lease: &ServiceLease, device_fingerprint: &str) -> Result<(), String> {
-    mutate_with_lease("DISCONNECT", "disconnected", lease, device_fingerprint)
+    mutate_with_lease("DISCONNECT", "disconnect_requested", lease, device_fingerprint)
 }
 
 fn mutate_with_lease(
@@ -326,19 +326,19 @@ mod tests {
 
 
     #[test]
-    fn parses_only_valid_read_only_driver_status() {
+    fn parses_only_valid_upstream_vdd_topology() {
         assert_eq!(
-            parse_driver_status("BRIDGE_DISPLAY/1 OK connected=1 modes=3\n").unwrap(),
-            DriverStatus { connected: true, supported_mode_count: 3 }
+            parse_vdd_topology("BRIDGE_DISPLAY/1 OK vdd_present=1 attached=1\n").unwrap(),
+            VddTopologyStatus { present: true, attached_to_desktop: true }
         );
         assert_eq!(
-            parse_driver_status("BRIDGE_DISPLAY/1 OK connected=0 modes=3\n").unwrap(),
-            DriverStatus { connected: false, supported_mode_count: 3 }
+            parse_vdd_topology("BRIDGE_DISPLAY/1 OK vdd_present=0 attached=0\n").unwrap(),
+            VddTopologyStatus { present: false, attached_to_desktop: false }
         );
-        assert!(parse_driver_status("BRIDGE_DISPLAY/1 OK connected=2 modes=3").is_err());
-        assert!(parse_driver_status("BRIDGE_DISPLAY/1 OK connected=1 modes=0").is_err());
-        assert!(parse_driver_status("BRIDGE_DISPLAY/1 OK connected=1 modes=65").is_err());
-        assert!(parse_driver_status("BRIDGE_DISPLAY/1 ERROR driver absent").is_err());
+        assert!(parse_vdd_topology("BRIDGE_DISPLAY/1 OK vdd_present=2 attached=1").is_err());
+        assert!(parse_vdd_topology("BRIDGE_DISPLAY/1 OK vdd_present=1 attached=2").is_err());
+        assert!(parse_vdd_topology("BRIDGE_DISPLAY/1 OK vdd_present=0 attached=1").is_err());
+        assert!(parse_vdd_topology("BRIDGE_DISPLAY/1 ERROR display adapter absent").is_err());
     }
 
     #[test]

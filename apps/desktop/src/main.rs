@@ -919,9 +919,9 @@ fn start_display_status_query(
         .spawn(move || {
             let message = match display_service::query_status() {
                 Ok(status) => format!(
-                    "Driver: {} · {} supported display modes.",
-                    if status.connected { "virtual monitor connected" } else { "virtual monitor disconnected" },
-                    status.supported_mode_count,
+                    "Upstream VDD: {}; Windows desktop: {}.",
+                    if status.present { "detected" } else { "not detected" },
+                    if status.attached_to_desktop { "attached" } else { "not attached" },
                 ),
                 Err(error) => format!("Driver status unavailable: {error}"),
             };
@@ -2484,11 +2484,11 @@ impl eframe::App for BridgeApp {
                                     }
                                 });
                                 muted(ui, &self.display_driver_status);
-                                muted(ui, "Connect asks the IddCx driver to create the virtual monitor; captured frames are then streamed to the paired Android device. Verify the monitor in Windows Settings > System > Display.");
+                                muted(ui, "Connect requests the upstream VDD to create its virtual monitor. Bridge verifies whether Windows enumerates it; frame capture is a separate integration step. Verify Extend mode in Windows Settings > System > Display.");
                             });
                             if refresh_status_clicked {
                                 if let Some((session_key, _)) = active_lease.as_ref() {
-                                    self.display_driver_status = "Querying the Windows display driver…".into();
+                                    self.display_driver_status = "Checking Windows display topology…".into();
                                     if let Err(error) = start_display_status_query(
                                         session_key.clone(),
                                         self.display_lease_tx.clone(),
