@@ -56,7 +56,7 @@ Driver installation and device configuration require elevation. Normal use of th
 
 ### Display service control boundary (migration in progress)
 
-The Rust service in `apps/windows-service` exposes a versioned local named-pipe protocol (`\\.\pipe\BridgeDisplayService`). The unprivileged desktop client uses that pipe for Android attestation, short-lived lease renewal, driver connect/disconnect, frame reads, and read-only driver status queries. The service attributes each pipe client to a live process image, verifies the configured desktop publisher, verifies the Android signature against the pairing-pinned key, and binds the resulting 15-second lease to that process and Android fingerprint. Driver mutations and frame reads require the exact active lease. The pipe is local-only and ACL-protected; the driver interface remains restricted to LocalSystem and local administrators.
+The Rust service in `apps/windows-service` exposes a versioned local named-pipe protocol (`\\.\pipe\BridgeDisplayService`). The unprivileged desktop client uses that pipe for Android attestation, short-lived lease renewal, upstream VDD connect/disconnect requests, and read-only driver status queries. The service attributes each pipe client to a live process image, verifies the configured desktop publisher, verifies the Android signature against the pairing-pinned key, and binds the resulting 15-second lease to that process and Android fingerprint. Display mutations require the exact active lease. Frame capture is performed by the desktop's DXGI adapter, not by the privileged service. The pipe is local-only and ACL-protected; the driver interface remains restricted to LocalSystem and local administrators.
 
 The desktop Second Screen panel exposes a read-only **Refresh monitor status** action. The service enumerates Windows display adapters and matches the exact upstream INF hardware ID `Root\\MttVDD`, reporting driver presence separately from attachment to the Windows desktop. The query does not bypass attestation or change driver state. This confirms topology only; it does not yet prove frame capture.
 
@@ -99,19 +99,20 @@ The first physical test target is the currently paired Redmi Note 7 Pro. Start w
 
 ## Delivery phases and acceptance gates
 
-### Phase A — driver and build foundation
-- Add a WDK/Visual Studio C++ UMDF IddCx driver project under a dedicated Windows driver directory.
-- Add a GitHub Actions Windows runner job that builds the driver package and validates the INF/package outputs. Keep the existing Windows MSI, Android APK, Rust, and iOS CI jobs intact.
-- Start from the official Microsoft IddSampleDriver structure; record the exact WDK/SDK and IddCx versions.
-- [x] Implement driver-side connect/disconnect/status IOCTLs and defer monitor arrival until explicitly requested by the service.
-- [x] Implement the Bridge Display Service control client, service identity/ACL, and authenticated-session-to-monitor lifecycle binding in the development path.
-- [x] Add a desktop diagnostic query for live driver connection state and supported display-mode count.
-- [ ] Physical acceptance: on a dedicated Windows test machine, Device Manager and Windows Display Settings show the Bridge virtual monitor, and connect/disconnect adds/removes it without destabilizing the physical display.
+### Phase A — upstream VDD and service integration
+- [x] Adopt the pinned, signed upstream VirtualDrivers VDD package; Bridge does not build or sign its own IddCx driver.
+- [x] Control the upstream VDD through its narrow local named-pipe interface.
+- [x] Detect the exact upstream VDD adapter and distinguish presence from attachment to the Windows desktop.
+- [x] Bind monitor lifecycle requests to the publisher-verified desktop process and short-lived Android-attested lease.
+- [ ] Verify redistribution terms and package the upstream driver in a rollback-capable installer.
+- [ ] Physical acceptance: Windows Display Settings lists the VDD monitor and Extend mode can be enabled.
 
-### Phase B — real frame acquisition and local preview
-- Implement swap-chain lifecycle and Direct3D surface handling.
-- Add a local diagnostic preview/recording path to validate frame delivery, timestamps, mode changes, and device loss before networking.
-- Acceptance: frames arrive continuously with bounded resource use; no UI stalls or swap-chain callback blocking.
+### Phase B — DXGI frame acquisition and Android delivery
+- [x] Capture only the exact upstream VDD output through DXGI Desktop Duplication; do not fall back to the primary display.
+- [x] Feed captured BGRA frames into the existing Media Foundation H.264 and authenticated Android delivery pipeline.
+- [x] Recover lost DXGI duplication sessions with bounded backoff and recreate capture resources after reopening the output.
+- [ ] Validate continuous frame presentation, mode changes, GPU reset, and sleep/resume on physical Windows hardware.
+- [ ] Measure capture-to-Android latency and resource use under sustained load.
 
 ### Phase C — encrypted low-latency media transport
 - Add a dedicated media channel tied to the trusted Bridge identity, with sequence numbers, timestamps, bounded jitter buffering, and adaptive bitrate/frame pacing.
