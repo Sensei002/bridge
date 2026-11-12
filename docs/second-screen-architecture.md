@@ -10,11 +10,11 @@ This is not desktop mirroring, a remote-control window, Miracast casting, or a v
 
 Bridge will **reuse the upstream VirtualDrivers Virtual Display Driver (VDD)**. Bridge will not maintain, compile, or sign its own IddCx/UMDF driver.
 
-- Upstream project: https://github.com/VirtualDrivers/Virtual-Display-Driver
-- Upstream release selected for the first integration prototype: **24.10.27** (`VirtualDisplayDriver-x64.zip`).
-- The upstream project publishes a signed x64 driver-only package (release 24.10.27) and identifies its source repository as MIT-licensed. The newer 25.7.23 control archive was tested in CI but contains only ARM64 and x86 driver folders, so it is not suitable for Bridge's x64 Windows target. The selected release archive is pinned by SHA-256 in the Windows driver validation workflow.
-- The official package is treated as a third-party dependency: Bridge must not modify its driver binaries, INF, catalog, or signatures.
-- Bridge must verify the upstream archive hash and Windows catalog signature before packaging or installing it. If verification fails, installation must stop; no test-signing mode, Secure Boot change, or Bridge-owned driver certificate is permitted.
+- Initial candidate: **Parsec Virtual Display Driver 0.45** via the MIT-licensed `nomi-san/parsec-vdd` integration project.
+- The newer VirtualDrivers package was rejected for Bridge's x64 target: its 25.7.23 bundle contained only ARM64 and x86 driver packages, while its older x64 ZIP contained a catalog that Windows reported as `NotSigned` and a certificate-install batch file. Bridge will not install that self-signed certificate.
+- Parsec VDD's upstream project documents Windows 10/11 64-bit support and a signed driver package. Its companion ParsecDisplay application is unsigned; Bridge will not bundle or execute that companion app.
+- The Parsec VDD driver must remain unmodified. CI must verify the x64 INF, catalog signature, archive hash, and signer before the dependency can be accepted.
+- No test-signing mode, Secure Boot change, Bridge-owned driver certificate, or certificate-root import is permitted.
 
 ### Required Bridge integration
 
@@ -35,7 +35,7 @@ VDD creates and manages the Windows virtual monitor. It does **not** automatical
 - Preserve upstream copyright and license notices in Bridge's third-party notices.
 - Verify the selected release's redistribution terms and exact signed package contents before embedding it in Bridge's installer. MIT licensing of the source repository does not, by itself, prove that every bundled binary or companion application can be redistributed.
 - Install the vendor-supplied signed driver package through an elevated, rollback-capable installer. Do not install it by importing a Bridge-generated certificate or re-signing the catalog.
-- Provide clean uninstall and recovery if driver installation fails. The upstream project warns that display priority can be affected during GPU/chipset driver updates; Bridge must document safe recovery.
+- Provide clean uninstall and recovery if driver installation fails. The Parsec VDD API requires a keepalive ping roughly once per second or the virtual display is removed. Bridge's service must own that watchdog and stop it cleanly. Bridge must also document safe recovery and known limitations, including no HDR.
 - Keep the current Bridge IddCx implementation only as a temporary migration reference. It must not be built, signed, installed, or shipped in the new path.
 
 ## Windows application and service split
@@ -46,7 +46,7 @@ Introduce separate components:
 
 1. **Bridge desktop UI (existing Rust/egui app):** normal interactive user-session app. Owns device selection, permissions, display settings, connect/disconnect actions, status, and diagnostics.
 2. **Bridge Display Service (Windows service):** privileged boundary for driver lifecycle, authenticated session coordination, media transport, encoder orchestration, recovery, and Windows service startup/shutdown. Expose a narrow, ACL-protected named-pipe API to the desktop UI. Run with the least privilege compatible with driver communication; do not default to LocalSystem without a demonstrated need.
-3. **Upstream Virtual Display Driver (third-party signed package):** owns the virtual display adapter, monitor PnP lifecycle, and mode negotiation. Bridge does not build or sign this driver. Bridge's capture adapter reads the resulting virtual output through Windows display/capture APIs.
+3. **Upstream Parsec Virtual Display Driver (third-party signed package):** owns the virtual display adapter, monitor PnP lifecycle, and mode negotiation. Bridge does not build or sign this driver. Bridge's capture adapter reads the resulting virtual output through Windows display/capture APIs.
 
 Driver installation and device configuration require elevation. Normal use of the desktop UI should not require running the whole app as administrator. Package the driver and service with the Windows installer only after installation, upgrade, rollback, and uninstall behaviour are defined.
 
