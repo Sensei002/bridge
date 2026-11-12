@@ -8,8 +8,9 @@ Bridge will use an existing signed x64 VDD package instead of maintaining a Brid
 
 - Integration project: https://github.com/nomi-san/parsec-vdd
 - Upstream release: https://github.com/nomi-san/parsec-vdd/releases/tag/v0.45.1
-- Package under CI verification: `ParsecVDisplay-v0.45-portable.zip`
-- The project documents Windows 10/11 64-bit support and a signed Parsec virtual display driver.
+- Package verified by CI: `ParsecVDisplay-v0.45-portable.zip`
+- The project documents Windows 10/11 64-bit support. CI extracted the x64 driver package and verified its catalog signature as `Microsoft Windows Hardware Compatibility Publisher`.
+- Pinned archive SHA-256: `9792e4121d85ed3e4c40c2d8ba36ec8657e13227a8357d719d923e801238ccdd`.
 - The ParsecDisplay companion app is explicitly unsigned; Bridge will not bundle or execute it.
 - Parsec VDD requires a keepalive ping about once per second or it removes the virtual display. Bridge's Windows service must implement that watchdog.
 
