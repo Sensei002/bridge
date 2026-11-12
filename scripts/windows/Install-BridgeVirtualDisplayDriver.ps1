@@ -65,7 +65,17 @@ if ($existingPackages.Count -gt 0) {
     Write-Host "Verified upstream VDD package is already in the Windows Driver Store."
     Write-Host "Published package(s): $($existingPackages.Driver -join ', ')"
 } else {
-    $pnputil = Join-Path (Join-Path $env:SystemRoot "System32") "pnputil.exe"
+    $systemDirectory = if ([Environment]::Is64BitOperatingSystem -and -not [Environment]::Is64BitProcess) {
+        # A 32-bit PowerShell process is redirected away from System32. Sysnative
+        # is the documented alias that reaches the native 64-bit system directory.
+        Join-Path $env:windir "Sysnative"
+    } else {
+        Join-Path $env:windir "System32"
+    }
+    $pnputil = Join-Path $systemDirectory "pnputil.exe"
+    if (-not (Test-Path -LiteralPath $pnputil -PathType Leaf)) {
+        throw "Windows pnputil.exe was not found at the native system path: $pnputil"
+    }
     & $pnputil /add-driver $infs[0].FullName
     $exitCode = $LASTEXITCODE
     if ($exitCode -notin @(0, 3010)) { throw "Windows rejected the signed VDD package (pnputil exit code $exitCode)." }
