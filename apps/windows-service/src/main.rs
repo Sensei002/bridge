@@ -303,13 +303,14 @@ fn handle_request(
 
     let result = match request {
         Request::Ping => Ok(b"BRIDGE_DISPLAY/1 PONG\n".to_vec()),
-        Request::Query => vdd_topology::query().map(|status| {
-            format!(
+        Request::Query => {
+            let status = vdd_topology::query();
+            Ok(format!(
                 "BRIDGE_DISPLAY/1 OK vdd_present={} attached={}\n",
                 u8::from(status.present),
                 u8::from(status.attached_to_desktop),
-            ).into_bytes()
-        }),
+            ).into_bytes())
+        },
         Request::Challenge => verify_publisher::verify_client_publisher(&caller.image_path)
             .and_then(|_| {
                 // The legacy unsigned challenge path must never retain an attested lease.
