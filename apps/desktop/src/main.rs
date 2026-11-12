@@ -869,7 +869,7 @@ fn start_display_frame_stream(
                                         if h264_samples_sent == 1 || h264_samples_sent % 120 == 0 {
                                             let _ = events.send(DisplayLeaseEvent::Status {
                                                 session_key: session_key.clone(),
-                                                message: format!("Windows sent {h264_samples_sent} bounded H.264 access unit(s) to Android over the authenticated session. Android MediaCodec receives the encoded stream alongside the BGRA fallback."),
+                                                message: format!("Windows sent {h264_samples_sent} bounded H.264 access unit(s) to Android over the authenticated session. Android MediaCodec receives the encoded stream; raw BGRA is stopped after the first successful H.264 access unit to reduce bandwidth."),
                                             });
                                         }
                                     }
