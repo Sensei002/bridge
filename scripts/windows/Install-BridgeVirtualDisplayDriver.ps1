@@ -1,7 +1,7 @@
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
     [string]$DownloadDirectory = (Join-Path $env:TEMP "Bridge-VDD-25.7.23"),
-    [string]$PayloadDirectory = (Join-Path $env:ProgramFiles "Bridge\\DisplayServiceSetup\\VDD")
+    [string]$PayloadDirectory = (Join-Path $env:ProgramFiles "Bridge\DisplayServiceSetup\VDD")
 )
 $ErrorActionPreference = "Stop"
 $releaseUrl = "https://github.com/VirtualDrivers/Virtual-Display-Driver/releases/download/25.7.23/VirtualDisplayDriver-x86.Driver.Only.zip"
