@@ -1,6 +1,6 @@
 # Bridge Milestone 1 device validation
 
-This document records the physical-device validation scope for Milestone 1. Windows + Android are the currently available and validated target platforms. iOS physical-device and Linux desktop testing are deferred until suitable test hardware/environments are available.
+This document records the physical-device validation scope for Milestone 1. Windows + Android are the currently supported and validated target platforms. Linux desktop testing is planned for a future milestone.
 
 ## Windows ↔ Android: completed
 
@@ -15,8 +15,6 @@ This document records the physical-device validation scope for Milestone 1. Wind
 
 ## Deferred platform coverage
 
-- [ ] Windows ↔ iOS physical-device interoperability (requires iPhone and Mac test environment).
-- [ ] Android ↔ iOS physical-device interoperability (requires iPhone and Mac test environment).
 - [ ] Linux desktop client installation and physical-device interoperability (deferred until Linux is installed).
 
 ## Additional hardening coverage
