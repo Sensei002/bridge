@@ -638,7 +638,7 @@ mod h264_access_unit_tests {
 fn start_display_frame_stream(
     session: Arc<DesktopSession>,
     session_key: String,
-    lease: display_service::ServiceLease,
+    _lease: display_service::ServiceLease,
     stop: Arc<std::sync::atomic::AtomicBool>,
     events: Sender<DisplayLeaseEvent>,
 ) -> Result<(), String> {
