@@ -10,11 +10,13 @@ This is not desktop mirroring, a remote-control window, Miracast casting, or a v
 
 Bridge will **reuse the upstream VirtualDrivers Virtual Display Driver (VDD)**. Bridge will not maintain, compile, or sign its own IddCx/UMDF driver.
 
-- Preferred candidate: **VirtualDrivers Virtual Display Driver 25.7.23**, whose catalog signature was verified by CI as SignPath Foundation. Its driver folder is named `x86`, so Bridge is now checking the actual PE machine type rather than assuming the folder name means 32-bit.
-- The older VirtualDrivers x64-only ZIP (24.10.27) was rejected because Windows reported its catalog as `NotSigned` and it shipped a certificate-install batch file.
-- **Fallback candidate:** Parsec VDD 0.45.1. CI verified its x64 INF/DLL and Microsoft Windows Hardware Compatibility Publisher catalog signature. Its driver is Parsec-owned; binary redistribution terms must be confirmed before bundling.
-- CI inspects both packages. The VirtualDrivers package wins if its `MttVDD.dll` PE machine is AMD64; otherwise Parsec remains the fallback candidate.
-- Neither path may require test-signing mode, Secure Boot changes, a Bridge-owned driver certificate, or importing a Bridge-owned root certificate.
+- Selected dependency: **VirtualDrivers Virtual Display Driver 25.7.23**.
+- CI verified that `SignedDrivers\\x86\\VDD\\MttVDD.dll` is actually an **AMD64** PE image (`0x8664`), despite the folder name.
+- CI verified the driver catalog is valid and signed by **SignPath Foundation** (thumbprint `3CF8CF26D8BA266C3A483AB7D26D4A818E317D76`).
+- The pinned `VDD.Control.25.7.23.zip` archive SHA-256 is `a701f2272e9fcf382849b24f913c6dd07597b3b1116525f2e90182f019609154`.
+- The older 24.10.27 x64-only ZIP was rejected because Windows reported its catalog as `NotSigned`; use the 25.7.23 package instead.
+- CI now also verifies the INF and driver DLL against Windows kernel-mode catalog policy with SignTool `/kp`. This is a required gate before packaging.
+- No test-signing mode, Secure Boot change, Bridge-owned driver certificate, or Bridge root-certificate import is permitted.
 
 ### Required Bridge integration
 
