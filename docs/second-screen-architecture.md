@@ -35,7 +35,7 @@ VDD creates and manages the Windows virtual monitor. It does **not** automatical
 - Preserve upstream copyright and license notices in Bridge's third-party notices.
 - Verify the selected release's redistribution terms and exact signed package contents before embedding it in Bridge's installer. MIT licensing of the source repository does not, by itself, prove that every bundled binary or companion application can be redistributed.
 - Install the vendor-supplied signed driver package through an elevated, rollback-capable installer. Do not install it by importing a Bridge-generated certificate or re-signing the catalog.
-- Provide clean uninstall and recovery if driver installation fails. The Parsec VDD API requires a keepalive ping roughly once per second or the virtual display is removed. Bridge's service must own that watchdog and stop it cleanly. Bridge must also document safe recovery and known limitations, including no HDR.
+- Provide clean uninstall and recovery if driver installation fails. The Parsec VDD API requires a keepalive ping roughly once per second or the virtual display is removed. Bridge's service must own that watchdog and stop it cleanly. The upstream Rust client reference is https://github.com/rohitsangwan01/parsec-vdd-rust; review its API/unsafe code before reuse rather than assuming it is production-ready. Bridge must also document safe recovery and known limitations, including no HDR.
 - Keep the current Bridge IddCx implementation only as a temporary migration reference. It must not be built, signed, installed, or shipped in the new path.
 
 ## Windows application and service split
