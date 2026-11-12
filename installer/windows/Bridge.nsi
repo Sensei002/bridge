@@ -73,7 +73,7 @@ Section "Bridge" SEC_MAIN
   nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\DisplayServiceSetup\Install-BridgeVirtualDisplayDriver.ps1"'
   Pop $0
   ${If} $0 != 0
-    MessageBox MB_ICONSTOP "Virtual Display Driver installation failed (exit code $0). Bridge setup cannot enable Second Screen."
+    MessageBox MB_ICONSTOP "Virtual Display Driver installation failed (exit code $0). Bridge setup cannot enable Second Screen.$\r$\nDiagnostic log: $PROGRAMDATA\Bridge\Logs\installer-vdd.log"
     Abort
   ${EndIf}
 
