@@ -13,7 +13,6 @@ use windows_sys::{
     },
 };
 
-const IOCTL_QUERY: u32 = (0x22 << 16) | (0x802 << 2) | (1 << 14);
 const IOCTL_READ_FRAME: u32 = (0x22 << 16) | (0x803 << 2) | (2 << 14) | (1 << 14);
 const IOCTL_QUERY_FRAME: u32 = (0x22 << 16) | (0x804 << 2) | (1 << 14);
 const FRAME_HEADER_SIZE: usize = 48;
@@ -28,15 +27,6 @@ const BRIDGE_DISPLAY_INTERFACE_GUID: GUID = GUID {
     data3: 0x4a72,
     data4: [0x9d, 0x8f, 0x43, 0x21, 0x6b, 0x70, 0x2e, 0xa1],
 };
-
-#[repr(C)]
-#[derive(Default, Debug, Clone, Copy)]
-pub struct DriverStatus {
-    pub size: u32,
-    pub version: u32,
-    pub is_connected: u32,
-    pub supported_mode_count: u32,
-}
 
 fn interface_path() -> io::Result<Vec<u16>> {
     let mut chars = 0_u32;
@@ -96,31 +86,6 @@ fn with_driver<T>(operation: impl FnOnce(HANDLE) -> io::Result<T>) -> io::Result
     result
 }
 
-pub fn query() -> io::Result<DriverStatus> {
-    with_driver(|handle| {
-        let mut status = DriverStatus { size: size_of::<DriverStatus>() as u32, ..Default::default() };
-        let mut returned = 0_u32;
-        let ok = unsafe {
-            DeviceIoControl(
-                handle,
-                IOCTL_QUERY,
-                null(),
-                0,
-                &mut status as *mut DriverStatus as *mut _,
-                size_of::<DriverStatus>() as u32,
-                &mut returned,
-                null_mut(),
-            )
-        };
-        if ok == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        if returned as usize != size_of::<DriverStatus>() || status.version != 1 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "driver control protocol version or response size mismatch"));
-        }
-        Ok(status)
-    })
-}
 
 
 
