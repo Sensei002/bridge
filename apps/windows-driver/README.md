@@ -8,7 +8,7 @@ Bridge will use an existing signed x64 VDD package instead of maintaining a Brid
 
 - Upstream: https://github.com/VirtualDrivers/Virtual-Display-Driver
 - Package: `VirtualDisplayDriver-x86.Driver.Only.zip`
-- Archive SHA-256: pending first CI verification run for the driver-only package
+- Archive SHA-256: `e24210692b442b39af763536330ce78b423f19342b7a7792c26de3944e418b3a`
 - Driver-only archive contains `MttVDD.dll`, `MttVDD.inf`, and `mttvdd.cat` without the companion VDD Control app.
 - The DLL at that path is verified as AMD64 (PE machine `0x8664`); the folder name is misleading.
 - Catalog signer: SignPath Foundation; thumbprint `3CF8CF26D8BA266C3A483AB7D26D4A818E317D76`.
