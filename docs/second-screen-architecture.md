@@ -29,6 +29,8 @@ VDD creates and manages the Windows virtual monitor. It does **not** automatical
 5. Keep capture tied to the active, attested Android session; stop capture and disable/remove the virtual output on disconnect or lease expiry.
 6. Validate monitor hotplug, mode changes, GPU reset, sleep/resume, multi-monitor layouts, and capture recovery.
 
+The current Windows DXGI capture worker now retries lost duplication sessions with bounded exponential backoff (250 ms up to 5 s) while the authenticated Android session remains alive. Each successful reopen re-enumerates the exact upstream VDD output and recreates the D3D11 staging texture at the output's current dimensions; the H.264 encoder is reset so it can be initialized for the recovered mode. Retries stop immediately when the session or display operation is stopped. This is recovery logic in code, not yet physical validation across GPU reset, sleep/resume, or repeated mode changes.
+
 **No mirror-only fallback counts as completion.** The acceptance gate remains: Windows Settings > System > Display lists the VDD monitor, the user selects Extend, and ordinary application windows can be moved onto the Android display.
 
 ### Third-party driver lifecycle and licensing
