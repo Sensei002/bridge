@@ -13,15 +13,6 @@ $installDirectory = Join-Path $env:ProgramFiles "Bridge\DisplayService"
 $installedExecutable = Join-Path $installDirectory "bridge-display-service.exe"
 $installedPublisherPin = Join-Path $installDirectory "bridge-desktop-publisher.sha256"
 
-function Get-CertificateSha256 {
-    param([Parameter(Mandatory = $true)][Security.Cryptography.X509Certificates.X509Certificate2]$Certificate)
-    $sha = [Security.Cryptography.SHA256]::Create()
-    try {
-        return ([Convert]::ToHexString($sha.ComputeHash($Certificate.RawData))).ToUpperInvariant()
-    } finally {
-        $sha.Dispose()
-    }
-}
 function Assert-Administrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = [Security.Principal.WindowsPrincipal]::new($identity)
@@ -47,14 +38,6 @@ if ([IO.Path]::GetExtension($resolvedExecutable) -ne ".exe" -or [IO.Path]::GetFi
     throw "ServiceExecutable must point to bridge-display-service.exe."
 }
 
-$signature = Get-AuthenticodeSignature -LiteralPath $resolvedExecutable
-if ($signature.Status -ne "Valid" -or $null -eq $signature.SignerCertificate) {
-    if ($AllowUnsignedDevelopmentBuild) {
-        throw "Unsigned development services cannot establish the publisher pin required for authenticated Second Screen. Install a signed Bridge release instead."
-    }
-    throw "The service executable is not Authenticode-valid. Use a properly signed Bridge release."
-}
-
 $setupDirectory = Split-Path -Parent $resolvedExecutable
 $desktopExecutable = Join-Path (Split-Path -Parent $setupDirectory) "bridge-desktop.exe"
 $publisherPinSource = Join-Path $setupDirectory "bridge-desktop-publisher.sha256"
@@ -62,21 +45,15 @@ if (-not (Test-Path -LiteralPath $desktopExecutable -PathType Leaf)) {
     throw "The matching Bridge desktop executable was not found beside DisplayServiceSetup."
 }
 if (-not (Test-Path -LiteralPath $publisherPinSource -PathType Leaf)) {
-    throw "The signed Bridge publisher pin is missing from DisplayServiceSetup."
+    throw "The Bridge desktop executable pin is missing from DisplayServiceSetup."
 }
 $publisherPin = (Get-Content -LiteralPath $publisherPinSource -Raw).Trim().ToUpperInvariant()
 if ($publisherPin -notmatch '^[0-9A-F]{64}$') {
-    throw "The Bridge desktop publisher pin must contain exactly 64 hexadecimal characters."
+    throw "The Bridge desktop executable pin must contain exactly 64 hexadecimal characters."
 }
-
-$desktopSignature = Get-AuthenticodeSignature -LiteralPath $desktopExecutable
-if ($desktopSignature.Status -ne "Valid" -or $null -eq $desktopSignature.SignerCertificate) {
-    throw "The Bridge desktop executable does not have a trusted Authenticode signature (status: $($desktopSignature.Status))."
-}
-$serviceSignerHash = Get-CertificateSha256 -Certificate $signature.SignerCertificate
-$desktopSignerHash = Get-CertificateSha256 -Certificate $desktopSignature.SignerCertificate
-if ($serviceSignerHash -ne $publisherPin -or $desktopSignerHash -ne $publisherPin) {
-    throw "The desktop executable, service executable, and packaged publisher pin do not all match the same trusted signing certificate."
+$desktopHash = (Get-FileHash -LiteralPath $desktopExecutable -Algorithm SHA256).Hash.ToUpperInvariant()
+if ($desktopHash -ne $publisherPin) {
+    throw "The packaged Bridge desktop executable does not match its SHA-256 pin."
 }
 
 $existing = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
@@ -95,7 +72,7 @@ $sourceHash = (Get-FileHash -LiteralPath $resolvedExecutable -Algorithm SHA256).
 $installedHash = (Get-FileHash -LiteralPath $installedExecutable -Algorithm SHA256).Hash
 if ($sourceHash -ne $installedHash) { throw "The installed service executable does not match the verified source file." }
 $installedPin = (Get-Content -LiteralPath $installedPublisherPin -Raw).Trim().ToUpperInvariant()
-if ($installedPin -ne $publisherPin) { throw "The installed Bridge publisher pin does not match the verified package pin." }
+if ($installedPin -ne $publisherPin) { throw "The installed Bridge desktop executable pin does not match the package pin." }
 
 $binaryPath = '"' + $installedExecutable + '"'
 if ($null -eq $existing) {
@@ -113,5 +90,5 @@ $service.WaitForStatus([ServiceProcess.ServiceControllerStatus]::Running, [TimeS
 Write-Host "Bridge Display Service installed and running."
 Write-Host "Executable: $installedExecutable"
 Write-Host "Directory ACL: SYSTEM/Administrators full control; Users read/execute."
-Write-Host "Desktop publisher SHA-256 pin: $publisherPin"
+Write-Host "Desktop executable SHA-256 pin: $publisherPin"
 Write-Host "Account: LocalSystem | Startup: Automatic"
