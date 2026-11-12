@@ -903,23 +903,42 @@ fn start_display_frame_stream(
                         persistent_encoder = None;
                         encoder_dimensions = None;
                         encoder_unavailable = false;
-                        match vdd_capture::VddCapture::open() {
-                            Ok(reopened) => {
-                                let (width, height) = reopened.dimensions();
-                                capture = reopened;
-                                last_sequence = 0;
-                                let _ = events.send(DisplayLeaseEvent::Status {
-                                    session_key: session_key.clone(),
-                                    message: format!("DXGI capture recovered on the upstream VDD output at {width}×{height}."),
-                                });
+                        // Desktop Duplication sessions become invalid after display-mode,
+                        // topology, sleep/resume, or GPU changes. Keep retrying with bounded
+                        // exponential backoff instead of hammering DXGI every frame.
+                        let mut retry_delay = Duration::from_millis(250);
+                        let mut reopened_capture = None;
+                        while !stop.load(Ordering::Acquire) && session.is_alive() {
+                            match vdd_capture::VddCapture::open() {
+                                Ok(reopened) => {
+                                    reopened_capture = Some(reopened);
+                                    break;
+                                }
+                                Err(reopen_error) => {
+                                    let _ = events.send(DisplayLeaseEvent::Status {
+                                        session_key: session_key.clone(),
+                                        message: format!(
+                                            "Upstream VDD capture is unavailable; retrying in {:.2}s: {reopen_error}",
+                                            retry_delay.as_secs_f64()
+                                        ),
+                                    });
+                                    thread::sleep(retry_delay);
+                                    retry_delay = retry_delay
+                                        .saturating_mul(2)
+                                        .min(Duration::from_secs(5));
+                                }
                             }
-                            Err(reopen_error) => {
-                                let _ = events.send(DisplayLeaseEvent::Status {
-                                    session_key: session_key.clone(),
-                                    message: format!("Upstream VDD capture is unavailable: {reopen_error}"),
-                                });
-                                thread::sleep(Duration::from_millis(500));
-                            }
+                        }
+                        if let Some(reopened) = reopened_capture {
+                            let (width, height) = reopened.dimensions();
+                            capture = reopened;
+                            last_sequence = 0;
+                            let _ = events.send(DisplayLeaseEvent::Status {
+                                session_key: session_key.clone(),
+                                message: format!("DXGI capture recovered on the upstream VDD output at {width}×{height}."),
+                            });
+                        } else {
+                            break;
                         }
                     }
                 }
