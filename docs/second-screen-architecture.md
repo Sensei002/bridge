@@ -15,7 +15,7 @@ Bridge will **reuse the upstream VirtualDrivers Virtual Display Driver (VDD)**. 
 - CI verified the driver catalog is valid and signed by **SignPath Foundation** (thumbprint `3CF8CF26D8BA266C3A483AB7D26D4A818E317D76`).
 - The pinned `VDD.Control.25.7.23.zip` archive SHA-256 is `a701f2272e9fcf382849b24f913c6dd07597b3b1116525f2e90182f019609154`.
 - The older 24.10.27 x64-only ZIP was rejected because Windows reported its catalog as `NotSigned`; use the 25.7.23 package instead.
-- CI now also verifies the INF and driver DLL against Windows kernel-mode catalog policy with SignTool `/kp`. This is a required gate before packaging.
+- This is an UMDF user-mode driver, so CI verifies the INF and driver DLL against Windows PnP package-signing policy with SignTool `/pa` and stages the package with `pnputil /add-driver`. Kernel-mode `/kp` is not the applicable policy for this UMDF DLL.
 - No test-signing mode, Secure Boot change, Bridge-owned driver certificate, or Bridge root-certificate import is permitted.
 
 ### Required Bridge integration
