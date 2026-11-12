@@ -60,7 +60,8 @@ Architecture and acceptance gates: [docs/second-screen-architecture.md](second-s
 - [x] Remove the obsolete Bridge-owned driver IOCTL frame-read path; the privileged service now handles lifecycle and topology only, while DXGI capture stays in the desktop process.
 - [x] Add bounded DXGI capture-session recovery with exponential backoff and resource recreation.
 - [x] Validate each acquired DXGI texture against the active mode and force a bounded reopen when dimensions, orientation, or pixel format changes.
-- [ ] Implement elevated, rollback-capable installation/uninstallation of the vendor-signed VDD package; no Bridge driver signing or test-signing.
+- [x] Add explicit elevated PowerShell bootstrap scripts to download the pinned upstream driver-only package, verify its hash, SignPath catalog signer and AMD64 architecture, and install/remove it through Windows PnP.
+- [ ] Integrate driver and service setup into one elevated, rollback-capable Windows install/upgrade/uninstall flow; no Bridge driver signing or test-signing.
 - [ ] Validate Windows Extend mode on a physical Windows machine: move ordinary application windows onto the Android display.
 
 ### Real-time desktop media pipeline
