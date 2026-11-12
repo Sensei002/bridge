@@ -1,5 +1,8 @@
 [CmdletBinding(SupportsShouldProcess = $true)]
-param([string]$DownloadDirectory = (Join-Path $env:TEMP "Bridge-VDD-25.7.23"))
+param(
+    [string]$DownloadDirectory = (Join-Path $env:TEMP "Bridge-VDD-25.7.23"),
+    [string]$PayloadDirectory = (Join-Path $env:ProgramFiles "Bridge\\DisplayServiceSetup\\VDD")
+)
 $ErrorActionPreference = "Stop"
 $releaseUrl = "https://github.com/VirtualDrivers/Virtual-Display-Driver/releases/download/25.7.23/VirtualDisplayDriver-x86.Driver.Only.zip"
 $expectedArchiveSha256 = "e24210692b442b39af763536330ce78b423f19342b7a7792c26de3944e418b3a"
@@ -19,21 +22,13 @@ function Get-InstalledBridgeVddPackages {
     Import-Module Dism -ErrorAction Stop
     @(Get-WindowsDriver -Online -All | Where-Object { $_.OriginalFileName -match '(?i)\\MttVDD\.inf$' })
 }
-function Get-BridgeVddDevices {
-    # Root-enumerated devices are exposed by Windows as ROOT\DISPLAY\####.
-    # Root\MttVDD is their hardware ID, not their PnP instance ID.
-    @(Get-PnpDevice -Class Display -PresentOnly:$false -ErrorAction SilentlyContinue |
-        Where-Object {
-            $hardwareIds = (Get-PnpDeviceProperty -InstanceId $_.InstanceId -KeyName 'DEVPKEY_Device_HardwareIds' -ErrorAction SilentlyContinue).Data
-            @($hardwareIds) -contains 'Root\MttVDD'
-        })
-}
 
 Assert-Administrator
 if (-not [Environment]::Is64BitOperatingSystem) { throw "Bridge Second Screen currently requires 64-bit Windows." }
-if (-not $PSCmdlet.ShouldProcess("VirtualDrivers VDD 25.7.23", "Download, verify, and create the signed AMD64 root-enumerated display device")) { return }
+if (-not $PSCmdlet.ShouldProcess("VirtualDrivers VDD 25.7.23", "Verify and stage the signed driver package without creating a display device")) { return }
 
 New-Item -ItemType Directory -Path $DownloadDirectory -Force | Out-Null
+New-Item -ItemType Directory -Path $PayloadDirectory -Force | Out-Null
 $archive = Join-Path $DownloadDirectory "VirtualDisplayDriver-x86.Driver.Only.zip"
 $extract = Join-Path $DownloadDirectory "package"
 $nefconArchive = Join-Path $DownloadDirectory "nefcon_v1.14.0.zip"
@@ -41,8 +36,8 @@ $nefconExtract = Join-Path $DownloadDirectory "nefcon"
 if (Test-Path -LiteralPath $extract) { Remove-Item -LiteralPath $extract -Recurse -Force }
 if (Test-Path -LiteralPath $nefconExtract) { Remove-Item -LiteralPath $nefconExtract -Recurse -Force }
 
-# The INF must be installed against a ROOT\MttVDD device instance. pnputil
-# alone only stages the package; it does not create this root-enumerated device.
+# Stage only the signed package. Do NOT create ROOT\\MttVDD here: doing so
+# makes Windows enumerate a monitor during NSIS setup and can move every window.
 Write-Host "Downloading the official VirtualDrivers 25.7.23 driver-only package..."
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 Invoke-WebRequest -Uri $releaseUrl -OutFile $archive -UseBasicParsing
@@ -67,54 +62,33 @@ if ($peOffset -lt 0 -or ($peOffset + 6) -gt $bytes.Length -or [BitConverter]::To
 
 $existingPackages = @(Get-InstalledBridgeVddPackages)
 if ($existingPackages.Count -gt 0) {
-    Write-Host "Verified upstream VDD package is already in the Windows Driver Store; staging is not repeated."
+    Write-Host "Verified upstream VDD package is already in the Windows Driver Store."
     Write-Host "Published package(s): $($existingPackages.Driver -join ', ')"
 } else {
-    $pnputil = Join-Path $env:SystemRoot "System32\pnputil.exe"
+    $pnputil = Join-Path $env:SystemRoot "System32\\pnputil.exe"
     & $pnputil /add-driver $infs[0].FullName
     $exitCode = $LASTEXITCODE
     if ($exitCode -notin @(0, 3010)) { throw "Windows rejected the signed VDD package (pnputil exit code $exitCode)." }
     if ($exitCode -eq 3010) { Write-Warning "Windows requested a restart to complete driver staging." }
 }
 
-# NefCon is the open-source DevCon-compatible root-device installer used by
-# the upstream VDD project's own silent-install instructions. Pin its release.
-Write-Host "Downloading the pinned NefCon root-device installer..."
+# Keep the verified INF payload and pinned root-device installer for the
+# privileged service. Device creation is deferred until a trusted session has
+# passed Android attestation and received a short-lived display lease.
+Copy-Item -LiteralPath (Split-Path -Parent $infs[0].FullName) -Destination $PayloadDirectory -Recurse -Force
+Write-Host "Downloading the pinned NefCon root-device installer (not executed during setup)..."
 Invoke-WebRequest -Uri $nefconUrl -OutFile $nefconArchive -UseBasicParsing
 $nefconHash = (Get-FileHash -LiteralPath $nefconArchive -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($nefconHash -ne $expectedNefconSha256) { throw "NefCon archive SHA-256 mismatch. Expected $expectedNefconSha256; received $nefconHash. Nothing was executed." }
 Expand-Archive -LiteralPath $nefconArchive -DestinationPath $nefconExtract -Force
-$nefcon = Join-Path $nefconExtract "x64\nefconw.exe"
-if (-not (Test-Path -LiteralPath $nefcon -PathType Leaf)) { throw "The pinned NefCon archive does not contain x64\nefconw.exe." }
+$nefcon = Join-Path $nefconExtract "x64\\nefconw.exe"
+if (-not (Test-Path -LiteralPath $nefcon -PathType Leaf)) { throw "The pinned NefCon archive does not contain x64\\nefconw.exe." }
+Copy-Item -LiteralPath $nefcon -Destination (Join-Path $PayloadDirectory "nefconw.exe") -Force
 
-$devices = @(Get-BridgeVddDevices)
-if ($devices.Count -eq 0) {
-    Write-Host "Creating the missing ROOT\MttVDD device instance..."
-    & $nefcon install $infs[0].FullName "Root\MttVDD"
-    $nefconExit = $LASTEXITCODE
-    if ($nefconExit -ne 0) { throw "NefCon could not create ROOT\MttVDD (exit code $nefconExit)." }
-} else {
-    Write-Host "ROOT\MttVDD device instance already exists; not creating a duplicate."
+$stagedInf = Get-ChildItem -LiteralPath $PayloadDirectory -Recurse -File -Filter "MttVDD.inf" | Select-Object -First 1
+if ($null -eq $stagedInf -or -not (Test-Path -LiteralPath (Join-Path $PayloadDirectory "nefconw.exe"))) {
+    throw "The deferred VDD activation payload is incomplete."
 }
-
-$deviceDeadline = (Get-Date).AddSeconds(30)
-do {
-    Start-Sleep -Milliseconds 500
-    $devices = @(Get-BridgeVddDevices)
-} while ($devices.Count -eq 0 -and (Get-Date) -lt $deviceDeadline)
-if ($devices.Count -eq 0) {
-    throw "The driver package is staged, but Windows did not enumerate ROOT\MttVDD after NefCon installation. Check Device Manager for a driver start error."
-}
-$devices | Format-Table Status,Class,FriendlyName,InstanceId -AutoSize
-
-$pipeDeadline = (Get-Date).AddSeconds(30)
-do {
-    Start-Sleep -Milliseconds 500
-    $pipeReady = Test-Path -LiteralPath '\\.\pipe\MTTVirtualDisplayPipe'
-} while (-not $pipeReady -and (Get-Date) -lt $pipeDeadline)
-if (-not $pipeReady) {
-    throw "ROOT\MttVDD exists, but the upstream MTTVirtualDisplayPipe did not become available. Check the VDD device status and Microsoft Visual C++ Redistributable."
-}
-
-Write-Host "SUCCESS: signed VirtualDrivers VDD is staged, ROOT\MttVDD is enumerated, and its control pipe is available."
-Write-Host "The virtual monitor is still activated only during an authenticated Bridge Second Screen session."
+Write-Host "SUCCESS: signed VDD package staged and activation payload installed."
+Write-Host "No ROOT\\MttVDD device was created; no virtual monitor was attached during setup."
+Write-Host "Bridge will create the device only after a trusted Second Screen session is authorized."
