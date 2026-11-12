@@ -90,7 +90,7 @@ impl VddCapture {
                 let feature_levels = [D3D_FEATURE_LEVEL_11_0];
                 unsafe {
                     D3D11CreateDevice(
-                        Some(&dxgi_adapter),
+                        &dxgi_adapter,
                         D3D_DRIVER_TYPE_UNKNOWN,
                         HMODULE::default(),
                         D3D11_CREATE_DEVICE_BGRA_SUPPORT,
