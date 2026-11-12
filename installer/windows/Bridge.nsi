@@ -57,6 +57,15 @@ Section "Bridge" SEC_MAIN
   File "${SCRIPTS_DIR}\Uninstall-BridgeDisplayService.ps1"
   File "${SCRIPTS_DIR}\Install-BridgeVirtualDisplayDriver.ps1"
   File "${SCRIPTS_DIR}\Uninstall-BridgeVirtualDisplayDriver.ps1"
+  File "${SCRIPTS_DIR}\Remove-LegacyBridgeMsi.ps1"
+
+  DetailPrint "Migrating any previous per-user Bridge installation..."
+  nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\DisplayServiceSetup\Remove-LegacyBridgeMsi.ps1"'
+  Pop $0
+  ${If} $0 != 0
+    MessageBox MB_ICONSTOP "Could not safely remove the previous Bridge installation (exit code $0)."
+    Abort
+  ${EndIf}
 
   ; Install the pinned, already-signed upstream VDD and the authenticated
   ; LocalSystem service. Both scripts independently require administrator rights.
@@ -110,6 +119,7 @@ Section "Uninstall"
   DeleteRegKey HKLM "${APP_UNINSTALL_KEY}"
   DeleteRegKey HKLM "${APP_REG_KEY}"
   RMDir /r "$INSTDIR\DisplayServiceSetup"
+  RMDir /r "$PROGRAMFILES64\Bridge\DisplayService"
   Delete "$INSTDIR\bridge-desktop.exe"
   Delete "$INSTDIR\Uninstall.exe"
   RMDir "$INSTDIR"
