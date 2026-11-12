@@ -11,8 +11,8 @@ This is not desktop mirroring, a remote-control window, Miracast casting, or a v
 Bridge will **reuse the upstream VirtualDrivers Virtual Display Driver (VDD)**. Bridge will not maintain, compile, or sign its own IddCx/UMDF driver.
 
 - Upstream project: https://github.com/VirtualDrivers/Virtual-Display-Driver
-- Upstream release selected for the first integration prototype: **25.7.23** (`VDD.Control.25.7.23.zip`).
-- The upstream project publishes signed driver packages and identifies its repository as MIT-licensed. The selected release archive is pinned by SHA-256 in the Windows driver validation workflow.
+- Upstream release selected for the first integration prototype: **24.10.27** (`VDD.Control.24.10.27.zip`).
+- The upstream project publishes a signed x64 driver-only package (release 24.10.27) and identifies its source repository as MIT-licensed. The newer 25.7.23 control archive was tested in CI but contains only ARM64 and x86 driver folders, so it is not suitable for Bridge's x64 Windows target. The selected release archive is pinned by SHA-256 in the Windows driver validation workflow.
 - The official package is treated as a third-party dependency: Bridge must not modify its driver binaries, INF, catalog, or signatures.
 - Bridge must verify the upstream archive hash and Windows catalog signature before packaging or installing it. If verification fails, installation must stop; no test-signing mode, Secure Boot change, or Bridge-owned driver certificate is permitted.
 
