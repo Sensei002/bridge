@@ -48,9 +48,9 @@
 Architecture and acceptance gates: [docs/second-screen-architecture.md](second-screen-architecture.md).
 
 ### Windows virtual display foundation
-- [x] Select upstream VirtualDrivers Virtual Display Driver (VDD) as Bridge's Windows virtual-monitor dependency; stop developing/signing a Bridge-owned IddCx driver.
-- [x] Select upstream x64 driver-only release 24.10.27 after the newer 25.7.23 package failed the x64 architecture gate.
-- [ ] Pin and enforce the x64 archive SHA-256 after the first Windows CI verification run.
+- [x] Stop developing/signing a Bridge-owned IddCx driver; evaluate signed third-party VDD packages instead.
+- [x] Reject the VirtualDrivers 25.7.23 package for x64 (only ARM64/x86 packages were present) and reject its older x64 ZIP because Windows reported its catalog as NotSigned.
+- [ ] Validate Parsec VDD 0.45.1 as the x64 signed-driver candidate; pin its archive SHA-256 and signer after CI verification.
 - [x] Add CI validation for the upstream archive, driver INF/catalog presence, and Windows catalog signature.
 - [ ] Confirm exact x64 driver package contents, signer identity, and binary redistribution permissions before bundling.
 - [ ] Replace Bridge-specific driver IOCTL control with a supported VDD lifecycle/control integration.
