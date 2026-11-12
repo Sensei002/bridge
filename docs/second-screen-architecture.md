@@ -13,7 +13,7 @@ Bridge will **reuse the upstream VirtualDrivers Virtual Display Driver (VDD)**. 
 - Selected dependency: **VirtualDrivers Virtual Display Driver 25.7.23**.
 - CI verified that `SignedDrivers\\x86\\VDD\\MttVDD.dll` is actually an **AMD64** PE image (`0x8664`), despite the folder name.
 - CI verified the driver catalog is valid and signed by **SignPath Foundation** (thumbprint `3CF8CF26D8BA266C3A483AB7D26D4A818E317D76`).
-- The pinned `VDD.Control.25.7.23.zip` archive SHA-256 is `a701f2272e9fcf382849b24f913c6dd07597b3b1116525f2e90182f019609154`.
+- Bridge will consume the upstream driver-only archive `VirtualDisplayDriver-x86.Driver.Only.zip`; its SHA-256 is being pinned from the current Windows CI run.
 - The older 24.10.27 x64-only ZIP was rejected because Windows reported its catalog as `NotSigned`; use the 25.7.23 package instead.
 - This is a UMDF user-mode driver, so CI verifies the INF and driver DLL against Windows PnP package-signing policy with SignTool `/pa`. Kernel-mode `/kp` is not the applicable policy for this UMDF DLL.
 - No test-signing mode, Secure Boot change, Bridge-owned driver certificate, or Bridge root-certificate import is permitted.
