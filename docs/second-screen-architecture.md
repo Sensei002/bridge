@@ -63,7 +63,7 @@ The service is packaged with the per-user MSI as an executable and administrator
 Target a low-latency hardware-assisted pipeline:
 
 1. Windows composes the extended desktop onto the virtual monitor.
-2. IddCx supplies Direct3D swap-chain surfaces.
+2. Windows exposes the VDD-created monitor as a display output; Bridge identifies it through display topology APIs and captures only that output with DXGI Desktop Duplication (or Windows Graphics Capture if required).
 3. A dedicated frame pipeline uses GPU surfaces and hardware video encoding where available (Media Foundation hardware MFT first; vendor-specific paths only if justified). Avoid CPU readback/copy on every frame.
 4. Send timestamped, sequenced video frames over a dedicated real-time media transport, separate from file-transfer traffic. Do not put a continuous high-frame-rate video stream behind the existing TCP file-transfer queue.
 5. Authenticate the media peer against the already trusted Bridge device identity. Reuse established cryptographic primitives or a standard authenticated transport; do not invent a new encryption scheme.
