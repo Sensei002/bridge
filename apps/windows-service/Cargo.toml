@@ -9,6 +9,7 @@ description = "Privileged Windows service for Bridge virtual display lifecycle"
 getrandom = "0.3"
 uuid = { workspace = true }
 bridge-security = { path = "../../crates/bridge-security" }
+sha2 = "0.10"
 
 [features]
 default = []
@@ -30,10 +31,6 @@ windows-sys = { version = "0.59", features = [
   "Win32_Graphics_Gdi",
   "Win32_Security",
   "Win32_Security_Authorization",
-  "Win32_Security_Cryptography",
-  "Win32_Security_Cryptography_Catalog",
-  "Win32_Security_Cryptography_Sip",
-  "Win32_Security_WinTrust",
   "Win32_Storage_FileSystem",
   "Win32_System_IO",
   "Win32_System_Memory",
