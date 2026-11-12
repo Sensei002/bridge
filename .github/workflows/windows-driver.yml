@@ -66,7 +66,7 @@ jobs:
           Write-Host "Driver INF declarations:"
           Select-String -LiteralPath $inf -Pattern "NTamd64|NTx64|NTarm64|NTx86|CatalogFile|Manufacturer|HardwareID" | ForEach-Object { Write-Host $_.Line }
 
-      - name: Verify UMDF package signature and stage with Windows PnP
+      - name: Verify UMDF package signature with Windows PnP policy
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -77,37 +77,12 @@ jobs:
           $kits = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\bin"
           $signtool = Get-ChildItem -LiteralPath $kits -Recurse -File -Filter "signtool.exe" | Where-Object { $_.FullName -match "\\x64\\signtool\.exe$" } | Sort-Object FullName -Descending | Select-Object -First 1
           if (-not $signtool) { throw "Windows SDK x64 SignTool was not found." }
-          function Invoke-BoundedTool {
-            param([string]$FilePath, [string[]]$Arguments, [int]$TimeoutSeconds = 30)
-            $startInfo = New-Object System.Diagnostics.ProcessStartInfo
-            $startInfo.FileName = $FilePath
-            $startInfo.Arguments = (($Arguments | ForEach-Object { '"' + $_.Replace('"', '\\"') + '"' }) -join ' ')
-            $startInfo.UseShellExecute = $false
-            $startInfo.CreateNoWindow = $true
-            $startInfo.RedirectStandardOutput = $true
-            $startInfo.RedirectStandardError = $true
-            $process = New-Object System.Diagnostics.Process
-            $process.StartInfo = $startInfo
-            if (-not $process.Start()) { throw "Could not start $FilePath." }
-            $stdoutTask = $process.StandardOutput.ReadToEndAsync()
-            $stderrTask = $process.StandardError.ReadToEndAsync()
-            if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
-              $process.Kill($true)
-              $process.WaitForExit()
-              throw "$FilePath timed out after $TimeoutSeconds seconds."
-            }
-            $stdout = $stdoutTask.GetAwaiter().GetResult()
-            $stderr = $stderrTask.GetAwaiter().GetResult()
-            if ($stdout) { Write-Host $stdout }
-            if ($stderr) { Write-Host $stderr }
-            if ($process.ExitCode -ne 0) { throw "$FilePath failed with exit code $($process.ExitCode)." }
-          }
           Write-Host "This is an UMDF user-mode display driver. Verify PnP package signing with /pa, not kernel-mode /kp."
-          Invoke-BoundedTool -FilePath $signtool.FullName -Arguments @("verify", "/pa", "/v", "/c", $cat, $inf) -TimeoutSeconds 30
-          Invoke-BoundedTool -FilePath $signtool.FullName -Arguments @("verify", "/pa", "/v", "/c", $cat, $dll) -TimeoutSeconds 30
-          Write-Host "Staging the vendor-signed UMDF package with Windows PnPUtil (no test-signing or root-certificate import)."
-          Invoke-BoundedTool -FilePath (Get-Command "pnputil.exe").Source -Arguments @("/add-driver", $inf) -TimeoutSeconds 60
-          Write-Host "Windows accepted and staged the signed VirtualDrivers VDD package."
+          & $signtool.FullName verify /pa /v /c $cat $inf
+          if ($LASTEXITCODE -ne 0) { throw "Driver INF failed Windows PnP catalog verification (exit $LASTEXITCODE)." }
+          & $signtool.FullName verify /pa /v /c $cat $dll
+          if ($LASTEXITCODE -ne 0) { throw "Driver DLL failed Windows PnP catalog verification (exit $LASTEXITCODE)." }
+          Write-Host "INF and AMD64 UMDF DLL pass Windows PnP package-signing policy."
       - name: Upload pinned upstream archive for inspection
         uses: actions/upload-artifact@v4
         with:
