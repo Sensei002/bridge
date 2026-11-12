@@ -628,10 +628,9 @@ private fun SecondScreenView(
     val activePointers = remember { mutableSetOf<Int>() }
     val bitmap by produceState<androidx.compose.ui.graphics.ImageBitmap?>(
         initialValue = null,
-        key1 = frame?.sequence,
+        key1 = frame?.sequence to (encodedFrame == null),
         key2 = frame?.width,
-        key3 = frame?.height,
-        key4 = encodedFrame == null
+        key3 = frame?.height
     ) {
         value = if (frame == null || encodedFrame != null) {
             null
