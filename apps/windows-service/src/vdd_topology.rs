@@ -1,14 +1,13 @@
 use std::mem::{size_of, zeroed};
 use windows_sys::Win32::{
     Devices::DeviceAndDriverInstallation::{
-        CM_Get_DevNode_Status, CM_Locate_DevNodeW, CR_SUCCESS, DEVPROPTYPE, DN_HAS_PROBLEM,
+        CM_Get_DevNode_Status, CM_Locate_DevNodeW, CR_SUCCESS, DN_HAS_PROBLEM,
         SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo, SetupDiGetClassDevsW,
         SetupDiGetDeviceRegistryPropertyW, SP_DEVINFO_DATA, DIGCF_ALLCLASSES,
         DIGCF_PRESENT,
     },
     Foundation::{GetLastError},
     Graphics::Gdi::{EnumDisplayDevicesW, DISPLAY_DEVICEW, DISPLAY_DEVICE_ATTACHED_TO_DESKTOP},
-    System::SystemInformation::MAX_PATH,
 };
 
 const MAX_PNP_DEVICES: u32 = 4096;
