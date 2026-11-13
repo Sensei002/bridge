@@ -1,12 +1,12 @@
 use std::mem::{size_of, zeroed};
 use windows_sys::Win32::{
     Devices::DeviceAndDriverInstallation::{
-        CM_Get_DevNode_Status, CM_Locate_DevNodeW, CR_SUCCESS, DN_HAS_PROBLEM,
+        CM_Get_DevNode_Status, CM_Locate_DevNodeW, CR_SUCCESS, DEVPROPTYPE, DN_HAS_PROBLEM,
         SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo, SetupDiGetClassDevsW,
         SetupDiGetDeviceRegistryPropertyW, SP_DEVINFO_DATA, DIGCF_ALLCLASSES,
         DIGCF_PRESENT,
     },
-    Foundation::{GetLastError, DEVPROPTYPE, ULONG},
+    Foundation::{GetLastError},
     Graphics::Gdi::{EnumDisplayDevicesW, DISPLAY_DEVICEW, DISPLAY_DEVICE_ATTACHED_TO_DESKTOP},
     System::SystemInformation::MAX_PATH,
 };
@@ -33,7 +33,7 @@ fn has_vdd_hardware_id(buffer: &[u16]) -> bool {
 /// Check if a device instance has a problem (error code != 0).
 /// Returns true if the device is healthy (no problem), false if it has an error.
 fn is_device_healthy(instance_id: &str) -> bool {
-    let mut dev_inst: ULONG = 0;
+    let mut dev_inst: u32 = 0;
     let instance_wide: Vec<u16> = instance_id.encode_utf16().chain(std::iter::once(0)).collect();
     let locate_result = unsafe {
         CM_Locate_DevNodeW(
@@ -46,8 +46,8 @@ fn is_device_healthy(instance_id: &str) -> bool {
         return false;
     }
 
-    let mut status: ULONG = 0;
-    let mut problem: ULONG = 0;
+    let mut status: u32 = 0;
+    let mut problem: u32 = 0;
     let status_result = unsafe {
         CM_Get_DevNode_Status(&mut status, &mut problem, dev_inst, 0)
     };
