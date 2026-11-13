@@ -1,16 +1,19 @@
-//! Read-only Windows display-topology probe for the upstream VirtualDrivers VDD.
-//!
-//! The vendor pipe only accepts display-count requests and provides no
-//! acknowledgement. This module independently checks the PnP display adapter
-//! list so Bridge never reports a successful monitor connection from pipe-write
-//! success alone.
-
-use std::{mem::{size_of, zeroed}};
-use windows_sys::Win32::Graphics::Gdi::{
-    EnumDisplayDevicesW, DISPLAY_DEVICEW, DISPLAY_DEVICE_ATTACHED_TO_DESKTOP,
+use std::mem::{size_of, zeroed};
+use windows_sys::Win32::{
+    Devices::DeviceAndDriverInstallation::{
+        CM_Get_DevNode_Status, CM_Locate_DevNodeW, CR_SUCCESS, DN_HAS_PROBLEM,
+        SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo, SetupDiGetClassDevsW,
+        SetupDiGetDeviceRegistryPropertyW, SP_DEVINFO_DATA, DIGCF_ALLCLASSES,
+        DIGCF_PRESENT,
+    },
+    Foundation::{GetLastError},
+    Graphics::Gdi::{EnumDisplayDevicesW, DISPLAY_DEVICEW, DISPLAY_DEVICE_ATTACHED_TO_DESKTOP},
 };
 
-const MAX_DISPLAY_ADAPTERS: u32 = 64;
+const MAX_PNP_DEVICES: u32 = 4096;
+const SPDRP_HARDWAREID: u32 = 0x00000001;
+const SPDRP_DEVICE_INSTANCE_ID: u32 = 0x0000000E;
+const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VddTopology {
@@ -18,37 +21,157 @@ pub struct VddTopology {
     pub attached_to_desktop: bool,
 }
 
-fn field_string(value: &[u16]) -> String {
-    let end = value.iter().position(|unit| *unit == 0).unwrap_or(value.len());
-    String::from_utf16_lossy(&value[..end])
+fn is_vdd_hardware_id(value: &str) -> bool {
+    value.trim_matches(char::from(0)).eq_ignore_ascii_case(r"ROOT\MttVDD")
 }
 
-fn is_vdd_device_id(value: &str) -> bool {
-    value.to_ascii_uppercase().starts_with("ROOT\\MTTVDD\\")
-        || value.eq_ignore_ascii_case("ROOT\\MTTVDD")
+fn has_vdd_hardware_id(buffer: &[u16]) -> bool {
+    String::from_utf16_lossy(buffer).split('\0').any(is_vdd_hardware_id)
 }
 
-/// Enumerate display adapters and match the exact hardware ID from the pinned
-/// upstream INF (Root\MttVDD), never a display index or friendly-name guess.
-pub fn query() -> VddTopology {
-    let mut topology = VddTopology { present: false, attached_to_desktop: false };
+/// Check if a device instance has a problem (error code != 0).
+/// Returns true if the device is healthy (no problem), false if it has an error.
+fn is_device_healthy(instance_id: &str) -> bool {
+    let mut dev_inst: u32 = 0;
+    let instance_wide: Vec<u16> = instance_id.encode_utf16().chain(std::iter::once(0)).collect();
+    let locate_result = unsafe {
+        CM_Locate_DevNodeW(
+            &mut dev_inst,
+            instance_wide.as_ptr(),
+            0,
+        )
+    };
+    if locate_result != CR_SUCCESS {
+        return false;
+    }
 
-    for index in 0..MAX_DISPLAY_ADAPTERS {
-        let mut device: DISPLAY_DEVICEW = unsafe { zeroed() };
-        device.cb = size_of::<DISPLAY_DEVICEW>() as u32;
-        let found = unsafe { EnumDisplayDevicesW(std::ptr::null(), index, &mut device, 0) };
-        if found == 0 {
+    let mut status: u32 = 0;
+    let mut problem: u32 = 0;
+    let status_result = unsafe {
+        CM_Get_DevNode_Status(&mut status, &mut problem, dev_inst, 0)
+    };
+    if status_result != CR_SUCCESS {
+        return false;
+    }
+
+    // DN_HAS_PROBLEM (0x00000400) indicates the device has a problem (error code != 0)
+    (status & DN_HAS_PROBLEM) == 0
+}
+
+/// Query present PnP devices and inspect their actual hardware-ID property.
+/// The display instance ID (ROOT\DISPLAY\xxxx) is deliberately not used.
+/// Only returns true if a VDD device exists AND is healthy (no error code).
+fn vdd_pnp_device_present() -> bool {
+    let devices = unsafe {
+        SetupDiGetClassDevsW(
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            DIGCF_PRESENT | DIGCF_ALLCLASSES,
+        )
+    };
+    if devices == -1isize {
+        return false;
+    }
+
+    let mut present = false;
+    for index in 0..MAX_PNP_DEVICES {
+        let mut device: SP_DEVINFO_DATA = unsafe { zeroed() };
+        device.cbSize = size_of::<SP_DEVINFO_DATA>() as u32;
+        if unsafe { SetupDiEnumDeviceInfo(devices, index, &mut device) } == 0 {
             break;
         }
 
-        if is_vdd_device_id(&field_string(&device.DeviceID)) {
-            topology.present = true;
-            topology.attached_to_desktop = (device.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) != 0;
-            break;
+        let mut required = 0_u32;
+        unsafe {
+            SetupDiGetDeviceRegistryPropertyW(
+                devices, &device, SPDRP_HARDWAREID, std::ptr::null_mut(),
+                std::ptr::null_mut(), 0, &mut required,
+            );
+        }
+        if required == 0 || unsafe { GetLastError() } != ERROR_INSUFFICIENT_BUFFER {
+            continue;
+        }
+
+        let mut bytes = vec![0_u8; required as usize];
+        let read = unsafe {
+            SetupDiGetDeviceRegistryPropertyW(
+                devices, &device, SPDRP_HARDWAREID, std::ptr::null_mut(),
+                bytes.as_mut_ptr(), required, &mut required,
+            )
+        };
+        if read != 0 {
+            let words = unsafe {
+                std::slice::from_raw_parts(bytes.as_ptr().cast::<u16>(), bytes.len() / 2)
+            };
+            if has_vdd_hardware_id(words) {
+                // Found a VDD device by hardware ID. Now check its health via instance ID.
+                let mut inst_required = 0_u32;
+                unsafe {
+                    SetupDiGetDeviceRegistryPropertyW(
+                        devices, &device, SPDRP_DEVICE_INSTANCE_ID, std::ptr::null_mut(),
+                        std::ptr::null_mut(), 0, &mut inst_required,
+                    );
+                }
+                if inst_required > 0 && unsafe { GetLastError() } == ERROR_INSUFFICIENT_BUFFER {
+                    let mut inst_bytes = vec![0_u8; inst_required as usize];
+                    let inst_read = unsafe {
+                        SetupDiGetDeviceRegistryPropertyW(
+                            devices, &device, SPDRP_DEVICE_INSTANCE_ID, std::ptr::null_mut(),
+                            inst_bytes.as_mut_ptr(), inst_required, &mut inst_required,
+                        )
+                    };
+                    if inst_read != 0 {
+                        let instance_id = String::from_utf16_lossy(
+                            unsafe {
+                                std::slice::from_raw_parts(inst_bytes.as_ptr().cast::<u16>(), inst_bytes.len() / 2)
+                            }
+                        ).trim_end_matches('\0').to_string();
+                        if is_device_healthy(&instance_id) {
+                            present = true;
+                            break;
+                        } else {
+                            // Device exists but has a problem (error code != 0). Don't count as present.
+                        }
+                    }
+                }
+            }
         }
     }
 
-    topology
+    unsafe { SetupDiDestroyDeviceInfoList(devices); }
+    present
+}
+
+/// Check whether a root-enumerated display adapter is attached to the desktop.
+/// Presence is determined independently from the PnP hardware ID above.
+fn any_root_display_attached() -> bool {
+    for index in 0..64 {
+        let mut device: DISPLAY_DEVICEW = unsafe { zeroed() };
+        device.cb = size_of::<DISPLAY_DEVICEW>() as u32;
+        if unsafe { EnumDisplayDevicesW(std::ptr::null(), index, &mut device, 0) } == 0 {
+            break;
+        }
+        let end = device.DeviceID.iter().position(|unit| *unit == 0).unwrap_or(device.DeviceID.len());
+        let instance_id = String::from_utf16_lossy(&device.DeviceID[..end]);
+        if instance_id.to_ascii_uppercase().starts_with(r"ROOT\DISPLAY\")
+            && (device.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) != 0
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Detect an existing MttVDD device by its hardware ID so it is reused instead
+/// of reinstalling another root-enumerated instance on every activation.
+/// Only returns present=true if the device is healthy (no error code).
+pub fn query() -> VddTopology {
+    let present = vdd_pnp_device_present();
+    VddTopology {
+        present,
+        attached_to_desktop: present && any_root_display_attached(),
+    }
 }
 
 #[cfg(test)]
@@ -56,15 +179,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn matches_only_the_upstream_vdd_hardware_id() {
-        assert!(is_vdd_device_id("ROOT\\MttVDD\\0000"));
-        assert!(is_vdd_device_id("root\\mttvdd"));
-        assert!(!is_vdd_device_id("ROOT\\DISPLAY\\0000"));
-        assert!(!is_vdd_device_id("PCI\\VEN_1234&DEV_5678"));
+    fn matches_hardware_id_not_display_instance_id() {
+        assert!(is_vdd_hardware_id(r"ROOT\MttVDD"));
+        assert!(is_vdd_hardware_id(r"root\mttvdd"));
+        assert!(!is_vdd_hardware_id(r"ROOT\DISPLAY\0000"));
+        assert!(!is_vdd_hardware_id(r"PCI\VEN_1234&DEV_5678"));
     }
 
     #[test]
-    fn safely_decodes_null_terminated_display_fields() {
-        assert_eq!(field_string(&[b'V' as u16, b'D' as u16, 0, b'X' as u16]), "VD");
+    fn finds_hardware_id_inside_multi_string_property() {
+        let value = format!("{}\0{}\0\0", r"ROOT\MttVDD", r"ROOT\OTHER");
+        let words = value.encode_utf16().collect::<Vec<_>>();
+        assert!(has_vdd_hardware_id(&words));
+        let other = r"ROOT\DISPLAY\0000".encode_utf16().collect::<Vec<_>>();
+        assert!(!has_vdd_hardware_id(&other));
     }
 }

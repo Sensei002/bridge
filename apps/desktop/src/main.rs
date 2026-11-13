@@ -729,6 +729,7 @@ fn start_display_frame_stream(
             let mut encoder_frames_reported = 0_u64;
             let mut h264_sequence = 0_u64;
             let mut h264_samples_sent = 0_u64;
+            let mut h264_stream_active = false;
             let mut last_sequence = 0_u64;
             let mut announced = false;
             let mut stats_window_started = Instant::now();
@@ -741,10 +742,12 @@ fn start_display_frame_stream(
                 match capture.next_frame() {
                     Ok(Some(display_frame)) if display_frame.sequence > last_sequence => {
                         let superseded_frames = display_frame.sequence.saturating_sub(last_sequence).saturating_sub(1);
+                        superseded_frames_window = superseded_frames_window.saturating_add(superseded_frames);
                         let keyframe_requested = session.take_video_keyframe_request();
                         let dimensions_changed = encoder_dimensions
                             .is_some_and(|dimensions| dimensions != (display_frame.width, display_frame.height));
                         if keyframe_requested || dimensions_changed {
+                            h264_stream_active = false;
                             persistent_encoder = None;
                             encoder_unavailable = false;
                             let _ = events.send(DisplayLeaseEvent::Status {
@@ -802,6 +805,7 @@ fn start_display_frame_stream(
                                             session_key: session_key.clone(),
                                             message: format!("Persistent H.264 encoder stopped after {} frame(s): {error}. Falling back to BGRA.", encoder_frames_reported),
                                         });
+                                        h264_stream_active = false;
                                         persistent_encoder = None;
                                         encoder_unavailable = true;
                                     }
@@ -811,6 +815,7 @@ fn start_display_frame_stream(
                                         session_key: session_key.clone(),
                                         message: format!("Could not convert frame for persistent H.264 encoding: {error}. Falling back to BGRA."),
                                     });
+                                    h264_stream_active = false;
                                     persistent_encoder = None;
                                     encoder_unavailable = true;
                                 }
@@ -828,6 +833,7 @@ fn start_display_frame_stream(
                                 continue;
                             };
                             h264_sequence = h264_sequence.saturating_add(1);
+                            let encoded_bytes = access_unit.bytes.len() as u64;
                             let encoded_frame = EncodedVideoFrame {
                                 sequence: h264_sequence,
                                 width: display_frame.width,
@@ -855,11 +861,15 @@ fn start_display_frame_stream(
                                         }
                                     }
                                     if sent_access_unit {
+                                        h264_stream_active = true;
                                         h264_samples_sent = h264_samples_sent.saturating_add(1);
+                                        frames_sent_window = frames_sent_window.saturating_add(1);
+                                        bytes_sent_window = bytes_sent_window.saturating_add(encoded_bytes);
+                                        send_duration_window += started.elapsed();
                                         if h264_samples_sent == 1 || h264_samples_sent % 120 == 0 {
                                             let _ = events.send(DisplayLeaseEvent::Status {
                                                 session_key: session_key.clone(),
-                                                message: format!("Windows sent {h264_samples_sent} bounded H.264 access unit(s) to Android over the authenticated session. Android MediaCodec receives the encoded stream alongside the BGRA fallback."),
+                                                message: format!("Windows sent {h264_samples_sent} bounded H.264 access unit(s) to Android over the authenticated session. Android MediaCodec receives the encoded stream; raw BGRA is stopped after the first successful H.264 access unit to reduce bandwidth."),
                                             });
                                         }
                                     }
@@ -873,6 +883,7 @@ fn start_display_frame_stream(
                             }
                         }
 
+                        if !h264_stream_active {
                         let frame_bytes = display_frame.pixels.len() as u64;
                         let send_started = Instant::now();
                         match fragment_display_frame(&display_frame) {
@@ -897,7 +908,6 @@ fn start_display_frame_stream(
                                     last_sequence = display_frame.sequence;
                                     frames_sent_window += 1;
                                     bytes_sent_window = bytes_sent_window.saturating_add(frame_bytes);
-                                    superseded_frames_window = superseded_frames_window.saturating_add(superseded_frames);
                                     send_duration_window += send_started.elapsed();
                                     if !announced {
                                         announced = true;
@@ -919,6 +929,8 @@ fn start_display_frame_stream(
                                 stop.store(true, Ordering::Release);
                             }
                         }
+                        }
+                        last_sequence = display_frame.sequence;
                     }
                     Ok(Some(_)) | Ok(None) => {}
                     Err(error) => {
@@ -926,6 +938,7 @@ fn start_display_frame_stream(
                             session_key: session_key.clone(),
                             message: format!("DXGI capture needs to be reopened: {error}"),
                         });
+                        h264_stream_active = false;
                         persistent_encoder = None;
                         encoder_dimensions = None;
                         encoder_unavailable = false;
@@ -979,7 +992,7 @@ fn start_display_frame_stream(
                         let _ = events.send(DisplayLeaseEvent::Status {
                             session_key: session_key.clone(),
                             message: format!(
-                                "Windows sender: {fps:.1} FPS · {mbps:.1} Mbps raw · {superseded_frames_window} capture frames superseded · {average_send_ms:.1} ms/frame send time."
+                                "Windows sender: {fps:.1} FPS · {mbps:.1} Mbps transport · {superseded_frames_window} capture frames superseded · {average_send_ms:.1} ms/frame send time."
                             ),
                         });
                     }
@@ -989,10 +1002,8 @@ fn start_display_frame_stream(
                     superseded_frames_window = 0;
                     send_duration_window = Duration::ZERO;
                 }
-                let elapsed = started.elapsed();
-                if elapsed < Duration::from_millis(33) {
-                    thread::sleep(Duration::from_millis(33) - elapsed);
-                }
+                // DXGI AcquireNextFrame already waits up to 16 ms for a new frame.
+                // Do not add a second 33 ms throttle: that hard-capped the stream at ~30 FPS.
             }
         })
         .map(|_| ())

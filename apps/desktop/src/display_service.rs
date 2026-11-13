@@ -8,15 +8,22 @@ use std::{
     io,
     os::windows::ffi::OsStrExt,
     ptr::null_mut,
+    thread,
+    time::{Duration, Instant},
 };
 use windows_sys::Win32::{
-    Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE},
+    Foundation::{
+        CloseHandle, GetLastError, HANDLE, INVALID_HANDLE_VALUE, ERROR_FILE_NOT_FOUND,
+        ERROR_PIPE_BUSY, ERROR_SEM_TIMEOUT,
+    },
     Storage::FileSystem::{CreateFileW, ReadFile, WriteFile, FILE_GENERIC_READ, FILE_GENERIC_WRITE, OPEN_EXISTING},
     System::Pipes::WaitNamedPipeW,
 };
 
 const PIPE_NAME: &str = r"\\.\pipe\BridgeDisplayService";
-const PIPE_WAIT_MS: u32 = 1_500;
+const PIPE_WAIT_MS: u32 = 250;
+const PIPE_OPEN_DEADLINE: Duration = Duration::from_secs(5);
+const PIPE_RETRY_DELAY: Duration = Duration::from_millis(50);
 const MAX_RESPONSE_BYTES: usize = 512;
 
 struct OwnedPipe(HANDLE);
@@ -205,6 +212,62 @@ fn request(command: &str) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|_| "display service returned a non-UTF-8 response".into())
 }
 
+fn open_service_pipe(name: &[u16]) -> Result<OwnedPipe, String> {
+    // The service currently disconnects and recreates its single pipe instance
+    // after each request. During that short transition WaitNamedPipe can report
+    // ERROR_FILE_NOT_FOUND (there is temporarily no instance to wait on), while
+    // CreateFile can race with the next client and report ERROR_PIPE_BUSY.
+    // Retry both transient states within one bounded deadline.
+    let deadline = Instant::now() + PIPE_OPEN_DEADLINE;
+    let mut last_error = None;
+    loop {
+        if unsafe { WaitNamedPipeW(name.as_ptr(), PIPE_WAIT_MS) } == 0 {
+            let error = unsafe { GetLastError() };
+            last_error = Some(error);
+            if error != ERROR_FILE_NOT_FOUND && error != ERROR_PIPE_BUSY && error != ERROR_SEM_TIMEOUT {
+                return Err(format!(
+                    "Bridge Display Service pipe is unavailable: {}",
+                    io::Error::from_raw_os_error(error as i32),
+                ));
+            }
+        } else {
+            let handle = unsafe {
+                CreateFileW(
+                    name.as_ptr(),
+                    FILE_GENERIC_READ | FILE_GENERIC_WRITE,
+                    0,
+                    null_mut(),
+                    OPEN_EXISTING,
+                    0,
+                    null_mut(),
+                )
+            };
+            if handle != INVALID_HANDLE_VALUE {
+                return Ok(OwnedPipe(handle));
+            }
+            let error = unsafe { GetLastError() };
+            last_error = Some(error);
+            if error != ERROR_FILE_NOT_FOUND && error != ERROR_PIPE_BUSY {
+                return Err(format!(
+                    "could not open Bridge Display Service pipe: {}",
+                    io::Error::from_raw_os_error(error as i32),
+                ));
+            }
+        }
+
+        if Instant::now() >= deadline {
+            let detail = last_error
+                .map(|error| io::Error::from_raw_os_error(error as i32).to_string())
+                .unwrap_or_else(|| "unknown pipe error".into());
+            return Err(format!(
+                "Bridge Display Service pipe did not become available within {} ms: {detail}",
+                PIPE_OPEN_DEADLINE.as_millis(),
+            ));
+        }
+        thread::sleep(PIPE_RETRY_DELAY);
+    }
+}
+
 fn request_bytes(command: &str) -> Result<Vec<u8>, String> {
     if command.is_empty() || command.len() > 384 || !command.is_ascii()
         || command.contains('\r') || command.contains('\n')
@@ -212,16 +275,7 @@ fn request_bytes(command: &str) -> Result<Vec<u8>, String> {
         return Err("invalid display-service command".into());
     }
     let name = OsStr::new(PIPE_NAME).encode_wide().chain(Some(0)).collect::<Vec<_>>();
-    if unsafe { WaitNamedPipeW(name.as_ptr(), PIPE_WAIT_MS) } == 0 {
-        return Err(format!("Bridge Display Service pipe is unavailable: {}", io::Error::last_os_error()));
-    }
-    let handle = unsafe {
-        CreateFileW(name.as_ptr(), FILE_GENERIC_READ | FILE_GENERIC_WRITE, 0, null_mut(), OPEN_EXISTING, 0, null_mut())
-    };
-    if handle == INVALID_HANDLE_VALUE {
-        return Err(format!("could not open Bridge Display Service pipe: {}", io::Error::last_os_error()));
-    }
-    let pipe = OwnedPipe(handle);
+    let pipe = open_service_pipe(&name)?;
     let request = format!("BRIDGE_DISPLAY/1 {command}");
     let mut written = 0_u32;
     let write_ok = unsafe { WriteFile(pipe.0, request.as_ptr(), request.len() as u32, &mut written, null_mut()) };
