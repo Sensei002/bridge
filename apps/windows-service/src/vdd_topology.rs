@@ -1,23 +1,19 @@
-//! Read-only Windows PnP probe for the upstream VirtualDrivers VDD.
-//!
-//! Windows exposes the device instance as ROOT\DISPLAY\000x, while the driver's
-//! hardware ID (Root\MttVDD) is stored separately in SPDRP_HARDWAREID. Matching
-//! DISPLAY_DEVICEW.DeviceID against the hardware ID therefore misses the device
-//! and can cause Bridge to install duplicate root-enumerated instances.
-
 use std::mem::{size_of, zeroed};
 use windows_sys::Win32::{
     Devices::DeviceAndDriverInstallation::{
+        CM_Get_DevNode_Status, CM_Locate_DevNodeW, CR_SUCCESS, DN_HAS_PROBLEM,
         SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo, SetupDiGetClassDevsW,
         SetupDiGetDeviceRegistryPropertyW, SP_DEVINFO_DATA, DIGCF_ALLCLASSES,
         DIGCF_PRESENT,
     },
-    Foundation::GetLastError,
+    Foundation::{GetLastError, DEVPROPTYPE, ULONG},
     Graphics::Gdi::{EnumDisplayDevicesW, DISPLAY_DEVICEW, DISPLAY_DEVICE_ATTACHED_TO_DESKTOP},
+    System::SystemInformation::MAX_PATH,
 };
 
 const MAX_PNP_DEVICES: u32 = 4096;
 const SPDRP_HARDWAREID: u32 = 0x00000001;
+const SPDRP_DEVICE_INSTANCE_ID: u32 = 0x0000000E;
 const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,8 +30,38 @@ fn has_vdd_hardware_id(buffer: &[u16]) -> bool {
     String::from_utf16_lossy(buffer).split('\0').any(is_vdd_hardware_id)
 }
 
+/// Check if a device instance has a problem (error code != 0).
+/// Returns true if the device is healthy (no problem), false if it has an error.
+fn is_device_healthy(instance_id: &str) -> bool {
+    let mut dev_inst: ULONG = 0;
+    let instance_wide: Vec<u16> = instance_id.encode_utf16().chain(std::iter::once(0)).collect();
+    let locate_result = unsafe {
+        CM_Locate_DevNodeW(
+            &mut dev_inst,
+            instance_wide.as_ptr(),
+            0,
+        )
+    };
+    if locate_result != CR_SUCCESS {
+        return false;
+    }
+
+    let mut status: ULONG = 0;
+    let mut problem: ULONG = 0;
+    let status_result = unsafe {
+        CM_Get_DevNode_Status(&mut status, &mut problem, dev_inst, 0)
+    };
+    if status_result != CR_SUCCESS {
+        return false;
+    }
+
+    // DN_HAS_PROBLEM (0x00000400) indicates the device has a problem (error code != 0)
+    (status & DN_HAS_PROBLEM) == 0
+}
+
 /// Query present PnP devices and inspect their actual hardware-ID property.
 /// The display instance ID (ROOT\DISPLAY\xxxx) is deliberately not used.
+/// Only returns true if a VDD device exists AND is healthy (no error code).
 fn vdd_pnp_device_present() -> bool {
     let devices = unsafe {
         SetupDiGetClassDevsW(
@@ -80,8 +106,36 @@ fn vdd_pnp_device_present() -> bool {
                 std::slice::from_raw_parts(bytes.as_ptr().cast::<u16>(), bytes.len() / 2)
             };
             if has_vdd_hardware_id(words) {
-                present = true;
-                break;
+                // Found a VDD device by hardware ID. Now check its health via instance ID.
+                let mut inst_required = 0_u32;
+                unsafe {
+                    SetupDiGetDeviceRegistryPropertyW(
+                        devices, &device, SPDRP_DEVICE_INSTANCE_ID, std::ptr::null_mut(),
+                        std::ptr::null_mut(), 0, &mut inst_required,
+                    );
+                }
+                if inst_required > 0 && unsafe { GetLastError() } == ERROR_INSUFFICIENT_BUFFER {
+                    let mut inst_bytes = vec![0_u8; inst_required as usize];
+                    let inst_read = unsafe {
+                        SetupDiGetDeviceRegistryPropertyW(
+                            devices, &device, SPDRP_DEVICE_INSTANCE_ID, std::ptr::null_mut(),
+                            inst_bytes.as_mut_ptr(), inst_required, &mut inst_required,
+                        )
+                    };
+                    if inst_read != 0 {
+                        let instance_id = String::from_utf16_lossy(
+                            unsafe {
+                                std::slice::from_raw_parts(inst_bytes.as_ptr().cast::<u16>(), inst_bytes.len() / 2)
+                            }
+                        ).trim_end_matches('\0').to_string();
+                        if is_device_healthy(&instance_id) {
+                            present = true;
+                            break;
+                        } else {
+                            // Device exists but has a problem (error code != 0). Don't count as present.
+                        }
+                    }
+                }
             }
         }
     }
@@ -112,6 +166,7 @@ fn any_root_display_attached() -> bool {
 
 /// Detect an existing MttVDD device by its hardware ID so it is reused instead
 /// of reinstalling another root-enumerated instance on every activation.
+/// Only returns present=true if the device is healthy (no error code).
 pub fn query() -> VddTopology {
     let present = vdd_pnp_device_present();
     VddTopology {

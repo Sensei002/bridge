@@ -16,12 +16,26 @@ if ([string]::IsNullOrWhiteSpace($PayloadDirectory)) {
     $PayloadDirectory = Join-Path $nativeProgramFiles "Bridge\DisplayServiceSetup\VDD"
 }
 Write-Host "Bridge VDD activation payload destination: $PayloadDirectory"
+
 $releaseUrl = "https://github.com/VirtualDrivers/Virtual-Display-Driver/releases/download/25.7.23/VirtualDisplayDriver-x86.Driver.Only.zip"
 $expectedArchiveSha256 = "e24210692b442b39af763536330ce78b423f19342b7a7792c26de3944e418b3a"
 $expectedSignerThumbprint = "3CF8CF26D8BA266C3A483AB7D26D4A818E317D76"
 $expectedSignerName = "SignPath Foundation"
-$nefconUrl = "https://github.com/nefarius/nefcon/releases/download/v1.14.0/nefcon_v1.14.0.zip"
-$expectedNefconSha256 = "a15557da24a9efca203158de3b43b0eaf982db231f0194031f1ed428bc13e669"
+$nefconUrl = "https://github.com/nefarius/nefcon/releases/download/v1.15.31/nefcon_x86_amd64_arm64.zip"
+$expectedNefconSha256 = "80497179699810ec346649292cbbf66d57f7ef11d0c9ad8c24b86b777d4c93d8"
+
+$logDirectory = Join-Path $env:ProgramData "Bridge\Logs"
+$transcriptPath = Join-Path $logDirectory "installer-vdd.log"
+New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
+$script:TranscriptStarted = $false
+try { Start-Transcript -Path $transcriptPath -Append | Out-Null; $script:TranscriptStarted = $true } catch { Write-Warning "Could not start installer transcript: $($_.Exception.Message)" }
+trap {
+    $failure = $_
+    Write-Host "ERROR: $($failure.Exception.Message)"
+    Write-Host "Diagnostic log: $transcriptPath"
+    if ($script:TranscriptStarted) { Stop-Transcript | Out-Null }
+    exit 1
+}
 
 function Assert-Administrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -34,6 +48,32 @@ function Get-InstalledBridgeVddPackages {
     Import-Module Dism -ErrorAction Stop
     @(Get-WindowsDriver -Online -All | Where-Object { $_.OriginalFileName -match '(?i)\\MttVDD\.inf$' })
 }
+function Get-BridgeVddDevices {
+    # Root-enumerated VDD instances have ROOT\DISPLAY\... instance IDs.
+    # Their hardware ID is Root\MttVDD. Query CIM's HardwareID property
+    # directly instead of silently swallowing per-device PnP property errors.
+    @(Get-CimInstance -ClassName Win32_PnPEntity -Filter "PNPClass = 'Display'" -ErrorAction Stop |
+        Where-Object { @($_.HardwareID) -contains 'Root\MttVDD' })
+}
+function Remove-BrokenVddDevices {
+    $devices = @(Get-BridgeVddDevices)
+    if ($devices.Count -eq 0) { return }
+    Write-Host "Found $($devices.Count) existing VDD device(s); removing any in error state..."
+    foreach ($device in $devices) {
+        $errorCode = $device.ConfigManagerErrorCode
+        if ($errorCode -ne 0) {
+            Write-Host "Removing broken device $($device.PNPDeviceID) (error code $errorCode)..."
+            $pnputil = Join-Path $env:SystemRoot "System32\pnputil.exe"
+            $publishedName = [IO.Path]::GetFileName($device.Driver)
+            if ($publishedName -match '^oem[0-9]+\.inf$') {
+                & $pnputil /remove-device $device.PNPDeviceID
+                if ($LASTEXITCODE -ne 0) { Write-Warning "Failed to remove $($device.PNPDeviceID) (exit code $LASTEXITCODE)." }
+            }
+        } else {
+            Write-Host "Device $($device.PNPDeviceID) is healthy; keeping it."
+        }
+    }
+}
 
 Assert-Administrator
 if (-not [Environment]::Is64BitOperatingSystem) { throw "Bridge Second Screen currently requires 64-bit Windows." }
@@ -43,12 +83,12 @@ New-Item -ItemType Directory -Path $DownloadDirectory -Force | Out-Null
 New-Item -ItemType Directory -Path $PayloadDirectory -Force | Out-Null
 $archive = Join-Path $DownloadDirectory "VirtualDisplayDriver-x86.Driver.Only.zip"
 $extract = Join-Path $DownloadDirectory "package"
-$nefconArchive = Join-Path $DownloadDirectory "nefcon_v1.14.0.zip"
+$nefconArchive = Join-Path $DownloadDirectory "nefcon_x86_amd64_arm64.zip"
 $nefconExtract = Join-Path $DownloadDirectory "nefcon"
 if (Test-Path -LiteralPath $extract) { Remove-Item -LiteralPath $extract -Recurse -Force }
 if (Test-Path -LiteralPath $nefconExtract) { Remove-Item -LiteralPath $nefconExtract -Recurse -Force }
 
-# Stage only the signed package. Do NOT create ROOT\\MttVDD here: doing so
+# Stage only the signed package. Do NOT create ROOT\MttVDD here: doing so
 # makes Windows enumerate a monitor during NSIS setup and can move every window.
 Write-Host "Downloading the official VirtualDrivers 25.7.23 driver-only package..."
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -94,6 +134,9 @@ if ($existingPackages.Count -gt 0) {
     if ($exitCode -eq 3010) { Write-Warning "Windows requested a restart to complete driver staging." }
 }
 
+# Clean up any broken VDD devices from previous failed installs before staging payload.
+Remove-BrokenVddDevices
+
 # Keep the verified INF payload and pinned root-device installer for the
 # privileged service. Device creation is deferred until a trusted session has
 # passed Android attestation and received a short-lived display lease.
@@ -103,8 +146,8 @@ Invoke-WebRequest -Uri $nefconUrl -OutFile $nefconArchive -UseBasicParsing
 $nefconHash = (Get-FileHash -LiteralPath $nefconArchive -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($nefconHash -ne $expectedNefconSha256) { throw "NefCon archive SHA-256 mismatch. Expected $expectedNefconSha256; received $nefconHash. Nothing was executed." }
 Expand-Archive -LiteralPath $nefconArchive -DestinationPath $nefconExtract -Force
-$nefcon = Join-Path $nefconExtract "x64\\nefconw.exe"
-if (-not (Test-Path -LiteralPath $nefcon -PathType Leaf)) { throw "The pinned NefCon archive does not contain x64\\nefconw.exe." }
+$nefcon = Join-Path $nefconExtract "x64\nefconw.exe"
+if (-not (Test-Path -LiteralPath $nefcon -PathType Leaf)) { throw "The pinned NefCon archive does not contain x64\nefconw.exe." }
 Copy-Item -LiteralPath $nefcon -Destination (Join-Path $PayloadDirectory "nefconw.exe") -Force
 
 $stagedInf = Get-ChildItem -LiteralPath $PayloadDirectory -Recurse -File -Filter "MttVDD.inf" | Select-Object -First 1
@@ -112,5 +155,7 @@ if ($null -eq $stagedInf -or -not (Test-Path -LiteralPath (Join-Path $PayloadDir
     throw "The deferred VDD activation payload is incomplete."
 }
 Write-Host "SUCCESS: signed VDD package staged and activation payload installed."
-Write-Host "No ROOT\\MttVDD device was created; no virtual monitor was attached during setup."
+Write-Host "No ROOT\MttVDD device was created; no virtual monitor was attached during setup."
 Write-Host "Bridge will create the device only after a trusted Second Screen session is authorized."
+Write-Host "Diagnostic log: $transcriptPath"
+if ($script:TranscriptStarted) { Stop-Transcript | Out-Null }

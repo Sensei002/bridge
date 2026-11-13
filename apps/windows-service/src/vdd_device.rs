@@ -1,6 +1,3 @@
-//! Creates the root-enumerated VDD device only after the service has
-//! validated a live, attested display lease. Installer setup merely stages
-//! the signed package and this activation payload.
 use std::{
     fs,
     io,
@@ -15,7 +12,7 @@ fn find_file(root: &Path, name: &str) -> io::Result<Option<PathBuf>> {
     for entry in fs::read_dir(root)? {
         let entry = entry?;
         let path = entry.path();
-        if path.is_file() && path.file_name().is_some_and(|value| value.to_string_lossy().eq_ignore_ascii_case(name)) {
+        if path.is_file() && path.file_name().is_some_and(|v| v.to_string_lossy().eq_ignore_ascii_case(name)) {
             return Ok(Some(path));
         }
         if path.is_dir() {
@@ -25,12 +22,47 @@ fn find_file(root: &Path, name: &str) -> io::Result<Option<PathBuf>> {
     Ok(None)
 }
 
+/// Remove any VDD devices that are in an error state (ConfigManagerErrorCode != 0).
+/// Uses pnputil to remove the device by instance ID.
+fn remove_broken_vdd_devices() -> io::Result<()> {
+    let output = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy", "Bypass",
+            "-Command",
+            r#"
+            $ErrorActionPreference = "Stop"
+            $devices = Get-CimInstance -ClassName Win32_PnPEntity -Filter "PNPClass = 'Display'" -ErrorAction Stop |
+                Where-Object { @($_.HardwareID) -contains 'Root\MttVDD' }
+            foreach ($d in $devices) {
+                if ($d.ConfigManagerErrorCode -ne 0) {
+                    Write-Host "Removing broken VDD device $($d.PNPDeviceID) (error $($d.ConfigManagerErrorCode))"
+                    pnputil /remove-device $d.PNPDeviceID
+                    if ($LASTEXITCODE -ne 0) { Write-Warning "Failed to remove $($d.PNPDeviceID) (exit $LASTEXITCODE)" }
+                }
+            }
+            "#,
+        ])
+        .output()?;
+    if !output.status.success() {
+        eprintln!(
+            "Warning: broken VDD cleanup reported non-zero exit: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(())
+}
+
 /// Ensure the driver device exists. This must only be called from the
 /// authenticated CONNECT request path, never from service startup or installer.
 pub fn ensure_installed() -> io::Result<()> {
     if crate::vdd_topology::query().present {
         return wait_for_control_pipe();
     }
+
+    // Clean up any broken devices from previous failed attempts before creating a fresh one.
+    let _ = remove_broken_vdd_devices();
 
     let program_files = std::env::var_os("ProgramFiles")
         .map(PathBuf::from)
@@ -42,7 +74,12 @@ pub fn ensure_installed() -> io::Result<()> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "staged nefconw.exe was not found"))?;
 
     let output = Command::new(&nefcon)
-        .args(["install", inf.to_string_lossy().as_ref(), r"Root\MttVDD"])
+        .args([
+            "install",
+            inf.to_string_lossy().as_ref(),
+            r"Root\MttVDD",
+            "--no-duplicates",
+        ])
         .output()?;
     if !output.status.success() {
         return Err(io::Error::new(
@@ -73,8 +110,6 @@ fn wait_for_control_pipe() -> io::Result<()> {
     let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
         if crate::vdd_control::set_display_count(0).is_ok() {
-            // Establish a known disconnected state before CONNECT requests one
-            // display. This also proves that the vendor pipe is actually ready.
             return Ok(());
         }
         thread::sleep(Duration::from_millis(250));
