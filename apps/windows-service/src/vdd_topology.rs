@@ -12,7 +12,7 @@ use windows_sys::Win32::{
         SetupDiGetDeviceRegistryPropertyW, SP_DEVINFO_DATA, DIGCF_ALLCLASSES,
         DIGCF_PRESENT,
     },
-    Foundation::{GetLastError, INVALID_HANDLE_VALUE},
+    Foundation::GetLastError,
     Graphics::Gdi::{EnumDisplayDevicesW, DISPLAY_DEVICEW, DISPLAY_DEVICE_ATTACHED_TO_DESKTOP},
 };
 
@@ -45,7 +45,7 @@ fn vdd_pnp_device_present() -> bool {
             DIGCF_PRESENT | DIGCF_ALLCLASSES,
         )
     };
-    if devices == INVALID_HANDLE_VALUE {
+    if devices == -1isize {
         return false;
     }
 
