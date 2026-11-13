@@ -36,6 +36,18 @@ fn display_count_command(count: u32) -> io::Result<Vec<u8>> {
     Ok(bytes.to_vec())
 }
 
+/// Send a PING probe to the upstream VDD control pipe without changing display state.
+///
+/// Used solely to test pipe availability. The write succeeds when the driver is
+/// ready to accept commands; no display-count mutation occurs.
+pub fn ping() -> io::Result<()> {
+    let payload = wide("PING");
+    let bytes = unsafe {
+        std::slice::from_raw_parts(payload.as_ptr().cast::<u8>(), payload.len() * 2)
+    };
+    send_pipe_bytes(bytes.to_vec())
+}
+
 /// Set the upstream VDD display count to zero (disconnect) or one (connect).
 ///
 /// The upstream protocol accepts one UTF-16 message per pipe connection and
@@ -44,6 +56,10 @@ fn display_count_command(count: u32) -> io::Result<Vec<u8>> {
 /// monitor. Callers must verify the resulting display topology separately.
 pub fn set_display_count(count: u32) -> io::Result<()> {
     let payload = display_count_command(count)?;
+    send_pipe_bytes(payload)
+}
+
+fn send_pipe_bytes(payload: Vec<u8>) -> io::Result<()> {
     let pipe_name = wide(PIPE_NAME);
     let mut last_error = None;
 
@@ -123,5 +139,15 @@ mod tests {
     fn supports_disconnect_and_rejects_unbounded_display_counts() {
         assert!(display_count_command(0).is_ok());
         assert_eq!(display_count_command(2).unwrap_err().kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn ping_emits_the_upstream_ping_message() {
+        let bytes = wide("PING");
+        let words = bytes.chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect::<Vec<_>>();
+        assert_eq!(String::from_utf16(&words[..words.len() - 1]).unwrap(), "PING");
+        assert_eq!(words.last(), Some(&0));
     }
 }
